@@ -13,7 +13,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BASE_REPO=${BASE_REPO:-https://github.com/MakrSas/ios-topaz.git}
 BASE_SHA=${BASE_SHA:-5095ac19dbdcf37b64b81fe443f4027ad51b84bf}
-PATCHSET_SHA256=${PATCHSET_SHA256:-7d3abbd09a5d407dd78ed8af65d09b0c98f89127c97692d45f0492d6c7367f59}
+PATCHSET_SHA256=${PATCHSET_SHA256:-c126bcefd8ee5d3500a03ecd71ccd414a11bae1921f6cf667ecea3b370ac9dd5}
 PYTHON=${PYTHON:-python3}
 DEST=${1:-baseline}
 

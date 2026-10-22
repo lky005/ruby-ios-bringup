@@ -15,7 +15,7 @@
   *
   * Boot arg: rubyusb=1 enables.  Default 0 keeps topaz/sweet builds safe;
   * the Qualcomm DWC3/ECM driver in sweet_usb.c is not used by ruby.
-@@ -114,6 +114,73 @@
+@@ -114,6 +114,74 @@
  #define GPIO_DO3        0x0130
  #define GPIO121_BIT     (1u << 25)
  
@@ -46,6 +46,7 @@
 +#define RUBY_TR_SEND    8
 +#define RUBY_TR_ADDR    9
 +#define RUBY_TR_CFG     10
++#define RUBY_TR_TX      11
 +
 +struct ruby_evt {
 +    uint32_t t;
@@ -89,7 +90,7 @@
  static inline uint32_t
  ruby_rd32(vm_offset_t base, uint32_t off)
  {
-@@ -126,6 +193,13 @@
+@@ -126,6 +194,13 @@
  ruby_wr32(vm_offset_t base, uint32_t off, uint32_t v)
  {
      *(volatile uint32_t *)(base + off) = v;
@@ -103,7 +104,7 @@
      __asm__ volatile("dsb sy" ::: "memory");
  }
  
-@@ -248,6 +322,354 @@
+@@ -248,6 +323,357 @@
      v |= DTM1_RG_VBUSVALID | DTM1_RG_AVALID;
      v &= ~DTM1_RG_SESSEND;
      ruby_wr32(phy, PHY_U2_DTM1, v);
@@ -204,6 +205,7 @@
 +    uint32_t total = len < wlen ? len : wlen;
 +    uint32_t sent = 0;
 +    uint32_t csr;
++    uint32_t spin = 0;
 +
 +    if (wlen == 0) {
 +        ruby_ep0_ack(mac, t, key, wlen);
@@ -222,7 +224,7 @@
 +        ruby_ep0_write_fifo(mac, data + sent, n);
 +        csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
 +        ruby_wr32(mac, EP0CSR_OFF, csr | EP0_TXPKTRDY);
-+        for (uint32_t spin = 0; spin < 1000; spin++) {
++        for (spin = 0; spin < 1000; spin++) {
 +            if (!(ruby_rd32(mac, EP0CSR_OFF) & EP0_TXPKTRDY))
 +                break;
 +            delay(10);
@@ -233,6 +235,8 @@
 +    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
 +    ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
 +    ruby_trace(t, RUBY_TR_SEND, key, total, wlen, sent);
++    ruby_trace(t, RUBY_TR_TX, key, csr,
++        spin >= 1000 ? 1 : 0, ruby_rd32(mac, EP0CSR_OFF));
 +}
 +
 +static const uint8_t *
@@ -458,7 +462,7 @@
  }
  
  void
-@@ -354,7 +776,8 @@
+@@ -354,7 +780,8 @@
      printf("RUBY USB: PHY dtm1 0x%08x acr3 0x%08x GPIO121 dir3 0x%08x do3 0x%08x\n",
          ruby_rd32(phy, PHY_U2_DTM1), ruby_rd32(phy, PHY_U2_ACR3),
          ruby_rd32(gpio, GPIO_DIR3), ruby_rd32(gpio, GPIO_DO3));
