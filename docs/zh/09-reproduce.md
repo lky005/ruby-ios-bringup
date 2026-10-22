@@ -26,14 +26,17 @@
 ```text
 base:     MakrSas/ios-topaz @ 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
 recipe:   ci/prepare-baseline.sh（不 vendor 上游树）
-patchset: cf4008e309cfa566e3df968592a2d3f3224a9b3d0813d6054326115fecc0a03f
-exec-data: e4823afb97360e24708184d09c0dc6c9f7280e33d5c4aefbeb901b3fa9b11e3e
+patchset: 16b8ddea008c4941a628f746e096f345eb9c2861d3a679339bd37ade78ec6abd
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-从 **Actions → xnu-0085 → Run workflow** 运行，或推送 `ci/`、`patches/`、
+这是 0086 USB P0 patchset（89 文件）。0085 真实触摸内核的 exec-data 参考
+`e4823afb...` 只作为历史记录；`config/0086.env` 在 0086 内核上机前不设置
+exec-data 门禁。
+
+从 **Actions → xnu-0086 → Run workflow** 运行，或推送 `ci/`、`patches/`、
 `config/`、workflow 的改动。产物：`xnu-kernel`、`xnu-buildtree`。
 
 ## Host pipeline

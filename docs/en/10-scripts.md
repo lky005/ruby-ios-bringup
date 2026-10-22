@@ -25,14 +25,15 @@ because a simpler path silently failed.
 | `scripts/fetch-base.sh` | clone a pinned baseline for inspection | read-only/network | optional |
 | `scripts/verify-local.py` | host-only checks | read-only | passes locally |
 | `scripts/check-bundle.py` | verify artifact hashes before flash | read-only | config-driven |
-| `.github/workflows/xnu.yml` | reproduce the 0084 kernel | CI build | recipe + patchset hash |
+| `.github/workflows/xnu.yml` | build the 0086 kernel | CI build | recipe + patchset hash |
 | `ci/prepare-baseline.sh` | fetch, remove/add patches, verify hash | network + temp write | tested locally |
-| `ci/patchset_hash.py` | canonical patchset hash (0085: 88 files) | read-only | matches recipe |
+| `ci/patchset_hash.py` | canonical patchset hash (0086: 89 files) | read-only | matches recipe |
 | `ci/baseline-changes.patch` | small 0010/0012 change | data | hash pinned |
 | `scripts/build-payload.sh` | payload from kernel+ADT+cmdline | network + offline write | tested |
 | `tools/image/pack_boot.py` | deterministic 128 MiB boot image | offline write | tested |
 | `tools/image/boot_layout.py` | compare rebuilt vs golden layout | read-only | tested |
 | `scripts/test-pipeline.sh` | payload → pack → layout (0084 milestone) | temp writes | passes for 0084; 0085 uses the commands in `09-reproduce` |
+| `config/0086.env`, `0086-boot.cmdline` | USB P0 build/test state (`rubyusb=1`) | data | run/pin checked |
 | `config/0085.env`, `0085-boot.cmdline` | provenance (real touch) | data | run/pin checked |
 | `config/0084.env`, `0084-boot.cmdline` | previous milestone (synthetic swipe) | data | historical |
 
@@ -133,13 +134,13 @@ python src/ufs-probe/build_ufs_full.py --base <stock.img> \
 **Why:** Upstream has no license file, so the tree is not vendored and no full
 delta is published. The recipe fetches the pinned commit, removes the topaz
 patches, adds this project's patches, applies the small 0010/0012 change,
-normalizes LF, and verifies the canonical 88-file patchset hash (0085) before building.
+normalizes LF, and verifies the canonical 89-file patchset hash (0086) before building.
 
 - **Does not:** flash, pack an image, follow a moving branch tip, or publish
   the full upstream delta.
 - **Failure modes:** missing topaz patch → stop; 0010/0012 context mismatch →
   `git apply` fails; patchset mismatch → stop before the build.
-- **Pins:** see `config/0085.env` and `ci/README.md`.
+- **Pins:** see `config/0086.env` and `ci/README.md`.
 
 ## `scripts/build-payload.sh`
 

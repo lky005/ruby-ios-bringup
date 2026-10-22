@@ -11,12 +11,13 @@
 - `patches/`：0080 UFS、0084 autoswipe、历史 0081-0083。
 - `ci/prepare-baseline.sh`：拉固定基线、删 topaz 补丁、加本项目补丁、应用
   0010/0012 小改动。
-- `ci/patchset_hash.py`：patchset 规范哈希（0085：88 文件）。
+- `ci/patchset_hash.py`：patchset 规范哈希（0086：89 文件）。
 - `ci/baseline-changes.patch`：只含 0010/0012 小改动。
 - `tools/image/`、`tools/twrp/`、`scripts/check-bundle.py`：离线检查。
 - `scripts/build-payload.sh`、`tools/image/pack_boot.py`、
   `tools/image/boot_layout.py`、`scripts/test-pipeline.sh`：host 管线。
-- `config/0085.env`：工件 hash 和 boot cmdline（`0084.env` 为上一里程碑）。
+- `config/0086.env`：USB P0 构建/测试 cmdline；`config/0085.env` 保留 0085
+  工件 hash 和 boot cmdline（`0084.env` 为上一里程碑）。
 
 ## 不公开什么
 
@@ -34,7 +35,7 @@
 | 固定 topaz 删除清单 | 补丁残留 |
 | recipe 失败即停 | 文件缺失或 0010/0012 上下文变化 |
 | LF 归一化 | Windows/macOS 换行漂移 |
-| `PATCHSET_SHA256=cf4008e3...` | patchset 内容变化 |
+| `PATCHSET_SHA256=16b8ddea...` | patchset 内容变化 |
 | `ci/baseline-changes.patch` SHA | 基线改动漂移 |
 | `check-bundle.py` | kernel/boot/root/ICL/cmdline 不对 |
 | Actions 按 SHA 固定 | CI 供应链漂移 |

@@ -24,14 +24,15 @@
 | `scripts/fetch-base.sh` | 拉固定基线供检查 | 只读/网络 | 可选 |
 | `scripts/verify-local.py` | 主机检查 | 只读 | 本地通过 |
 | `scripts/check-bundle.py` | 刷前核对工件 hash | 只读 | 由 config 驱动 |
-| `.github/workflows/xnu.yml` | 复现 0084 内核 | CI 构建 | recipe + patchset 哈希 |
+| `.github/workflows/xnu.yml` | 构建 0086 内核 | CI 构建 | recipe + patchset 哈希 |
 | `ci/prepare-baseline.sh` | 拉基线、删/加补丁、校验哈希 | 网络 + 临时写 | 本地已测 |
-| `ci/patchset_hash.py` | patchset 规范哈希（0085：88 文件） | 只读 | 与 recipe 一致 |
+| `ci/patchset_hash.py` | patchset 规范哈希（0086：89 文件） | 只读 | 与 recipe 一致 |
 | `ci/baseline-changes.patch` | 0010/0012 小改动 | 数据 | 哈希固定 |
 | `scripts/build-payload.sh` | 从 kernel+ADT+cmdline 生成 payload | 网络 + 离线写 | 已测 |
 | `tools/image/pack_boot.py` | 确定性 128 MiB boot 镜像 | 离线写 | 已测 |
 | `tools/image/boot_layout.py` | 重建镜像 vs golden 布局对比 | 只读 | 已测 |
 | `scripts/test-pipeline.sh` | payload → pack → layout（0084 里程碑） | 临时写 | 0084 通过；0085 用 `09-reproduce` 的三条命令 |
+| `config/0086.env`、`0086-boot.cmdline` | USB P0 构建/测试状态（`rubyusb=1`） | 数据 | run/pin 检查 |
 | `config/0085.env`、`0085-boot.cmdline` | 来源记录（真实触摸） | 数据 | run/pin 检查 |
 | `config/0084.env`、`0084-boot.cmdline` | 上一里程碑（合成上滑） | 数据 | 历史 |
 
@@ -127,12 +128,12 @@ python src/ufs-probe/build_ufs_full.py --base <stock.img> \
 
 **初衷：** 上游没有 LICENSE，不能 vendor，也不公开完整 delta。recipe 拉固定
 commit、删 topaz 补丁、加本项目补丁、应用 0010/0012 小改动、统一 LF，并在
-构建前校验 88 文件 patchset 哈希（0085）。
+构建前校验 89 文件 patchset 哈希（0086）。
 
 - **不做：** 不刷机、不打包镜像、不跟随移动分支、不公开完整上游 delta。
 - **失败模式：** topaz 补丁缺失 → 停止；0010/0012 上下文不匹配 → `git apply`
   失败；patchset 不匹配 → 编译前停止。
-- **pin：** 见 `config/0085.env` 和 `ci/README.md`。
+- **pin：** 见 `config/0086.env` 和 `ci/README.md`。
 
 ## `scripts/build-payload.sh`
 

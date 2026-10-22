@@ -1,8 +1,9 @@
-# Build provenance (0085)
+# Build provenance (0086)
 
-`.github/workflows/xnu.yml` reproduces the kernel that first provided real
-Goodix touch on 2026-10-22 (harness commit `8716a06`) **without vendoring the
-upstream tree**.
+`.github/workflows/xnu.yml` builds the 0086 ruby USB P0 kernel **without
+vendoring the upstream tree**. 0086 extends the 0085 real-touch patchset with
+`patches/0086-ruby-usb-p0.patch`; the USB probe is inert unless the boot
+arguments contain `rubyusb=1`.
 
 ## Recipe
 
@@ -10,23 +11,23 @@ upstream tree**.
 2. Remove the 24 topaz-specific patches by name
    (`ci/topaz-patches-to-remove.txt`).
 3. Add this project's patches: 0080 UFS, 0084 autoswipe, 0085 Goodix SPI
-   touch, and historical 0081-0083.
+   touch, 0086 USB P0, and historical 0081-0083.
 4. Apply `ci/baseline-changes.patch`, the small 0010/0012 change needed for
    the ruby framebuffer addresses.
 5. Normalize every `.patch`/`.sh` to LF.
 6. Compute the canonical patchset hash over the sorted per-file SHA256 values
    and refuse to build unless it equals
-   `cf4008e309cfa566e3df968592a2d3f3224a9b3d0813d6054326115fecc0a03f`
-   (88 files). This is the same 88-file patchset that built the booted
-   0085 kernel in the harness.
+   `16b8ddea008c4941a628f746e096f345eb9c2861d3a679339bd37ade78ec6abd`
+   (89 files).
 7. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
    build on `macos-14` with Xcode 15.0.1.
-8. Hash the built Mach-O with `ci/kernel_hash.py`. The gate compares the
-   **exec-data** hash (`__TEXT_EXEC` plus the data segments, excluding
-   `__TEXT` cstrings and `__LINKEDIT`) with the booted artifact's
-   `e4823afb...`. Full-file hashes may differ between checkouts because of
-   DWARF/path metadata; the patchset hash and the exec-data hash are the
-   reproducibility gates.
+8. Hash the built Mach-O with `ci/kernel_hash.py`. When
+   `KERNEL_EXPECT_EXEC_DATA` is set, the gate compares the **exec-data** hash
+   (`__TEXT_EXEC` plus the data segments, excluding `__TEXT` cstrings and
+   `__LINKEDIT`). `config/0086.env` leaves it empty until a 0086 kernel boots,
+   so the first run records the hashes without gating. Full-file hashes may
+   differ between checkouts because of DWARF/path metadata; the patchset hash
+   and, once known, the exec-data hash are the reproducibility gates.
 
 The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 
@@ -35,19 +36,17 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 | Item | Value |
 |---|---|
 | Baseline | `MakrSas/ios-topaz` @ `5095ac19dbdcf37b64b81fe443f4027ad51b84bf` |
-| Patchset | `cf4008e309cfa566e3df968592a2d3f3224a9b3d0813d6054326115fecc0a03f` (88 files) |
+| Patchset | `16b8ddea008c4941a628f746e096f345eb9c2861d3a679339bd37ade78ec6abd` (89 files) |
 | 0010/0012 change | `ci/baseline-changes.patch`, SHA256 `1edb6633...` |
 | XNU harness | `blacktop/darwin-xnu-build` @ `663906528d1cd5ea8fde7de6f16de73db9511549` |
 | Runner | `macos-14`, Xcode 15.0.1, macOS 13.5 xnu |
 | Config | `DEVELOPMENT`, `MACHINE_CONFIG=SWEET`, `-mcpu=cortex-a55` |
-| Booted kernel | `9eb9acac...` (harness, same patchset) |
-| Booted kernel exec-data | `e4823afb...` (gate) |
-| Booted boot image | `ace60d16...` |
-| CI run (2026-10-22) | `39694456200`; kernel full `904e10df...`, exec-data `e4823afb...` (matches), image `54d1b306...` (packed, not flashed) |
+| 0085 booted kernel | `9eb9acac...`; exec-data `e4823afb...` (historical reference) |
+| 0085 booted boot image | `ace60d16...` |
+| 0086 booted kernel | pending device test |
 
 The reference SHAs are provenance, not a byte-for-byte guarantee for a future
-run. The patchset hash and the exec-data hash are the gates; record the actual
-full artifact hash for each run in `config/0085.env`.
+run. Record the actual artifact hash for each run in `config/0086.env`.
 
 ## Local check
 
@@ -63,7 +62,7 @@ hash is the same on Windows and macOS. The target directory must not exist.
 ## Scope
 
 The workflow builds the **kernel** only. The shim, ADT and 128 MiB boot image
-packing are separate; see `src/bringup/` and `config/0085.env`. Apple firmware,
+packing are separate; see `src/bringup/` and `config/0086.env`. Apple firmware,
 the iOS root and device-side boot images are not included.
 
 ## History and licensing

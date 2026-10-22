@@ -28,14 +28,17 @@ build unless the canonical patchset hash matches.
 ```text
 base:     MakrSas/ios-topaz @ 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
 recipe:   ci/prepare-baseline.sh (no upstream tree vendored)
-patchset: cf4008e309cfa566e3df968592a2d3f3224a9b3d0813d6054326115fecc0a03f
-exec-data: e4823afb97360e24708184d09c0dc6c9f7280e33d5c4aefbeb901b3fa9b11e3e
+patchset: 16b8ddea008c4941a628f746e096f345eb9c2861d3a679339bd37ade78ec6abd
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-Run it from **Actions → xnu-0085 → Run workflow**, or push a change under
+This is the 0086 USB P0 patchset (89 files). The 0085 real-touch kernel's
+exec-data reference `e4823afb...` remains historical; `config/0086.env` leaves
+the gate empty until a 0086 kernel boots.
+
+Run it from **Actions → xnu-0086 → Run workflow**, or push a change under
 `ci/`, `patches/`, `config/` or the workflow. Artifacts: `xnu-kernel` and
 `xnu-buildtree`.
 

@@ -12,13 +12,13 @@ documented and theoretical, not an independently reproduced device guarantee.
 - `patches/` — 0080 UFS, 0084 autoswipe, historical 0081-0083.
 - `ci/prepare-baseline.sh` — fetch the pinned baseline, remove the topaz
   patches, add this project's patches, apply the small 0010/0012 change.
-- `ci/patchset_hash.py` — canonical patchset hash (0085: 88 files).
+- `ci/patchset_hash.py` — canonical patchset hash (0086: 89 files).
 - `ci/baseline-changes.patch` — the small 0010/0012 change only.
 - `tools/image/`, `tools/twrp/`, `scripts/check-bundle.py` — offline checks.
 - `scripts/build-payload.sh`, `tools/image/pack_boot.py`,
   `tools/image/boot_layout.py`, `scripts/test-pipeline.sh` — host pipeline.
-- `config/0085.env` — artifact hashes and the boot cmdline (`0084.env` is the
-  previous milestone).
+- `config/0086.env` — USB P0 build/test cmdline; `config/0085.env` holds the
+  0085 artifact hashes and boot cmdline (`0084.env` is the previous milestone).
 
 ## What is not published
 
@@ -36,7 +36,7 @@ documented and theoretical, not an independently reproduced device guarantee.
 | Fixed topaz deletion list | accidental patch leftovers |
 | Fail-closed recipe | missing files or changed 0010/0012 context |
 | LF normalization | Windows/macOS line-ending drift |
-| `PATCHSET_SHA256=cf4008e3...` | any patchset content change |
+| `PATCHSET_SHA256=16b8ddea...` | any patchset content change |
 | `ci/baseline-changes.patch` SHA | baseline change drift |
 | `check-bundle.py` | wrong kernel/boot/root/ICL/cmdline |
 | Pinned Actions by SHA | CI supply-chain drift |

@@ -283,7 +283,7 @@ def read_env(path):
 
 
 def check_ci_pins():
-    env_path = os.path.join(ROOT, "config", "0085.env")
+    env_path = os.path.join(ROOT, "config", "0086.env")
     wf_path = os.path.join(ROOT, ".github", "workflows", "xnu.yml")
     changes_path = os.path.join(ROOT, "ci", "baseline-changes.patch")
     recipe_path = os.path.join(ROOT, "ci", "prepare-baseline.sh")
@@ -292,7 +292,7 @@ def check_ci_pins():
 
     required = (env_path, wf_path, changes_path, recipe_path, remove_path)
     if not all(os.path.exists(p) for p in required):
-        fail("missing config/0085.env, workflow or recipe files")
+        fail("missing config/0086.env, workflow or recipe files")
         return
     if os.path.exists(delta_path):
         fail("ci/ruby-baseline.diff is present; option B requires the recipe only")
@@ -310,18 +310,22 @@ def check_ci_pins():
         fail("workflow does not contain pins: " + ", ".join(missing))
         return
 
-    for key in ("KERNEL_SHA256", "IMAGE_SHA256", "ROOT_SHA256",
-                "ICL_ORIG_SHA256", "ICL_PATCHED_SHA256", "BOOT_CMDLINE",
-                "SHIM_SHA256", "PAYLOAD_SHA256", "ADT_SHA256",
-                "BASE_BOOT_SHA256"):
-        if not pins.get(key):
-            fail(f"config/0085.env is missing {key}")
-            return
+    # Artifact pins are required only once a booted reference exists.
+    if pins.get("KERNEL_EXPECT_EXEC_DATA"):
+        for key in ("KERNEL_SHA256", "IMAGE_SHA256", "ROOT_SHA256",
+                    "ICL_ORIG_SHA256", "ICL_PATCHED_SHA256", "BOOT_CMDLINE",
+                    "SHIM_SHA256", "PAYLOAD_SHA256", "ADT_SHA256",
+                    "BASE_BOOT_SHA256"):
+            if not pins.get(key):
+                fail(f"config/0086.env is missing {key}")
+                return
 
-    cmdline_path = os.path.join(ROOT, pins["BOOT_CMDLINE"])
-    if not os.path.exists(cmdline_path):
-        fail(f"missing cmdline file: {pins['BOOT_CMDLINE']}")
-        return
+    cmdline_ref = pins.get("BOOT_CMDLINE")
+    if cmdline_ref:
+        cmdline_path = os.path.join(ROOT, cmdline_ref)
+        if not os.path.exists(cmdline_path):
+            fail(f"missing cmdline file: {cmdline_ref}")
+            return
 
     actual = sha256(open(changes_path, "rb").read())
     expected = pins.get("BASELINE_CHANGES_SHA256", "").lower()
@@ -329,7 +333,7 @@ def check_ci_pins():
         fail(f"baseline-changes sha256 {actual} != {expected}")
         return
     if not expected:
-        warn("BASELINE_CHANGES_SHA256 is not set in config/0085.env")
+        warn("BASELINE_CHANGES_SHA256 is not set in config/0086.env")
 
     if "prepare-baseline.sh" not in workflow:
         fail("workflow does not call ci/prepare-baseline.sh")

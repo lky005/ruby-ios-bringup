@@ -13,6 +13,11 @@ milestone (synthetic autoswipe). They are provenance, not universal defaults:
   drives the UI.
 - `sweetfb_hz=30` and `sweetfb_noconsole=1` are display/debug choices.
 
+`0086.env` and `0086-boot.cmdline` are the USB P0 build/test state: the
+89-file 0086 patchset, `rubyusb=1` in the test cmdline, and no booted kernel
+pin yet. `rubyusb=0` (the default when the argument is absent) keeps the probe
+inert.
+
 The kernel SHA and image SHA in `0085.env` are from the build that booted.
 A CI rebuild is not promised to be byte-identical; the canonical patchset hash
 and the Mach-O exec-data hash are the gates. The boot image itself is not

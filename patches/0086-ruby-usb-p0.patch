@@ -1,0 +1,393 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
++bsd/dev/ruby_usb.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -54,6 +54,7 @@ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_goodix_spi_init(void);
+ extern void sweet_usb_probe(void);
++extern void ruby_usb_probe(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -701,6 +702,7 @@ sweet_ufs_init(void)
+ 		printf("SWEET UFS: keys/touch/USB skipped (ruby, sweethw=0)\n");
+ 	}
+ 	sweet_goodix_spi_init();
++	ruby_usb_probe();
+ 	return 0;
+ }
+ 
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/ruby_usb.c
+@@ -0,0 +1,360 @@
++/*
++ * Ruby (MT6877) USB P0.
++ *
++ * IP power/reset + U2/U3 PHY + IDDIG/D+ pull-up + PS5169 + device
++ * soft-connect.  This is intentionally not a USB stack: no EP0, no IRQ,
++ * no DMA.  It leaves the controller soft-connected so the host can see the
++ * port attach; descriptor requests will fail until a gadget layer exists.
++ *
++ * Boot arg: rubyusb=1 enables.  Default 0 keeps topaz/sweet builds safe;
++ * the Qualcomm DWC3/ECM driver in sweet_usb.c is not used by ruby.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++
++#define IPPC_PA      0x11203e00UL
++#define MTU3_PA      0x11201000UL
++#define PHY_PA       0x11e40000UL
++#define GPIO_PA      0x10005000UL
++#define IFRAO_PA     0x10001000UL
++
++#define IPPC_SIZE    0x100
++#define MTU3_SIZE    0x3000
++#define PHY_SIZE     0x2000
++#define GPIO_SIZE    0x1000
++#define IFRAO_SIZE   0x1000
++
++/* IPPC */
++#define C0_SW_RST    (1u << 0)
++#define C2_DEV_PDN   (1u << 0)
++#define U3_DIS       (1u << 0)
++#define U3_PDN       (1u << 1)
++#define U3_HOST_SEL  (1u << 2)
++#define U3_DUAL_MODE (1u << 7)
++#define U2_DIS       (1u << 0)
++#define U2_PDN       (1u << 1)
++#define U2_HOST      (1u << 2)
++#define U2_OTG_SEL   (1u << 7)
++#define DEV_SW_RST   (1u << 0)
++
++#define STS_SYSPLL   (1u << 0)
++#define STS_REF_RST  (1u << 8)
++#define STS_SYS125   (1u << 10)
++#define STS_U3_RST   (1u << 16)
++#define STS2_U2_RST  (1u << 0)
++
++/* MAC */
++#define USB3_CONFIG  (MTU3_PA + 0x141c)
++#define DEVICE_CONF  (MTU3_PA + 0x1800)
++#define MISC_CTRL    (MTU3_PA + 0x0c84)
++#define PM_CTRL      (MTU3_PA + 0x2404)
++#define USB20_OP     (MTU3_PA + 0x2460)
++#define LV1IECR      (MTU3_PA + 0x000c)
++
++/* PHY banks relative to PHY_PA (U2 COM +0x300; U3 +0x700..) */
++#define PHY_U2_COM   0x0300
++#define PHY_U2_ACR3  0x031c
++#define PHY_U2_ACR0  0x0300
++#define PHY_U2_ACR4  0x0320
++#define PHY_U2_ACR5  0x0314
++#define PHY_U2_ACR6  0x0318
++#define PHY_U2_DTM0  0x0368
++#define PHY_U2_DTM1  0x036c
++#define PHY_U2_DMON1 0x0374
++#define PHY_U3_SPLLC 0x0700
++#define PHY_U3_CHIP  0x0800
++#define PHY_U3_PHYA  0x0b00
++#define PHY_U3_PHYA_DA0 (PHY_U3_PHYA + 0x100)
++
++/* U2 PHY bits (phy-mtk-tphy.c, tphy v2) */
++#define DTM0_FORCE_UART_EN  (1u << 26)
++#define DTM0_FORCE_SUSPENDM (1u << 18)
++#define DTM0_RG_SUSPENDM    (1u << 3)
++#define DTM0_FORCE_DATAIN   (1u << 23)
++#define DTM0_FORCE_DM_PD    (1u << 21)
++#define DTM0_FORCE_DP_PD    (1u << 20)
++#define DTM0_FORCE_XCVRSEL  (1u << 19)
++#define DTM0_FORCE_TERMSEL  (1u << 17)
++#define DTM0_RG_DMPD        (1u << 7)
++#define DTM0_RG_DPPD        (1u << 6)
++#define DTM0_RG_XCVRSEL     (0x3u << 4)
++#define DTM0_RG_TERMSEL     (1u << 2)
++#define DTM0_RG_DATAIN      (0xfu << 10)
++#define DTM0_PART_MASK      (DTM0_FORCE_DATAIN | DTM0_FORCE_DM_PD | \
++                             DTM0_FORCE_DP_PD | DTM0_FORCE_XCVRSEL | \
++                             DTM0_FORCE_SUSPENDM | DTM0_FORCE_TERMSEL | \
++                             DTM0_RG_DMPD | DTM0_RG_DPPD | DTM0_RG_TERMSEL)
++
++#define DTM1_FORCE_IDDIG    (1u << 9)
++#define DTM1_RG_IDDIG       (1u << 1)
++#define DTM1_RG_UART_EN     (1u << 16)
++#define DTM1_RG_VBUSVALID   (1u << 5)
++#define DTM1_RG_AVALID      (1u << 2)
++#define DTM1_RG_SESSEND     (1u << 4)
++
++#define ACR0_INTR_EN        (1u << 5)
++#define ACR5_HS_100U_U3_EN  (1u << 11)
++#define ACR4_GPIO_CTL       (1u << 9)
++#define ACR4_GPIO_MODE      (1u << 8)
++#define ACR6_BC11_SW_EN     (1u << 23)
++#define ACR6_OTG_VBUSCMP_EN (1u << 20)
++#define ACR3_PUPD_BIST_EN   (1u << 12)
++#define ACR3_EN_PU_DP       (1u << 9)
++
++/* PS5169 enable: GPIO121, bank 3 */
++#define GPIO_PINMUX_121 0x03f0
++#define GPIO_DIR3       0x0030
++#define GPIO_DO3        0x0130
++#define GPIO121_BIT     (1u << 25)
++
++static inline uint32_t
++ruby_rd32(vm_offset_t base, uint32_t off)
++{
++    uint32_t v = *(volatile uint32_t *)(base + off);
++    __asm__ volatile("dmb oshld" ::: "memory");
++    return v;
++}
++
++static inline void
++ruby_wr32(vm_offset_t base, uint32_t off, uint32_t v)
++{
++    *(volatile uint32_t *)(base + off) = v;
++    __asm__ volatile("dsb sy" ::: "memory");
++}
++
++static int
++ruby_usb_wait_sts(vm_offset_t ippc, uint32_t *s1_out, uint32_t *s2_out)
++{
++    uint32_t want = STS_SYSPLL | STS_REF_RST | STS_SYS125 | STS_U3_RST;
++    uint32_t s1 = 0, s2 = 0;
++
++    for (int i = 0; i < 2000; i++) {
++        s1 = ruby_rd32(ippc, 0x10);
++        s2 = ruby_rd32(ippc, 0x14);
++        if ((s1 & want) == want && (s2 & STS2_U2_RST))
++            break;
++        delay(100);
++    }
++    *s1_out = s1;
++    *s2_out = s2;
++    return ((s1 & want) == want && (s2 & STS2_U2_RST)) ? 0 : -1;
++}
++
++static void
++ruby_usb_u3_phy_on(vm_offset_t phy)
++{
++    uint32_t v;
++
++    v = ruby_rd32(phy, PHY_U3_PHYA + 0x04);       /* RG_SSUSB_VA_ON */
++    v |= (1u << 29);
++    ruby_wr32(phy, PHY_U3_PHYA + 0x04, v);
++
++    v = ruby_rd32(phy, PHY_U3_SPLLC + 0x18);      /* XTAL RX */
++    v |= (1u << 9) | (1u << 8);
++    ruby_wr32(phy, PHY_U3_SPLLC + 0x18, v);
++
++    v = ruby_rd32(phy, PHY_U3_PHYA_DA0);          /* XTAL_EXT_EN_U3 */
++    v &= ~(0x3u << 10);
++    v |= (2u << 10);
++    ruby_wr32(phy, PHY_U3_PHYA_DA0, v);
++
++    v = ruby_rd32(phy, PHY_U3_CHIP + 0x0c);       /* release IP reset */
++    v &= ~((1u << 31) | (1u << 29));
++    ruby_wr32(phy, PHY_U3_CHIP + 0x0c, v);
++
++    v = ruby_rd32(phy, PHY_U3_CHIP + 0x10);       /* release PHYD reset */
++    v &= ~((1u << 25) | (1u << 24));
++    ruby_wr32(phy, PHY_U3_CHIP + 0x10, v);
++}
++
++static void
++ruby_usb_u2_phy_on(vm_offset_t phy)
++{
++    uint32_t v;
++
++    /* u2_phy_instance_init (tphy v2, generic-tphy-v2). */
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~(DTM0_FORCE_UART_EN | DTM0_FORCE_SUSPENDM);
++    v |= (1u << 4);                              /* XCVRSEL = 1 */
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    v = ruby_rd32(phy, PHY_U2_DTM1);
++    v &= ~DTM1_RG_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR0);
++    v |= ACR0_INTR_EN;
++    ruby_wr32(phy, PHY_U2_ACR0, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR5);
++    v &= ~ACR5_HS_100U_U3_EN;
++    ruby_wr32(phy, PHY_U2_ACR5, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR4);
++    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
++    ruby_wr32(phy, PHY_U2_ACR4, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);
++    v &= ~(ACR6_BC11_SW_EN | 0xfu);
++    v |= 2u;                                     /* SQTH = 2 */
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++
++    /* u2_phy_instance_power_on. */
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v |= DTM0_FORCE_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_RG_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v |= DTM0_RG_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    delay(30);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_FORCE_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_RG_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_FORCE_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM1);
++    v &= ~DTM1_RG_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++    v = ruby_rd32(phy, PHY_U2_ACR4);
++    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
++    ruby_wr32(phy, PHY_U2_ACR4, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_FORCE_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~(DTM0_RG_XCVRSEL | DTM0_RG_DATAIN | DTM0_PART_MASK);
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_ACR6);
++    v &= ~ACR6_BC11_SW_EN;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++    v = ruby_rd32(phy, PHY_U2_ACR6);
++    v |= ACR6_OTG_VBUSCMP_EN;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++    v = ruby_rd32(phy, PHY_U2_DTM1);
++    v |= DTM1_RG_VBUSVALID | DTM1_RG_AVALID;
++    v &= ~DTM1_RG_SESSEND;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++}
++
++void
++ruby_usb_probe(void)
++{
++    int enable = 0;
++    vm_offset_t ippc, mac, phy, gpio, ifrao;
++    uint32_t c0, c2, u3, u2, rst;
++    uint32_t s1, s2, v;
++
++    PE_parse_boot_argn("rubyusb", &enable, sizeof(enable));
++    if (enable != 1) {
++        printf("RUBY USB: disabled (rubyusb=%d)\n", enable);
++        return;
++    }
++
++    printf("RUBY USB: probe start (P8 sequence)\n");
++
++    ippc = ml_io_map(IPPC_PA, IPPC_SIZE);
++    mac = ml_io_map(MTU3_PA, MTU3_SIZE);
++    phy = ml_io_map(PHY_PA, PHY_SIZE);
++    gpio = ml_io_map(GPIO_PA, GPIO_SIZE);
++    ifrao = ml_io_map(IFRAO_PA, IFRAO_SIZE);
++    if (ippc == 0 || mac == 0 || phy == 0 || gpio == 0 || ifrao == 0) {
++        printf("RUBY USB: mmio map failed\n");
++        return;
++    }
++
++    if (ruby_rd32(ifrao, 0xac) & (1u << 1)) {
++        printf("RUBY USB: SSUSB clock gated; skipped\n");
++        return;
++    }
++
++    c0 = ruby_rd32(ippc, 0x00);
++    c2 = ruby_rd32(ippc, 0x08);
++    u3 = ruby_rd32(ippc, 0x30);
++    u2 = ruby_rd32(ippc, 0x50);
++    rst = ruby_rd32(ippc, 0x98);
++
++    /* Global IP reset pulse, then release it. */
++    ruby_wr32(ippc, 0x00, c0 | C0_SW_RST);
++    delay(200);
++    ruby_wr32(ippc, 0x00, c0 & ~C0_SW_RST);
++    delay(200);
++
++    /* Device IP on; U2/U3 ports enabled; OTG/dual. */
++    ruby_wr32(ippc, 0x08, c2 & ~C2_DEV_PDN);
++    u3 = (u3 & ~(U3_DIS | U3_PDN | U3_HOST_SEL)) | U3_DUAL_MODE;
++    u2 = (u2 & ~(U2_DIS | U2_PDN | U2_HOST)) | U2_OTG_SEL;
++    ruby_wr32(ippc, 0x30, u3);
++    ruby_wr32(ippc, 0x50, u2);
++
++    ruby_wr32(ippc, 0x98, rst | DEV_SW_RST);
++    delay(200);
++    ruby_wr32(ippc, 0x98, rst & ~DEV_SW_RST);
++
++    if (ruby_usb_wait_sts(ippc, &s1, &s2) != 0)
++        printf("RUBY USB: IPPC sts timeout (s1=0x%08x s2=0x%08x)\n", s1, s2);
++    else
++        printf("RUBY USB: IPPC ready (s1=0x%08x s2=0x%08x)\n", s1, s2);
++
++    ruby_usb_u3_phy_on(phy);
++    ruby_usb_u2_phy_on(phy);
++    delay(1000);
++
++    /* Device PHY mode: IDDIG + D+ pull-up. */
++    v = ruby_rd32(phy, PHY_U2_DTM1);
++    v |= DTM1_FORCE_IDDIG | DTM1_RG_IDDIG;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR3);
++    v |= ACR3_PUPD_BIST_EN | ACR3_EN_PU_DP;
++    ruby_wr32(phy, PHY_U2_ACR3, v);
++
++    /* PS5169 enable on GPIO121. */
++    v = ruby_rd32(gpio, GPIO_PINMUX_121);
++    v &= ~(0xfu << 4);
++    ruby_wr32(gpio, GPIO_PINMUX_121, v);
++    v = ruby_rd32(gpio, GPIO_DIR3);
++    v |= GPIO121_BIT;
++    ruby_wr32(gpio, GPIO_DIR3, v);
++    v = ruby_rd32(gpio, GPIO_DO3);
++    v |= GPIO121_BIT;
++    ruby_wr32(gpio, GPIO_DO3, v);
++
++    /* MAC: high-speed, force VBUS, device config, soft-connect. */
++    ruby_wr32(mac, LV1IECR - MTU3_PA, ~0u);
++    v = ruby_rd32(mac, USB3_CONFIG - MTU3_PA);
++    ruby_wr32(mac, USB3_CONFIG - MTU3_PA, v & ~(1u << 0));
++    v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
++    ruby_wr32(mac, PM_CTRL - MTU3_PA, v | (1u << 5));
++    ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 0);
++    v = ruby_rd32(ippc, 0x50);
++    ruby_wr32(ippc, 0x50, v & ~U2_OTG_SEL);
++    v = ruby_rd32(mac, MISC_CTRL - MTU3_PA);
++    ruby_wr32(mac, MISC_CTRL - MTU3_PA, v | 0x3u);
++    v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
++    ruby_wr32(mac, PM_CTRL - MTU3_PA, v | (1u << 6) | (1u << 0));
++    delay(2000);
++
++    printf("RUBY USB: OTG 0x%08x PM 0x%08x MISC 0x%08x OP 0x%08x\n",
++        ruby_rd32(ippc, 0x18), ruby_rd32(mac, PM_CTRL - MTU3_PA),
++        ruby_rd32(mac, MISC_CTRL - MTU3_PA), ruby_rd32(mac, USB20_OP - MTU3_PA));
++    printf("RUBY USB: PHY dtm1 0x%08x acr3 0x%08x GPIO121 dir3 0x%08x do3 0x%08x\n",
++        ruby_rd32(phy, PHY_U2_DTM1), ruby_rd32(phy, PHY_U2_ACR3),
++        ruby_rd32(gpio, GPIO_DIR3), ruby_rd32(gpio, GPIO_DO3));
++    printf("RUBY USB: soft-connect left on (no EP0/IRQ/DMA)\n");
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
