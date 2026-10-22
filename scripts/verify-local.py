@@ -283,7 +283,7 @@ def read_env(path):
 
 
 def check_ci_pins():
-    env_path = os.path.join(ROOT, "config", "0086.env")
+    env_path = os.path.join(ROOT, "config", "0087.env")
     wf_path = os.path.join(ROOT, ".github", "workflows", "xnu.yml")
     changes_path = os.path.join(ROOT, "ci", "baseline-changes.patch")
     recipe_path = os.path.join(ROOT, "ci", "prepare-baseline.sh")
@@ -292,7 +292,7 @@ def check_ci_pins():
 
     required = (env_path, wf_path, changes_path, recipe_path, remove_path)
     if not all(os.path.exists(p) for p in required):
-        fail("missing config/0086.env, workflow or recipe files")
+        fail("missing config/0087.env, workflow or recipe files")
         return
     if os.path.exists(delta_path):
         fail("ci/ruby-baseline.diff is present; option B requires the recipe only")
@@ -317,7 +317,7 @@ def check_ci_pins():
                     "SHIM_SHA256", "PAYLOAD_SHA256", "ADT_SHA256",
                     "BASE_BOOT_SHA256"):
             if not pins.get(key):
-                fail(f"config/0086.env is missing {key}")
+                fail(f"config/0087.env is missing {key}")
                 return
 
     cmdline_ref = pins.get("BOOT_CMDLINE")
@@ -333,7 +333,7 @@ def check_ci_pins():
         fail(f"baseline-changes sha256 {actual} != {expected}")
         return
     if not expected:
-        warn("BASELINE_CHANGES_SHA256 is not set in config/0086.env")
+        warn("BASELINE_CHANGES_SHA256 is not set in config/0087.env")
 
     if "prepare-baseline.sh" not in workflow:
         fail("workflow does not call ci/prepare-baseline.sh")

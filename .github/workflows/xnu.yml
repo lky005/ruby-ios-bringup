@@ -1,11 +1,12 @@
-name: xnu-0086
+name: xnu-0087
 
-# Builds the 0086 ruby USB P0 milestone without vendoring the upstream tree.
+# Builds the 0087 ruby USB P2a WIP kernel without vendoring the upstream tree.
 # ci/prepare-baseline.sh fetches the pinned commit, removes the topaz patches,
 # adds this project's patches, applies the small 0010/0012 change, and verifies
-# the canonical patchset hash.  The USB probe is inert unless rubyusb=1.
-# ci/kernel_hash.py records the built kernel's segments; it gates against a
-# booted reference only when config/0086.env provides one.
+# the canonical patchset hash.  P2a adds the EP0 trace/ACK+STALL window; the
+# probe is still inert unless rubyusb=1.  ci/kernel_hash.py records the built
+# kernel's segments; it gates against a booted reference only when
+# config/0087.env provides one.
 
 on:
   workflow_dispatch:
@@ -40,7 +41,7 @@ permissions:
 env:
   BASE_REPO: https://github.com/MakrSas/ios-topaz.git
   BASE_SHA: 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
-  PATCHSET_SHA256: 16b8ddea008c4941a628f746e096f345eb9c2861d3a679339bd37ade78ec6abd
+  PATCHSET_SHA256: 5142a95dbf41a411c4a20bb400e6c05fa14ad7aabb8636968b861123b2e0cfd3
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
@@ -113,7 +114,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0086.env', '.github/workflows/xnu.yml') }}
+          key: ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0087.env', '.github/workflows/xnu.yml') }}
           restore-keys: |
             ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
 
@@ -186,7 +187,7 @@ jobs:
             echo "kernel missing; hash gate skipped"
             exit 0
           fi
-          . config/0086.env
+          . config/0087.env
           if [ -n "${KERNEL_EXPECT_EXEC_DATA:-}" ]; then
             python3 ci/kernel_hash.py --expect-exec-data "$KERNEL_EXPECT_EXEC_DATA" \
               out/kernel.development.sweet | tee out/kernel-hashes.txt

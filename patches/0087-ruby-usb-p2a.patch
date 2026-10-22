@@ -1,0 +1,226 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -114,6 +114,39 @@
+ #define GPIO_DO3        0x0130
+ #define GPIO121_BIT     (1u << 25)
+ 
++/* EP0 registers (MTU3 MAC offsets) */
++#define EP0CSR_OFF      0x0100
++#define RXCOUNT0_OFF    0x0108
++#define FIFO0_OFF       0x0300
++
++#define EP0_SENDSTALL   (1u << 25)
++#define EP0_SENTSTALL   (1u << 22)
++#define EP0_SETUPPKTRDY (1u << 17)
++#define EP0_RXPKTRDY    (1u << 16)
++#define EP0_MAXPKTSZ_MSK 0x3ffu
++#define EP0_W1C_BITS    (~(EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL))
++
++/* P2a trace ring: snapshots and EP0 setup attempts, dumped once. */
++#define RUBY_TRACE_MAX  512
++#define RUBY_TR_SNAP    1
++#define RUBY_TR_SETUP   2
++#define RUBY_TR_STALL   3
++#define RUBY_TR_STATE   4
++#define RUBY_TR_NOTE    5
++
++struct ruby_evt {
++    uint32_t t;
++    uint16_t type;
++    uint16_t a;
++    uint32_t b;
++    uint32_t c;
++    uint32_t d;
++};
++
++static struct ruby_evt ruby_events[RUBY_TRACE_MAX];
++static uint32_t ruby_event_count;
++static uint32_t ruby_event_overflow;
++
+ static inline uint32_t
+ ruby_rd32(vm_offset_t base, uint32_t off)
+ {
+@@ -248,6 +281,173 @@
+     v |= DTM1_RG_VBUSVALID | DTM1_RG_AVALID;
+     v &= ~DTM1_RG_SESSEND;
+     ruby_wr32(phy, PHY_U2_DTM1, v);
++}
++
++static void
++ruby_trace(uint32_t t, uint16_t type, uint16_t a, uint32_t b, uint32_t c,
++    uint32_t d)
++{
++    if (ruby_event_count < RUBY_TRACE_MAX) {
++        struct ruby_evt *e = &ruby_events[ruby_event_count++];
++
++        e->t = t;
++        e->type = type;
++        e->a = a;
++        e->b = b;
++        e->c = c;
++        e->d = d;
++    } else {
++        ruby_event_overflow++;
++    }
++}
++
++static void
++ruby_snapshot(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio, uint32_t t)
++{
++    ruby_trace(t, RUBY_TR_SNAP, 1, ruby_rd32(ippc, 0x18), 0, 0);
++    ruby_trace(t, RUBY_TR_SNAP, 2, ruby_rd32(mac, PM_CTRL - MTU3_PA), 0, 0);
++    ruby_trace(t, RUBY_TR_SNAP, 3, ruby_rd32(mac, MISC_CTRL - MTU3_PA), 0, 0);
++    ruby_trace(t, RUBY_TR_SNAP, 4, ruby_rd32(mac, USB20_OP - MTU3_PA), 0, 0);
++    ruby_trace(t, RUBY_TR_SNAP, 5, ruby_rd32(mac, DEVICE_CONF - MTU3_PA), 0, 0);
++    ruby_trace(t, RUBY_TR_SNAP, 6, ruby_rd32(mac, EP0CSR_OFF), 0, 0);
++    ruby_trace(t, RUBY_TR_SNAP, 7, ruby_rd32(mac, RXCOUNT0_OFF), 0, 0);
++    ruby_trace(t, RUBY_TR_SNAP, 8, ruby_rd32(gpio, GPIO_DIR3), 0, 0);
++    ruby_trace(t, RUBY_TR_SNAP, 9, ruby_rd32(gpio, GPIO_DO3), 0, 0);
++}
++
++static void
++ruby_ep0_set_maxpacket(vm_offset_t mac)
++{
++    uint32_t v = ruby_rd32(mac, EP0CSR_OFF);
++
++    v &= ~EP0_MAXPKTSZ_MSK;
++    v |= 64;
++    v &= EP0_W1C_BITS;
++    ruby_wr32(mac, EP0CSR_OFF, v);
++}
++
++static void
++ruby_ep0_capture(vm_offset_t mac, uint32_t t)
++{
++    static uint32_t last_key, last_value, last_len, retry;
++    uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
++    uint32_t csr = ruby_rd32(mac, EP0CSR_OFF);
++    uint32_t w0, w1, key;
++    uint32_t value, index, len;
++    uint8_t st[8];
++
++    if (count != 8) {
++        ruby_trace(t, RUBY_TR_NOTE, 1, count, csr, 0);
++        csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++        csr |= EP0_SETUPPKTRDY | EP0_SENDSTALL;
++        ruby_wr32(mac, EP0CSR_OFF, csr);
++        return;
++    }
++
++    w0 = ruby_rd32(mac, FIFO0_OFF);
++    w1 = ruby_rd32(mac, FIFO0_OFF + 4);
++    st[0] = w0;
++    st[1] = w0 >> 8;
++    st[2] = w0 >> 16;
++    st[3] = w0 >> 24;
++    st[4] = w1;
++    st[5] = w1 >> 8;
++    st[6] = w1 >> 16;
++    st[7] = w1 >> 24;
++
++    value = st[2] | (st[3] << 8);
++    index = st[4] | (st[5] << 8);
++    len = st[6] | (st[7] << 8);
++    key = ((uint32_t)st[0] << 8) | st[1];
++
++    if (key == last_key && value == last_value && len == last_len) {
++        retry++;
++    } else {
++        retry = 1;
++        last_key = key;
++        last_value = value;
++        last_len = len;
++    }
++    if (retry == 1 || (retry & 0xf) == 0)
++        ruby_trace(t, RUBY_TR_SETUP, key, (value << 16) | index, len, retry);
++
++    /*
++     * Reading FIFO does not clear SETUPPKTRDY.  ACK with a STALL so the
++     * host can retry; this is what lets one boot capture multiple attempts.
++     */
++    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++    csr |= EP0_SENDSTALL;
++    if (len == 0)
++        csr |= EP0_SETUPPKTRDY;
++    ruby_wr32(mac, EP0CSR_OFF, csr);
++    ruby_trace(t, RUBY_TR_STALL, key, csr, len, retry);
++}
++
++static void
++ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
++{
++    static const uint32_t snaps[] = {
++        0, 100, 500, 1000, 2000, 5000, 10000, 20000, 30000
++    };
++    uint32_t window_ms = 30000;
++    uint32_t t = 0, si = 0;
++    uint32_t last_otg = 0, last_op = 0;
++    uint32_t v;
++
++    PE_parse_boot_argn("rubyusb_window_ms", &window_ms, sizeof(window_ms));
++    if (window_ms < 1000 || window_ms > 120000)
++        window_ms = 30000;
++
++    if (!(ruby_rd32(mac, EP0CSR_OFF) & EP0_SETUPPKTRDY))
++        ruby_ep0_set_maxpacket(mac);
++    printf("RUBY USB: P2a window %u ms; ACK+STALL, trace ring %u\n",
++        window_ms, RUBY_TRACE_MAX);
++
++    while (t <= window_ms) {
++        while (si < sizeof(snaps) / sizeof(snaps[0]) && t >= snaps[si]) {
++            ruby_snapshot(mac, ippc, gpio, t);
++            si++;
++        }
++
++        v = ruby_rd32(mac, EP0CSR_OFF);
++        if (!(v & EP0_SETUPPKTRDY) && (v & EP0_MAXPKTSZ_MSK) != 64) {
++            ruby_ep0_set_maxpacket(mac);
++            ruby_trace(t, RUBY_TR_NOTE, 2, v,
++                ruby_rd32(mac, EP0CSR_OFF), 0);
++            v = ruby_rd32(mac, EP0CSR_OFF);
++        }
++        if (v & EP0_SENTSTALL) {
++            ruby_wr32(mac, EP0CSR_OFF,
++                ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS);
++            ruby_trace(t, RUBY_TR_NOTE, 3, v, 0, 0);
++        }
++        if (v & EP0_SETUPPKTRDY)
++            ruby_ep0_capture(mac, t);
++
++        v = ruby_rd32(ippc, 0x18);
++        if (v != last_otg) {
++            ruby_trace(t, RUBY_TR_STATE, 1, v, 0, 0);
++            last_otg = v;
++        }
++        v = ruby_rd32(mac, USB20_OP - MTU3_PA);
++        if (v != last_op) {
++            ruby_trace(t, RUBY_TR_STATE, 2, v, 0, 0);
++            last_op = v;
++        }
++
++        delay(1000);
++        t++;
++    }
++
++    ruby_snapshot(mac, ippc, gpio, window_ms);
++    printf("RUBY USB: trace n=%u overflow=%u\n",
++        ruby_event_count, ruby_event_overflow);
++    for (uint32_t i = 0; i < ruby_event_count; i++)
++        printf("RUBY USB TRACE t=%u type=%u a=%u b=%08x c=%08x d=%08x\n",
++            ruby_events[i].t, ruby_events[i].type, ruby_events[i].a,
++            ruby_events[i].b, ruby_events[i].c, ruby_events[i].d);
++    printf("RUBY USB: trace dumped; settle 3s\n");
++    delay(3000);
+ }
+ 
+ void
+@@ -354,7 +554,8 @@
+     printf("RUBY USB: PHY dtm1 0x%08x acr3 0x%08x GPIO121 dir3 0x%08x do3 0x%08x\n",
+         ruby_rd32(phy, PHY_U2_DTM1), ruby_rd32(phy, PHY_U2_ACR3),
+         ruby_rd32(gpio, GPIO_DIR3), ruby_rd32(gpio, GPIO_DO3));
+-    printf("RUBY USB: soft-connect left on (no EP0/IRQ/DMA)\n");
++    ruby_usb_ep0_window(mac, ippc, gpio);
++    printf("RUBY USB: soft-connect left on (P2a trace, no EP0 responses/IRQ/DMA)\n");
+ }
+ 
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
