@@ -1,12 +1,12 @@
 name: xnu-0087
 
-# Builds the 0087 ruby USB P2a WIP kernel without vendoring the upstream tree.
+# Builds the 0087 ruby USB P2b WIP kernel without vendoring the upstream tree.
 # ci/prepare-baseline.sh fetches the pinned commit, removes the topaz patches,
 # adds this project's patches, applies the small 0010/0012 change, and verifies
-# the canonical patchset hash.  P2a adds the EP0 trace/ACK+STALL window; the
-# probe is still inert unless rubyusb=1.  ci/kernel_hash.py records the built
-# kernel's segments; it gates against a booted reference only when
-# config/0087.env provides one.
+# the canonical patchset hash.  P2b adds polling EP0 enumeration with minimal
+# descriptors; the probe is still inert unless rubyusb=1.  ci/kernel_hash.py
+# records the built kernel's segments; it gates against a booted reference
+# only when config/0087.env provides one.
 
 on:
   workflow_dispatch:
@@ -41,7 +41,7 @@ permissions:
 env:
   BASE_REPO: https://github.com/MakrSas/ios-topaz.git
   BASE_SHA: 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
-  PATCHSET_SHA256: 85e71d36fc9d9d863ac8a01d8242fd4e530ec3ba087db637044cc7348984c3b6
+  PATCHSET_SHA256: 7d3abbd09a5d407dd78ed8af65d09b0c98f89127c97692d45f0492d6c7367f59
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}

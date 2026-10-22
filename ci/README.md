@@ -1,10 +1,11 @@
 # Build provenance (0087 WIP)
 
-`.github/workflows/xnu.yml` builds the 0087 ruby USB P2a WIP kernel **without
+`.github/workflows/xnu.yml` builds the 0087 ruby USB P2b WIP kernel **without
 vendoring the upstream tree**. 0087 extends 0086 with
-`patches/0087-ruby-usb-p2a.patch`: a 30 s EP0 trace window that captures
-setup attempts and ACK+STALLs them. 0086 is the P0 power/PHY soft-connect
-driver; the USB probe is inert unless the boot arguments contain `rubyusb=1`.
+`patches/0087-ruby-usb-p2.patch`: a 30 s polling EP0 enumeration window with
+minimal device/config/string descriptors and a register/setup trace. 0086 is
+the P0 power/PHY soft-connect driver; the USB probe is inert unless the boot
+arguments contain `rubyusb=1`.
 
 ## Recipe
 
@@ -12,13 +13,13 @@ driver; the USB probe is inert unless the boot arguments contain `rubyusb=1`.
 2. Remove the 24 topaz-specific patches by name
    (`ci/topaz-patches-to-remove.txt`).
 3. Add this project's patches: 0080 UFS, 0084 autoswipe, 0085 Goodix SPI
-   touch, 0086 USB P0, 0087 USB P2a, and historical 0081-0083.
+   touch, 0086 USB P0, 0087 USB P2, and historical 0081-0083.
 4. Apply `ci/baseline-changes.patch`, the small 0010/0012 change needed for
    the ruby framebuffer addresses.
 5. Normalize every `.patch`/`.sh` to LF.
 6. Compute the canonical patchset hash over the sorted per-file SHA256 values
    and refuse to build unless it equals
-   `85e71d36fc9d9d863ac8a01d8242fd4e530ec3ba087db637044cc7348984c3b6`
+   `7d3abbd09a5d407dd78ed8af65d09b0c98f89127c97692d45f0492d6c7367f59`
    (90 files).
 7. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
    build on `macos-14` with Xcode 15.0.1.
@@ -37,7 +38,7 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 | Item | Value |
 |---|---|
 | Baseline | `MakrSas/ios-topaz` @ `5095ac19dbdcf37b64b81fe443f4027ad51b84bf` |
-| Patchset | `85e71d36fc9d9d863ac8a01d8242fd4e530ec3ba087db637044cc7348984c3b6` (90 files) |
+| Patchset | `7d3abbd09a5d407dd78ed8af65d09b0c98f89127c97692d45f0492d6c7367f59` (90 files) |
 | 0010/0012 change | `ci/baseline-changes.patch`, SHA256 `1edb6633...` |
 | XNU harness | `blacktop/darwin-xnu-build` @ `663906528d1cd5ea8fde7de6f16de73db9511549` |
 | Runner | `macos-14`, Xcode 15.0.1, macOS 13.5 xnu |
@@ -45,7 +46,7 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 | 0085 booted kernel | `9eb9acac...`; exec-data `e4823afb...` (historical reference) |
 | 0085 booted boot image | `ace60d16...` |
 | 0086 P0 kernel | build only; device result kept private |
-| 0087 P2a kernel | pending WIP test |
+| 0087 P2 kernel | pending WIP test |
 
 The reference SHAs are provenance, not a byte-for-byte guarantee for a future
 run. Record the actual artifact hash for each run in `config/0087.env`.

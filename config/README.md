@@ -18,9 +18,9 @@ milestone (synthetic autoswipe). They are provenance, not universal defaults:
 pin yet. `rubyusb=0` (the default when the argument is absent) keeps the probe
 inert.
 
-`0087.env` and `0087-boot.cmdline` are the P2a diagnostic build: the 90-file
-patchset, a 30 s EP0 trace window, and `ufslogsecs=1` so the trace is flushed
-quickly. It is WIP; no booted reference is pinned.
+`0087.env` and `0087-boot.cmdline` are the P2 diagnostic build: the 90-file
+patchset, a 30 s polling EP0 enumeration window, and `ufslogsecs=1` so the
+trace is flushed quickly. It is WIP; no booted reference is pinned.
 
 The kernel SHA and image SHA in `0085.env` are from the build that booted.
 A CI rebuild is not promised to be byte-identical; the canonical patchset hash
