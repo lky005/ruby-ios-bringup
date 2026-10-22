@@ -18,7 +18,7 @@ driver; the USB probe is inert unless the boot arguments contain `rubyusb=1`.
 5. Normalize every `.patch`/`.sh` to LF.
 6. Compute the canonical patchset hash over the sorted per-file SHA256 values
    and refuse to build unless it equals
-   `5142a95dbf41a411c4a20bb400e6c05fa14ad7aabb8636968b861123b2e0cfd3`
+   `85e71d36fc9d9d863ac8a01d8242fd4e530ec3ba087db637044cc7348984c3b6`
    (90 files).
 7. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
    build on `macos-14` with Xcode 15.0.1.
@@ -37,7 +37,7 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 | Item | Value |
 |---|---|
 | Baseline | `MakrSas/ios-topaz` @ `5095ac19dbdcf37b64b81fe443f4027ad51b84bf` |
-| Patchset | `5142a95dbf41a411c4a20bb400e6c05fa14ad7aabb8636968b861123b2e0cfd3` (90 files) |
+| Patchset | `85e71d36fc9d9d863ac8a01d8242fd4e530ec3ba087db637044cc7348984c3b6` (90 files) |
 | 0010/0012 change | `ci/baseline-changes.patch`, SHA256 `1edb6633...` |
 | XNU harness | `blacktop/darwin-xnu-build` @ `663906528d1cd5ea8fde7de6f16de73db9511549` |
 | Runner | `macos-14`, Xcode 15.0.1, macOS 13.5 xnu |
