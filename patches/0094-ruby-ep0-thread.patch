@@ -1,0 +1,160 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 73ae431..8f77be6 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -187,6 +187,8 @@ static const uint8_t ruby_str_ser[10] = {
+ };
+ 
+ static uint8_t ruby_config;
++static volatile uint32_t ruby_cfg_seen;
++static vm_offset_t ruby_mac_base;
+ 
+ static inline uint32_t
+ ruby_rd32(vm_offset_t base, uint32_t off)
+@@ -537,6 +539,7 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+         return;
+     case 9: /* SET_CONFIGURATION */
+         ruby_config = value & 0xff;
++        ruby_cfg_seen = 1;
+         ruby_trace(t, RUBY_TR_CFG, ruby_config, 0, 0, 0);
+         ruby_ep0_ack(mac, t, key, wlen);
+         return;
+@@ -621,6 +624,57 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_stall(mac, t, key, len);
+ }
+ 
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++
++static void
++ruby_ep0_service(vm_offset_t mac, uint32_t t)
++{
++    uint32_t v = ruby_rd32(mac, EP0CSR_OFF);
++
++    if (!(v & EP0_SETUPPKTRDY) && (v & EP0_MAXPKTSZ_MSK) != 64) {
++        ruby_ep0_set_maxpacket(mac);
++        ruby_trace(t, RUBY_TR_NOTE, 2, v, ruby_rd32(mac, EP0CSR_OFF), 0);
++        v = ruby_rd32(mac, EP0CSR_OFF);
++    }
++    if (v & EP0_SENTSTALL) {
++        static uint32_t stall_notes;
++
++        /* EP0_SENTSTALL is W1C; write it back to clear the stall. */
++        ruby_wr32(mac, EP0CSR_OFF,
++            (ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS) | EP0_SENTSTALL);
++        if (stall_notes++ == 0 || (stall_notes & 0xf) == 0)
++            ruby_trace(t, RUBY_TR_NOTE, 3, v, 0, 0);
++    }
++    if (v & EP0_SETUPPKTRDY)
++        ruby_ep0_capture(mac, t);
++
++    v = ruby_rd32(mac, EP0CSR_OFF);
++    if (v & EP0_RXPKTRDY) {
++        uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
++        uint32_t csr;
++
++        for (uint32_t i = 0; i < count; i++)
++            (void)ruby_rd8(mac, FIFO0_OFF);
++        csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++        csr |= EP0_RXPKTRDY | EP0_DATAEND;
++        ruby_wr32(mac, EP0CSR_OFF, csr);
++        ruby_trace(t, RUBY_TR_STATUS, 0, v, count,
++            ruby_rd32(mac, EP0CSR_OFF));
++    }
++}
++
++static void
++ruby_ep0_thread(void *arg, wait_result_t wr)
++{
++    (void)arg;
++    (void)wr;
++    for (;;) {
++        ruby_ep0_service(ruby_mac_base, 0);
++        delay(1000);
++    }
++}
++
+ static void
+ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+ {
+@@ -628,7 +682,8 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+         0, 100, 500, 1000, 2000, 5000, 10000, 20000, 30000
+     };
+     uint32_t window_ms = 30000;
+-    uint32_t t = 0, si = 0, sub = 0;
++    uint32_t t = 0, si = 0, sub = 0, cfg_t = 0;
++    int cfg_armed = 0;
+     uint32_t last_otg = 0, last_op = 0;
+     uint32_t v;
+ 
+@@ -647,40 +702,19 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+             si++;
+         }
+ 
+-        v = ruby_rd32(mac, EP0CSR_OFF);
+-        if (!(v & EP0_SETUPPKTRDY) && (v & EP0_MAXPKTSZ_MSK) != 64) {
+-            ruby_ep0_set_maxpacket(mac);
+-            ruby_trace(t, RUBY_TR_NOTE, 2, v,
+-                ruby_rd32(mac, EP0CSR_OFF), 0);
+-            v = ruby_rd32(mac, EP0CSR_OFF);
+-        }
+-        if (v & EP0_SENTSTALL) {
+-            static uint32_t stall_notes;
+-
+-            /* EP0_SENTSTALL is W1C; write it back to clear the stall. */
+-            ruby_wr32(mac, EP0CSR_OFF,
+-                (ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS) |
+-                EP0_SENTSTALL);
+-            if (stall_notes++ == 0 || (stall_notes & 0xf) == 0)
+-                ruby_trace(t, RUBY_TR_NOTE, 3, v, 0, 0);
++        ruby_ep0_service(mac, t);
++        if (ruby_cfg_seen) {
++            if (!cfg_armed) {
++                cfg_armed = 1;
++                cfg_t = t;
++            } else if (t - cfg_t >= 200) {
++                printf("RUBY USB: config at t=%u, leave window at t=%u\n",
++                    cfg_t, t);
++                break;
++            }
+         }
+-        if (v & EP0_SETUPPKTRDY)
+-            ruby_ep0_capture(mac, t);
+ 
+-        v = ruby_rd32(mac, EP0CSR_OFF);
+-        if (v & EP0_RXPKTRDY) {
+-            uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
+-            uint32_t csr;
+-
+-            for (uint32_t i = 0; i < count; i++)
+-                (void)ruby_rd8(mac, FIFO0_OFF);
+-            csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+-            csr |= EP0_RXPKTRDY | EP0_DATAEND;
+-            ruby_wr32(mac, EP0CSR_OFF, csr);
+-            ruby_trace(t, RUBY_TR_STATUS, 0, v, count,
+-                ruby_rd32(mac, EP0CSR_OFF));
+-            v = ruby_rd32(mac, EP0CSR_OFF);
+-        }
++
+ 
+         v = ruby_rd32(ippc, 0x18);
+         if (v != last_otg) {
+@@ -707,8 +741,16 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+         printf("RUBY USB TRACE t=%u type=%u a=%u b=%08x c=%08x d=%08x\n",
+             ruby_events[i].t, ruby_events[i].type, ruby_events[i].a,
+             ruby_events[i].b, ruby_events[i].c, ruby_events[i].d);
+-    printf("RUBY USB: trace dumped; settle 3s\n");
+-    delay(3000);
++    printf("RUBY USB: trace dumped; starting EP0 thread\n");
++    ruby_mac_base = mac;
++    {
++        thread_t thr;
++
++        if (kernel_thread_start(ruby_ep0_thread, NULL, &thr) == KERN_SUCCESS)
++            thread_deallocate(thr);
++        else
++            printf("RUBY USB: EP0 thread start failed\n");
++    }
+ }
+ 
+ /* ---- handoff dump (rubydump=1), aligned with the P9 probe order ---- */
