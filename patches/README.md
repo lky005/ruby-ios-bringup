@@ -19,6 +19,7 @@ order.
 | `0090-ruby-devspeed-hs.patch` | WIP | `bsd/dev/ruby_usb.c` | keep `DEVICE_CONF` speed=3 (HS) at probe init instead of clearing it to 0 |
 | `0091-ruby-devconf-offset.patch` | WIP | `bsd/dev/ruby_usb.c` | fix `DEVICE_CONF` offset `0x1800` -> `0x0800` (SET_ADDRESS); revert 0090 to vendor value 0 |
 | `0092-ruby-config-endpoints.patch` | WIP | `bsd/dev/ruby_usb.c` | vendor-specific interface (class 0xFF) with EP2 OUT/IN bulk; 32-byte config so SET_CONFIGURATION is issued |
+| `0093-ruby-poll-pid.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 poll 1 ms -> 100 us; PID 0x0001 -> 0x0002 so WinUSB selects the configuration |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the

@@ -1,0 +1,36 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 7c07e3d..73ae431 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -163,7 +163,7 @@ static uint32_t ruby_event_overflow;
+ /* Minimal USB2 device: no interfaces other than the default one. */
+ static const uint8_t ruby_dev_desc[18] = {
+     18, 1, 0x00, 0x02, 0x00, 0x00, 0x00, 64,
+-    0x09, 0x12, 0x01, 0x00, 0x00, 0x01,
++    0x09, 0x12, 0x02, 0x00, 0x00, 0x01,
+     1, 2, 3, 1
+ };
+ 
+@@ -628,7 +628,7 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+         0, 100, 500, 1000, 2000, 5000, 10000, 20000, 30000
+     };
+     uint32_t window_ms = 30000;
+-    uint32_t t = 0, si = 0;
++    uint32_t t = 0, si = 0, sub = 0;
+     uint32_t last_otg = 0, last_op = 0;
+     uint32_t v;
+ 
+@@ -693,8 +693,11 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+             last_op = v;
+         }
+ 
+-        delay(1000);
+-        t++;
++        delay(100);
++        if (++sub == 10) {
++            sub = 0;
++            t++;
++        }
+     }
+ 
+     ruby_snapshot(mac, ippc, gpio, window_ms);
