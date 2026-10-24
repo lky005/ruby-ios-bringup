@@ -1,0 +1,54 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 5ef30c8..2dea529 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -726,6 +726,10 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define QISAR1_OFF      0x0710
+ #define TQERRIR0_OFF    0x0780
+ #define EP_RST_OFF      0x0804
++#define CAP_EP0FFSZ_OFF 0x0c04
++#define CAP_EPNTXFFSZ_OFF 0x0c08
++#define CAP_EPNRXFFSZ_OFF 0x0c0c
++#define CAP_EPINFO_OFF  0x0c10
+ #define TX_SENDSTALL    (1u << 21)
+ #define TX_SENTSTALL    (1u << 22)
+ 
+@@ -838,7 +842,8 @@ ruby_ep2_config(vm_offset_t mac)
+     }
+ 
+     ruby_wr32(mac, TX2CSR0_OFF, 64u | (1u << 29));
+-    ruby_wr32(mac, TX2CSR1_OFF, (2u << 8));
++    /* Slot 0: one 512 B FIFO segment; bulk type 0. */
++    ruby_wr32(mac, TX2CSR1_OFF, 0);
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
+ 
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+@@ -907,7 +912,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+      * only TX done (QISAR0 bit2) releases the single in-flight slot.
+      */
+     if (ruby_tx_busy) {
+-        if (++ruby_busy_ticks > 20)         /* ~2 s without TX done */
++        if (++ruby_busy_ticks > 4)          /* ~0.5 s without TX done */
+             ruby_ep2_recover(mac);
+         else
+             return;
+@@ -997,7 +1002,7 @@ ruby_ep2_halt_clear(vm_offset_t mac)
+ static void
+ ruby_ep0_vendor_state(vm_offset_t mac, uint32_t t, uint32_t wlen)
+ {
+-    uint32_t v[12];
++    uint32_t v[16];
+ 
+     v[0] = 0x45503253u;         /* "EP2S" */
+     v[1] = (ruby_push_seq & 0xffffu) | ((ruby_gpd_enq & 0xfu) << 16) |
+@@ -1013,6 +1018,10 @@ ruby_ep0_vendor_state(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     v[9] = ruby_err_last;
+     v[10] = ruby_recoveries;
+     v[11] = ruby_busy_ticks;
++    v[12] = ruby_rd32(mac, CAP_EP0FFSZ_OFF);
++    v[13] = ruby_rd32(mac, CAP_EPNTXFFSZ_OFF);
++    v[14] = ruby_rd32(mac, CAP_EPNRXFFSZ_OFF);
++    v[15] = ruby_rd32(mac, CAP_EPINFO_OFF);
+     ruby_ep0_send(mac, t, 0xc021, (const uint8_t *)v, sizeof(v), wlen);
+ }
+ 
