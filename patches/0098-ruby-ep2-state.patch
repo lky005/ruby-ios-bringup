@@ -1,0 +1,138 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 724905c..3355907 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -502,6 +502,11 @@ ruby_descriptor(uint32_t value, uint32_t *len)
+     }
+ }
+ 
++static void ruby_ep0_vendor_state(vm_offset_t mac, uint32_t t,
++    uint32_t wlen);
++static void ruby_ep2_halt_clear(vm_offset_t mac);
++static void ruby_ep2_status_poll(vm_offset_t mac);
++
+ static void
+ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+     uint32_t value, uint32_t index, uint32_t wlen)
+@@ -561,6 +566,13 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+         ruby_ep0_ack(mac, t, key, wlen);
+         return;
+     case 1: /* CLEAR_FEATURE */
++        if (wlen == 0 && value == 0 && index == 0x82)
++            ruby_ep2_halt_clear(mac);
++        if (wlen == 0)
++            ruby_ep0_ack(mac, t, key, wlen);
++        else
++            ruby_ep0_stall(mac, t, key, wlen);
++        return;
+     case 3: /* SET_FEATURE */
+         if (wlen == 0)
+             ruby_ep0_ack(mac, t, key, wlen);
+@@ -623,6 +635,8 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+ 
+     if ((st[0] & 0x60) == 0)
+         ruby_ep0_standard(mac, t, st[0], st[1], value, index, len);
++    else if (st[0] == 0xc0 && st[1] == 0x21)
++        ruby_ep0_vendor_state(mac, t, len);
+     else
+         ruby_ep0_stall(mac, t, key, len);
+ }
+@@ -676,6 +690,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+     (void)wr;
+     for (;;) {
+         ruby_ep0_service(ruby_mac_base, 0);
++        ruby_ep2_status_poll(ruby_mac_base);
+         if (++log_tick >= 100) {
+             log_tick = 0;
+             ruby_ep2_push_log(ruby_mac_base);
+@@ -716,6 +731,8 @@ static uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
+ static uint64_t ruby_ring_pa;
+ static uint64_t ruby_log_pa;
+ static uint32_t ruby_push_seq;
++static uint32_t ruby_push_tries;
++static uint32_t ruby_stall_seen;
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern pmap_t kernel_pmap;
+@@ -824,6 +841,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+ 
+     if (!ruby_ep_ready)
+         return;
++    ruby_push_tries++;
+ 
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+     q1 = ruby_rd32(mac, QISAR1_OFF);
+@@ -867,7 +885,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+     np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
+     hdr = (uint32_t *)ruby_log_buf;
+     hdr[0] = (ruby_push_seq & 0xffffu) | ((enq & 0xfu) << 16) |
+-        ((hwo & 0xfu) << 20);
++        ((hwo & 0xfu) << 20) | ((ruby_stall_seen & 0xfu) << 24);
+     hdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
+         ((ruby_rd32(mac, TQCSR2_OFF) & 0xffffu) << 16);
+     hdr[2] = err;
+@@ -896,11 +914,64 @@ ruby_ep2_push_log(vm_offset_t mac)
+     ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+     ruby_tx_busy = 1;
+ 
++    /* P9 order: checksum enable and stale done clear before every kick. */
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
++    ruby_wr32(mac, QISAR0_OFF, 1u << 2);
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
+         ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+ }
+ 
++static void
++ruby_ep2_status_poll(vm_offset_t mac)
++{
++    uint32_t csr;
++
++    if (!ruby_ep_ready)
++        return;
++    csr = ruby_rd32(mac, TX2CSR0_OFF);
++    if (csr & (1u << 22)) {     /* TX_SENTSTALL is W1C */
++        ruby_wr32(mac, TX2CSR0_OFF, (csr & ~(1u << 22)) | (1u << 22));
++        ruby_stall_seen++;
++        ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++    }
++}
++
++static void
++ruby_ep2_halt_clear(vm_offset_t mac)
++{
++    uint32_t csr;
++
++    if (!ruby_ep_ready)
++        return;
++    csr = ruby_rd32(mac, TX2CSR0_OFF);
++    if (csr & (1u << 22))
++        ruby_wr32(mac, TX2CSR0_OFF, (csr & ~(1u << 22)) | (1u << 22));
++    ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++}
++
++/*
++ * Vendor IN request 0xC0/0x21: live EP2/QMU state for the host, so a stuck
++ * queue can be inspected without another boot or a console read.
++ */
++static void
++ruby_ep0_vendor_state(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    uint32_t v[8];
++
++    v[0] = 0x45503253u;         /* "EP2S" */
++    v[1] = (ruby_push_seq & 0xffffu) | ((ruby_gpd_enq & 0xfu) << 16) |
++        ((ruby_tx_busy & 1u) << 20) | ((ruby_ep_ready & 1u) << 21) |
++        ((ruby_stall_seen & 0xffu) << 24);
++    v[2] = ruby_push_tries;
++    v[3] = ruby_rd32(mac, QISAR0_OFF);
++    v[4] = ruby_rd32(mac, QISAR1_OFF);
++    v[5] = ruby_rd32(mac, TQERRIR0_OFF);
++    v[6] = ruby_rd32(mac, TQCSR2_OFF);
++    v[7] = ruby_rd32(mac, TX2CSR0_OFF);
++    ruby_ep0_send(mac, t, 0xc021, (const uint8_t *)v, sizeof(v), wlen);
++}
++
+ static void
+ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+ {
