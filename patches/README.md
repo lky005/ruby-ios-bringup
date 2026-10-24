@@ -21,6 +21,7 @@ order.
 | `0092-ruby-config-endpoints.patch` | WIP | `bsd/dev/ruby_usb.c` | vendor-specific interface (class 0xFF) with EP2 OUT/IN bulk; 32-byte config so SET_CONFIGURATION is issued |
 | `0093-ruby-poll-pid.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 poll 1 ms -> 100 us; PID 0x0001 -> 0x0002 so WinUSB selects the configuration |
 | `0094-ruby-ep0-thread.patch` | WIP | `bsd/dev/ruby_usb.c` | leave the EP0 window 200 ms after SET_CONFIGURATION; 1 ms EP0 kernel thread keeps servicing control requests after boot |
+| `0095-ruby-ep2-log.patch` | WIP | `bsd/dev/ruby_usb.c` | EP2 IN QMU log pipe: 4-GPD ring, PA translation + 36-bit high nibble, `dc civac`, checksum, 64 B SWEETLOG increments every ~100 ms |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
