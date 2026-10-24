@@ -1,0 +1,144 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 25ea6c6..d0c651f 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -7,6 +7,8 @@
+  * endpoints; it is a bring-up step, not a USB function driver.
+  *
+  * Boot arg: rubyusb=1 enables.  Default 0 keeps topaz/sweet builds safe;
++ * rubydump=1 additionally dumps the handoff state (PE_state/DT and
++ * IPPC/MAC/PHY registers) to SWEETLOG.
+  * the Qualcomm DWC3/ECM driver in sweet_usb.c is not used by ruby.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -698,6 +700,108 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+     delay(3000);
+ }
+ 
++/* ---- handoff dump (rubydump=1), aligned with the P9 probe order ---- */
++static int
++ruby_dump_on(void)
++{
++    int on = 0;
++
++    PE_parse_boot_argn("rubydump", &on, sizeof(on));
++    return on == 1;
++}
++
++static void
++ruby_dump_regs(uint32_t stage, vm_offset_t ippc, vm_offset_t mac,
++    vm_offset_t phy)
++{
++    printf("RUBY DUMP stage=%u IPPC c0=%08x c1=%08x c2=%08x c3=%08x\n",
++        stage, ruby_rd32(ippc, 0x00), ruby_rd32(ippc, 0x04),
++        ruby_rd32(ippc, 0x08), ruby_rd32(ippc, 0x0c));
++    printf("RUBY DUMP stage=%u IPPC sts1=%08x sts2=%08x otg=%08x dev=%08x ver=%08x\n",
++        stage, ruby_rd32(ippc, 0x10), ruby_rd32(ippc, 0x14),
++        ruby_rd32(ippc, 0x18), ruby_rd32(ippc, 0x28),
++        ruby_rd32(ippc, 0xa4));
++    printf("RUBY DUMP stage=%u MAC pm=%08x misc=%08x op=%08x devconf=%08x ep0=%08x\n",
++        stage, ruby_rd32(mac, PM_CTRL - MTU3_PA),
++        ruby_rd32(mac, MISC_CTRL - MTU3_PA),
++        ruby_rd32(mac, USB20_OP - MTU3_PA),
++        ruby_rd32(mac, DEVICE_CONF - MTU3_PA),
++        ruby_rd32(mac, EP0CSR_OFF));
++    if (phy) {
++        printf("RUBY DUMP stage=%u PHY dtm0=%08x dtm1=%08x acr3=%08x acr4=%08x acr5=%08x acr6=%08x\n",
++            stage, ruby_rd32(phy, PHY_U2_DTM0),
++            ruby_rd32(phy, PHY_U2_DTM1), ruby_rd32(phy, PHY_U2_ACR3),
++            ruby_rd32(phy, PHY_U2_ACR4), ruby_rd32(phy, PHY_U2_ACR5),
++            ruby_rd32(phy, PHY_U2_ACR6));
++        printf("RUBY DUMP stage=%u U3 phya1=%08x chipd=%08x dmon1=%08x\n",
++            stage, ruby_rd32(phy, PHY_U3_PHYA),
++            ruby_rd32(phy, PHY_U3_CHIP), ruby_rd32(phy, PHY_U2_DMON1));
++    }
++}
++
++static void
++ruby_dump_dt(void)
++{
++    const uint8_t *dt = (const uint8_t *)PE_state.deviceTreeHead;
++    vm_size_t size = PE_state.deviceTreeSize;
++    uint8_t hdr[64];
++    vm_size_t i;
++
++    printf("RUBY DUMP stage=0 DT head=%p size=0x%x bootargs=%p\n",
++        PE_state.deviceTreeHead, (unsigned)size, PE_state.bootArgs);
++    if (!dt || size < 16)
++        return;
++    /* Only dereference a kernel VA; never a raw physical address. */
++    if ((uintptr_t)dt < 0xffff000000000000ULL) {
++        printf("RUBY DUMP stage=0 DT not a kernel VA; skip\n");
++        return;
++    }
++    for (i = 0; i < sizeof(hdr) && i < size; i++)
++        hdr[i] = dt[i];
++    for (i = 0; i + 4 <= sizeof(hdr); i += 4)
++        printf("RUBY DUMP stage=0 DT[%u]=%02x%02x%02x%02x\n",
++            (unsigned)i, hdr[i], hdr[i + 1], hdr[i + 2], hdr[i + 3]);
++}
++
++static void
++ruby_dump_dt_strings(void)
++{
++    const uint8_t *dt = (const uint8_t *)PE_state.deviceTreeHead;
++    vm_size_t size = PE_state.deviceTreeSize;
++    vm_size_t limit, i;
++    const char *needles[4] = { "usb", "mtu3", "phy", "xhci" };
++    int n, found = 0;
++
++    if (!dt || size < 16)
++        return;
++    if ((uintptr_t)dt < 0xffff000000000000ULL)
++        return;
++    limit = size > (256u * 1024u) ? (256u * 1024u) : size;
++    for (n = 0; n < 4 && found < 4; n++) {
++        const char *nd = needles[n];
++        vm_size_t nl = strlen(nd);
++
++        for (i = 0; i + nl + 8 < limit && found < 4; i++) {
++            if (dt[i] == (uint8_t)nd[0] &&
++                memcmp(dt + i, nd, nl) == 0) {
++                char s[9];
++                int k;
++
++                for (k = 0; k < 8; k++) {
++                    uint8_t c = dt[i + k];
++
++                    s[k] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
++                }
++                s[8] = 0;
++                printf("RUBY DUMP stage=0 DTSTR %s off=0x%x [%s]\n",
++                    nd, (unsigned)i, s);
++                found++;
++                i += 32;
++            }
++        }
++    }
++}
++
+ void
+ ruby_usb_probe(void)
+ {
+@@ -729,6 +833,12 @@ ruby_usb_probe(void)
+         return;
+     }
+ 
++    if (ruby_dump_on()) {
++        ruby_dump_dt();
++        ruby_dump_dt_strings();
++        ruby_dump_regs(0, ippc, mac, 0);
++    }
++
+     c0 = ruby_rd32(ippc, 0x00);
+     c2 = ruby_rd32(ippc, 0x08);
+     u3 = ruby_rd32(ippc, 0x30);
+@@ -803,6 +913,8 @@ ruby_usb_probe(void)
+         ruby_rd32(phy, PHY_U2_DTM1), ruby_rd32(phy, PHY_U2_ACR3),
+         ruby_rd32(gpio, GPIO_DIR3), ruby_rd32(gpio, GPIO_DO3));
+     ruby_usb_ep0_window(mac, ippc, gpio);
++    if (ruby_dump_on())
++        ruby_dump_regs(1, ippc, mac, phy);
+     printf("RUBY USB: soft-connect left on (P2b trace, no IRQ/DMA)\n");
+ }
+ 
