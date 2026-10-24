@@ -1,0 +1,197 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index dba60e0..4d6d31a 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -703,13 +703,18 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define QMU_Q_ACTIVE    0x8000u
+ #define RUBY_GPD_NUM    4
+ #define RUBY_LOG_CHUNK  64
++#define RUBY_HDR_LEN    16
++#define RUBY_LOG_TEXT   (RUBY_LOG_CHUNK - RUBY_HDR_LEN)
+ 
+ static uint8_t ruby_gpd_ring[RUBY_GPD_NUM * 16] __attribute__((aligned(4096)));
+ static uint8_t ruby_log_buf[RUBY_LOG_CHUNK] __attribute__((aligned(4096)));
+ static uint32_t ruby_gpd_enq;
+-static volatile uint32_t ruby_tx_pending;
+ static volatile uint32_t ruby_ep_ready;
+ static uint64_t ruby_log_pos;
++static uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
++static uint64_t ruby_ring_pa;
++static uint64_t ruby_log_pa;
++static uint32_t ruby_push_seq;
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern pmap_t kernel_pmap;
+@@ -763,14 +768,19 @@ ruby_gpd_clear(uint32_t i)
+ static void
+ ruby_ep2_config(vm_offset_t mac)
+ {
+-    uint64_t ring_pa;
+     uint32_t i;
+ 
+     if (ruby_ep_ready)
+         return;
+-    ring_pa = ruby_dma_pa(ruby_gpd_ring);
+-    if (!ring_pa) {
+-        printf("RUBY USB: EP2 ring not mapped\n");
++    ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
++    ruby_log_pa = ruby_dma_pa(ruby_log_buf);
++    for (i = 0; i < RUBY_GPD_NUM; i++)
++        ruby_gpd_pa[i] = ruby_dma_pa(ruby_gpd_ring + i * 16);
++    if (!ruby_ring_pa || !ruby_log_pa || !ruby_gpd_pa[0] ||
++        !ruby_gpd_pa[1] || !ruby_gpd_pa[2] || !ruby_gpd_pa[3]) {
++        printf("RUBY USB: EP2 buffers not mapped\n");
++        ruby_ring_pa = 0;
++        ruby_log_pa = 0;
+         return;
+     }
+ 
+@@ -780,7 +790,7 @@ ruby_ep2_config(vm_offset_t mac)
+ 
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
+-        uint64_t np = ruby_dma_pa(ruby_gpd_ring + nxt * 16);
++        uint64_t np = ruby_gpd_pa[nxt];
+         uint8_t *g = ruby_gpd_ring + i * 16;
+ 
+         ruby_gpd_clear(i);
+@@ -794,74 +804,87 @@ ruby_ep2_config(vm_offset_t mac)
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 2));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 18) | (1u << 2));
+-    ruby_wr32(mac, TQSAR2_OFF, (uint32_t)ring_pa);
+-    ruby_wr32(mac, TQHIAR2_OFF, (uint32_t)((ring_pa >> 32) & 0xfu));
++    ruby_wr32(mac, TQSAR2_OFF, (uint32_t)ruby_ring_pa);
++    ruby_wr32(mac, TQHIAR2_OFF, (uint32_t)((ruby_ring_pa >> 32) & 0xfu));
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_START);
+     ruby_ep_ready = 1;
+-    printf("RUBY USB: EP2 QMU ring pa=0x%llx\n", ring_pa);
++    printf("RUBY USB: EP2 QMU ring pa=0x%llx log pa=0x%llx\n",
++        ruby_ring_pa, ruby_log_pa);
+ }
+ 
+ static void
+ ruby_ep2_push_log(vm_offset_t mac)
+ {
+-    uint32_t q;
++    uint32_t q0, q1, err, hwo = 0, enq, i;
++    uint64_t pos, np;
++    uint8_t *g;
++    uint32_t *hdr;
++    uint32_t n;
+ 
+     if (!ruby_ep_ready)
+         return;
+-    q = ruby_rd32(mac, QISAR0_OFF);
+-    if (q & (1u << 2)) {
++
++    q0 = ruby_rd32(mac, QISAR0_OFF);
++    q1 = ruby_rd32(mac, QISAR1_OFF);
++    err = ruby_rd32(mac, TQERRIR0_OFF);
++    if (q0 & (1u << 2))
+         ruby_wr32(mac, QISAR0_OFF, 1u << 2);
+-        ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+-        ruby_tx_pending = 0;
++    /* QISAR1 bit0 is TXQ_EMPTY, a normal state, not an error. */
++    if (q1)
++        ruby_wr32(mac, QISAR1_OFF, q1);
++    if (err) {
++        ruby_wr32(mac, TQERRIR0_OFF, err);
++        ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+     }
+-    if (ruby_rd32(mac, QISAR1_OFF) || ruby_rd32(mac, TQERRIR0_OFF)) {
+-        uint32_t e = ruby_rd32(mac, TQERRIR0_OFF);
+ 
+-        ruby_wr32(mac, TQERRIR0_OFF, e);
+-        ruby_wr32(mac, QISAR1_OFF, ruby_rd32(mac, QISAR1_OFF));
+-        ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+-        ruby_tx_pending = 0;
+-    }
+-    if (ruby_tx_pending)
+-        return;
+-    if (sweet_log_position() <= ruby_log_pos)
++    /*
++     * HWO is cleared by the QMU in DRAM, so invalidate the cached line
++     * before trusting the flag; a slot still owned is never rewritten.
++     */
++    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    for (i = 0; i < RUBY_GPD_NUM; i++)
++        if (ruby_gpd_ring[i * 16] & 1u)
++            hwo |= 1u << i;
++
++    enq = ruby_gpd_enq;
++    g = ruby_gpd_ring + enq * 16;
++    if (hwo & (1u << enq))
++        return;                 /* ring full: keep enq, retry next tick */
++
++    pos = ruby_log_pos;
++    n = sweet_log_copy(&pos, (char *)ruby_log_buf + RUBY_HDR_LEN,
++        RUBY_LOG_TEXT);
++    if (!n)
+         return;
+ 
+-    {
+-        uint64_t bp, np, rp;
+-        uint8_t *g;
+-        uint32_t enq = ruby_gpd_enq;
+-        uint32_t n = sweet_log_copy(&ruby_log_pos, (char *)ruby_log_buf,
+-            RUBY_LOG_CHUNK);
+-
+-        if (!n)
+-            return;
+-        bp = ruby_dma_pa(ruby_log_buf);
+-        rp = ruby_dma_pa(ruby_gpd_ring);
+-        np = ruby_dma_pa(ruby_gpd_ring +
+-            ((enq + 1u) % RUBY_GPD_NUM) * 16);
+-        if (!bp || !rp || !np)
+-            return;
+-        g = ruby_gpd_ring + enq * 16;
+-
+-        ruby_gpd_clear(enq);
+-        g[0] = 1u << 7;
+-        g[2] = (uint8_t)(((bp >> 32) & 0xfu) | (((np >> 32) & 0xfu) << 4));
+-        *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+-        *(volatile uint32_t *)(g + 8) = (uint32_t)bp;
+-        *(volatile uint16_t *)(g + 12) = (uint16_t)n;
+-        g[1] = ruby_gpd_chksum(g);
+-        g[0] = (1u << 0) | (1u << 7);
+-
+-        ruby_dc_civac(ruby_log_buf, RUBY_LOG_CHUNK);
+-        ruby_dc_civac(g, 16);
+-        ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+-        ruby_tx_pending = 1;
+-
++    np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
++    hdr = (uint32_t *)ruby_log_buf;
++    hdr[0] = (ruby_push_seq & 0xffffu) | ((enq & 0xfu) << 16) |
++        ((hwo & 0xfu) << 20);
++    hdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
++        ((ruby_rd32(mac, TQCSR2_OFF) & 0xffffu) << 16);
++    hdr[2] = err;
++    hdr[3] = ruby_rd32(mac, TX2CSR0_OFF);
++    ruby_push_seq++;
++
++    ruby_gpd_clear(enq);
++    g[0] = 1u << 7;
++    g[2] = (uint8_t)(((ruby_log_pa >> 32) & 0xfu) |
++        (((np >> 32) & 0xfu) << 4));
++    *(volatile uint32_t *)(g + 4) = (uint32_t)np;
++    *(volatile uint32_t *)(g + 8) = (uint32_t)ruby_log_pa;
++    *(volatile uint16_t *)(g + 12) = (uint16_t)(RUBY_HDR_LEN + n);
++    g[1] = ruby_gpd_chksum(g);
++    g[0] = (1u << 0) | (1u << 7);
++
++    ruby_dc_civac(ruby_log_buf, RUBY_LOG_CHUNK);
++    ruby_dc_civac(g, 16);
++    ruby_log_pos = pos;
++    ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
++
++    ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++    if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
+         ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+-        if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
+-            ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+-    }
+ }
+ 
+ static void

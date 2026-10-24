@@ -57,6 +57,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0093-ruby-poll-pid.patch" \
     "$ROOT/patches/0094-ruby-ep0-thread.patch" \
     "$ROOT/patches/0095-ruby-ep2-log.patch" \
+    "$ROOT/patches/0096-ruby-ep2-ring-guard.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
