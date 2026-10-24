@@ -1,17 +1,8 @@
 diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
-index 8f77be6..3d74724 100644
+index 8f77be6..54f2b20 100644
 --- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
-@@ -18,6 +18,8 @@
- #include <kern/clock.h>
- #include <machine/machine_routines.h>
- #include <pexpert/pexpert.h>
-+#include <machine/pmap.h>
-+#include <vm/vm_page.h>
- 
- extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
- 
-@@ -189,6 +191,8 @@ static const uint8_t ruby_str_ser[10] = {
+@@ -189,6 +189,8 @@ static const uint8_t ruby_str_ser[10] = {
  static uint8_t ruby_config;
  static volatile uint32_t ruby_cfg_seen;
  static vm_offset_t ruby_mac_base;
@@ -20,7 +11,7 @@ index 8f77be6..3d74724 100644
  
  static inline uint32_t
  ruby_rd32(vm_offset_t base, uint32_t off)
-@@ -542,6 +546,7 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+@@ -542,6 +544,7 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
          ruby_cfg_seen = 1;
          ruby_trace(t, RUBY_TR_CFG, ruby_config, 0, 0, 0);
          ruby_ep0_ack(mac, t, key, wlen);
@@ -28,7 +19,7 @@ index 8f77be6..3d74724 100644
          return;
      case 8: /* GET_CONFIGURATION */
          byte = ruby_config;
-@@ -667,14 +672,199 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+@@ -667,14 +670,199 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
  static void
  ruby_ep0_thread(void *arg, wait_result_t wr)
  {
