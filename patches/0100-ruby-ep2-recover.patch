@@ -1,0 +1,135 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index b52c8f5..9e44d2e 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -712,6 +712,9 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define QISAR0_OFF      0x0700
+ #define QISAR1_OFF      0x0710
+ #define TQERRIR0_OFF    0x0780
++#define EP_RST_OFF      0x0804
++#define TX_SENDSTALL    (1u << 21)
++#define TX_SENTSTALL    (1u << 22)
+ 
+ #define QMU_Q_START     1u
+ #define QMU_Q_RESUME    2u
+@@ -733,6 +736,10 @@ static uint64_t ruby_log_pa;
+ static uint32_t ruby_push_seq;
+ static uint32_t ruby_push_tries;
+ static uint32_t ruby_stall_seen;
++static uint32_t ruby_q1_last;
++static uint32_t ruby_err_last;
++static uint32_t ruby_recoveries;
++static uint32_t ruby_busy_ticks;
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern pmap_t kernel_pmap;
+@@ -783,6 +790,21 @@ ruby_gpd_clear(uint32_t i)
+         g[k] = 0;
+ }
+ 
++/* P9/vendor stall clear for a non-EP0 endpoint: W1C the stall, pulse EP_RST. */
++static void
++ruby_ep2_recover(vm_offset_t mac)
++{
++    uint32_t csr = ruby_rd32(mac, TX2CSR0_OFF);
++
++    ruby_wr32(mac, TX2CSR0_OFF,
++        (csr & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
++    ruby_wr32(mac, EP_RST_OFF, 1u << 18);   /* EP_RST(in, 2) = BIT(16) << 2 */
++    ruby_wr32(mac, EP_RST_OFF, 0);
++    ruby_tx_busy = 0;
++    ruby_busy_ticks = 0;
++    ruby_recoveries++;
++}
++
+ static void
+ ruby_ep2_config(vm_offset_t mac)
+ {
+@@ -850,17 +872,20 @@ ruby_ep2_push_log(vm_offset_t mac)
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+     q1 = ruby_rd32(mac, QISAR1_OFF);
+     err = ruby_rd32(mac, TQERRIR0_OFF);
++    ruby_q1_last = q1;
++    ruby_err_last = err;
+     if (q0 & (1u << 2)) {
+         ruby_wr32(mac, QISAR0_OFF, 1u << 2);
+         ruby_tx_busy = 0;
++        ruby_busy_ticks = 0;
+     }
+     /* QISAR1 bit0 is TXQ_EMPTY, a normal state, not an error. */
+     if (q1)
+         ruby_wr32(mac, QISAR1_OFF, q1);
+-    if (err) {
+-        ruby_wr32(mac, TQERRIR0_OFF, err);
+-        ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+-        ruby_tx_busy = 0;
++    if (err || (q1 & 0x6u)) {
++        if (err)
++            ruby_wr32(mac, TQERRIR0_OFF, err);
++        ruby_ep2_recover(mac);
+     }
+ 
+     /*
+@@ -868,8 +893,12 @@ ruby_ep2_push_log(vm_offset_t mac)
+      * in DRAM, so HWO alone cannot gate reuse of the shared log buffer:
+      * only TX done (QISAR0 bit2) releases the single in-flight slot.
+      */
+-    if (ruby_tx_busy)
+-        return;
++    if (ruby_tx_busy) {
++        if (++ruby_busy_ticks > 20)         /* ~2 s without TX done */
++            ruby_ep2_recover(mac);
++        else
++            return;
++    }
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+         if (ruby_gpd_ring[i * 16] & 1u)
+@@ -934,24 +963,18 @@ ruby_ep2_status_poll(vm_offset_t mac)
+     if (!ruby_ep_ready)
+         return;
+     csr = ruby_rd32(mac, TX2CSR0_OFF);
+-    if (csr & (1u << 22)) {     /* TX_SENTSTALL is W1C */
+-        ruby_wr32(mac, TX2CSR0_OFF, (csr & ~(1u << 22)) | (1u << 22));
++    if (csr & TX_SENTSTALL) {
+         ruby_stall_seen++;
+-        ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++        ruby_ep2_recover(mac);
+     }
+ }
+ 
+ static void
+ ruby_ep2_halt_clear(vm_offset_t mac)
+ {
+-    uint32_t csr;
+-
+     if (!ruby_ep_ready)
+         return;
+-    csr = ruby_rd32(mac, TX2CSR0_OFF);
+-    if (csr & (1u << 22))
+-        ruby_wr32(mac, TX2CSR0_OFF, (csr & ~(1u << 22)) | (1u << 22));
+-    ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++    ruby_ep2_recover(mac);
+ }
+ 
+ /*
+@@ -961,7 +984,7 @@ ruby_ep2_halt_clear(vm_offset_t mac)
+ static void
+ ruby_ep0_vendor_state(vm_offset_t mac, uint32_t t, uint32_t wlen)
+ {
+-    uint32_t v[8];
++    uint32_t v[12];
+ 
+     v[0] = 0x45503253u;         /* "EP2S" */
+     v[1] = (ruby_push_seq & 0xffffu) | ((ruby_gpd_enq & 0xfu) << 16) |
+@@ -973,6 +996,10 @@ ruby_ep0_vendor_state(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     v[5] = ruby_rd32(mac, TQERRIR0_OFF);
+     v[6] = ruby_rd32(mac, TQCSR2_OFF);
+     v[7] = ruby_rd32(mac, TX2CSR0_OFF);
++    v[8] = ruby_q1_last;
++    v[9] = ruby_err_last;
++    v[10] = ruby_recoveries;
++    v[11] = ruby_busy_ticks;
+     ruby_ep0_send(mac, t, 0xc021, (const uint8_t *)v, sizeof(v), wlen);
+ }
+ 
