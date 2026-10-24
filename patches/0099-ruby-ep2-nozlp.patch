@@ -1,0 +1,17 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 3355907..b52c8f5 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -819,7 +819,11 @@ ruby_ep2_config(vm_offset_t mac)
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+ 
+     ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 2));
++    /*
++     * 64-byte frames are exactly wMaxPacketSize; an appended ZLP makes the
++     * host pipe stall after a few packets, so keep TX ZLP off for EP2.
++     */
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) & ~(1u << 2));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 18) | (1u << 2));
+     ruby_wr32(mac, TQSAR2_OFF, (uint32_t)ruby_ring_pa);

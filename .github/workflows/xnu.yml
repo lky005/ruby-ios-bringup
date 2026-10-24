@@ -41,7 +41,7 @@ permissions:
 env:
   BASE_REPO: https://github.com/MakrSas/ios-topaz.git
   BASE_SHA: 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
-  PATCHSET_SHA256: 8a4aca603acd1632bb91a54530bbd03f6e1cf7dd8601897eca6c9c464f0d63a5
+  PATCHSET_SHA256: 24e058439a7deed79cb7ed69ed9235c6165fc59641752317c281dddafb80ebc3
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
