@@ -17,6 +17,7 @@ order.
 | `0088-ruby-handoff-dump.patch` | WIP | `bsd/dev/ruby_usb.c` | `rubydump=1`: dump PE_state/DT header and IPPC/MAC/PHY registers to SWEETLOG at probe entry (stage0) and after the EP0 window (stage1) |
 | `0089-ruby-ep0-timing.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 data-IN: wait ~100 us and for `EP0_FIFOFULL` clear before `DATAEND` (P9-proven timing) |
 | `0090-ruby-devspeed-hs.patch` | WIP | `bsd/dev/ruby_usb.c` | keep `DEVICE_CONF` speed=3 (HS) at probe init instead of clearing it to 0 |
+| `0091-ruby-devconf-offset.patch` | WIP | `bsd/dev/ruby_usb.c` | fix `DEVICE_CONF` offset `0x1800` -> `0x0800` (SET_ADDRESS); revert 0090 to vendor value 0 |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the

@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index c1bc729..febe848 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -54,7 +54,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+ /* MAC */
+ #define USB3_CONFIG  (MTU3_PA + 0x141c)
+-#define DEVICE_CONF  (MTU3_PA + 0x1800)
++#define DEVICE_CONF  (MTU3_PA + 0x0800)
+ #define MISC_CTRL    (MTU3_PA + 0x0c84)
+ #define PM_CTRL      (MTU3_PA + 0x2404)
+ #define USB20_OP     (MTU3_PA + 0x2460)
+@@ -903,8 +903,7 @@ ruby_usb_probe(void)
+     ruby_wr32(mac, USB3_CONFIG - MTU3_PA, v & ~(1u << 0));
+     v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
+     ruby_wr32(mac, PM_CTRL - MTU3_PA, v | (1u << 5));
+-    /* Keep the HW-detected HS speed (3); LK already enumerated as HS. */
+-    ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 3);
++    ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 0);
+     v = ruby_rd32(ippc, 0x50);
+     ruby_wr32(ippc, 0x50, v & ~U2_OTG_SEL);
+     v = ruby_rd32(mac, MISC_CTRL - MTU3_PA);
