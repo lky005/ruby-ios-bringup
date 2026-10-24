@@ -1,0 +1,40 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 9e44d2e..5ef30c8 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -460,19 +460,32 @@ ruby_ep0_send(vm_offset_t mac, uint32_t t, uint16_t key, const uint8_t *data,
+                 break;
+             delay(10);
+         }
++        if (spin >= 1000) {
++            /* Host never took this packet: STALL, never DATAEND. */
++            ruby_trace(t, RUBY_TR_NOTE, 5, key,
++                ruby_rd32(mac, EP0CSR_OFF), sent);
++            ruby_ep0_stall(mac, t, key, wlen);
++            return;
++        }
+         sent += n;
+     }
+ 
+     /* P9-proven: let the FIFO drain before DATAEND. */
+     delay(100);
+-    for (spin = 0; spin < 1000 &&
++    for (spin = 0; spin < 3000 &&
+         (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL); spin++)
+         delay(100);
++    if (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL) {
++        /* DATAEND into FIFOFULL wedges EP0 forever; STALL instead. */
++        ruby_trace(t, RUBY_TR_NOTE, 6, key,
++            ruby_rd32(mac, EP0CSR_OFF), sent);
++        ruby_ep0_stall(mac, t, key, wlen);
++        return;
++    }
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
+     ruby_trace(t, RUBY_TR_SEND, key, total, wlen, sent);
+-    ruby_trace(t, RUBY_TR_TX, key, csr,
+-        spin >= 1000 ? 1 : 0, ruby_rd32(mac, EP0CSR_OFF));
++    ruby_trace(t, RUBY_TR_TX, key, csr, 0, ruby_rd32(mac, EP0CSR_OFF));
+ }
+ 
+ static const uint8_t *
