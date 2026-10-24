@@ -1,0 +1,74 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 4d6d31a..724905c 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -709,6 +709,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ static uint8_t ruby_gpd_ring[RUBY_GPD_NUM * 16] __attribute__((aligned(4096)));
+ static uint8_t ruby_log_buf[RUBY_LOG_CHUNK] __attribute__((aligned(4096)));
+ static uint32_t ruby_gpd_enq;
++static volatile uint32_t ruby_tx_busy;
+ static volatile uint32_t ruby_ep_ready;
+ static uint64_t ruby_log_pos;
+ static uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
+@@ -827,20 +828,26 @@ ruby_ep2_push_log(vm_offset_t mac)
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+     q1 = ruby_rd32(mac, QISAR1_OFF);
+     err = ruby_rd32(mac, TQERRIR0_OFF);
+-    if (q0 & (1u << 2))
++    if (q0 & (1u << 2)) {
+         ruby_wr32(mac, QISAR0_OFF, 1u << 2);
++        ruby_tx_busy = 0;
++    }
+     /* QISAR1 bit0 is TXQ_EMPTY, a normal state, not an error. */
+     if (q1)
+         ruby_wr32(mac, QISAR1_OFF, q1);
+     if (err) {
+         ruby_wr32(mac, TQERRIR0_OFF, err);
+         ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++        ruby_tx_busy = 0;
+     }
+ 
+     /*
+-     * HWO is cleared by the QMU in DRAM, so invalidate the cached line
+-     * before trusting the flag; a slot still owned is never rewritten.
++     * The QMU can take a GPD into its internal queue before HWO is cleared
++     * in DRAM, so HWO alone cannot gate reuse of the shared log buffer:
++     * only TX done (QISAR0 bit2) releases the single in-flight slot.
+      */
++    if (ruby_tx_busy)
++        return;
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+         if (ruby_gpd_ring[i * 16] & 1u)
+@@ -849,7 +856,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+     enq = ruby_gpd_enq;
+     g = ruby_gpd_ring + enq * 16;
+     if (hwo & (1u << enq))
+-        return;                 /* ring full: keep enq, retry next tick */
++        return;                 /* safety net: never rewrite an owned slot */
+ 
+     pos = ruby_log_pos;
+     n = sweet_log_copy(&pos, (char *)ruby_log_buf + RUBY_HDR_LEN,
+@@ -864,7 +871,13 @@ ruby_ep2_push_log(vm_offset_t mac)
+     hdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
+         ((ruby_rd32(mac, TQCSR2_OFF) & 0xffffu) << 16);
+     hdr[2] = err;
+-    hdr[3] = ruby_rd32(mac, TX2CSR0_OFF);
++    {
++        uint32_t csr0 = ruby_rd32(mac, TX2CSR0_OFF);
++
++        if (csr0 & (1u << 22))  /* TX_SENTSTALL is W1C */
++            ruby_wr32(mac, TX2CSR0_OFF, (csr0 & ~(1u << 22)) | (1u << 22));
++        hdr[3] = csr0;
++    }
+     ruby_push_seq++;
+ 
+     ruby_gpd_clear(enq);
+@@ -881,6 +894,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+     ruby_dc_civac(g, 16);
+     ruby_log_pos = pos;
+     ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
++    ruby_tx_busy = 1;
+ 
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
