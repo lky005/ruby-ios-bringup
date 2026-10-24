@@ -1,0 +1,24 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index d0c651f..93417a9 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -130,6 +130,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define EP0_RXPKTRDY    (1u << 16)
+ #define EP0_MAXPKTSZ_MSK 0x3ffu
+ #define EP0_W1C_BITS    (~(EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL))
++#define EP0_FIFOFULL   (1u << 23)
+ 
+ /* P2a trace ring: snapshots and EP0 setup attempts, dumped once. */
+ #define RUBY_TRACE_MAX  512
+@@ -456,6 +457,11 @@ ruby_ep0_send(vm_offset_t mac, uint32_t t, uint16_t key, const uint8_t *data,
+         sent += n;
+     }
+ 
++    /* P9-proven: let the FIFO drain before DATAEND. */
++    delay(100);
++    for (spin = 0; spin < 1000 &&
++        (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL); spin++)
++        delay(100);
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
+     ruby_trace(t, RUBY_TR_SEND, key, total, wlen, sent);
