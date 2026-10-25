@@ -1,0 +1,77 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 9720189..578bb65 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -827,6 +827,7 @@ static uint8_t ruby_log_buf[RUBY_GPD_NUM][RUBY_LOG_CHUNK]
+ static uint32_t ruby_gpd_enq;
+ static uint32_t ruby_gpd_deq;
+ static uint32_t ruby_inflight;
++static uint32_t ruby_ep2_host_seen;
+ static volatile uint32_t ruby_tx_busy;
+ static volatile uint32_t ruby_ep_ready;
+ static uint64_t ruby_log_pos;
+@@ -891,6 +892,16 @@ ruby_gpd_clear(uint32_t i)
+         g[k] = 0;
+ }
+ 
++/* P9 timeout recovery: nudge the queue, never flush the endpoint FIFO. */
++static void
++ruby_ep2_resume(vm_offset_t mac)
++{
++    ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++    if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
++        ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++    ruby_busy_ticks = 0;
++}
++
+ /* P9/vendor stall clear for a non-EP0 endpoint: W1C the stall, pulse EP_RST. */
+ static void
+ ruby_ep2_recover(vm_offset_t mac)
+@@ -903,6 +914,7 @@ ruby_ep2_recover(vm_offset_t mac)
+     ruby_wr32(mac, EP_RST_OFF, 0);
+     ruby_inflight = 0;
+     ruby_gpd_deq = ruby_gpd_enq;
++    ruby_ep2_host_seen = 0;
+     ruby_tx_busy = 0;
+     ruby_busy_ticks = 0;
+     ruby_recoveries++;
+@@ -915,6 +927,7 @@ ruby_ep2_config(vm_offset_t mac)
+ 
+     if (ruby_ep_ready)
+         return;
++    ruby_ep2_host_seen = 0;
+     ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         ruby_log_pa[i] = ruby_dma_pa(ruby_log_buf[i]);
+@@ -1037,6 +1050,8 @@ ruby_ep2_push_log(vm_offset_t mac)
+     ruby_err_last = err;
+     if (q0 & (1u << 2)) {
+         ruby_wr32(mac, QISAR0_OFF, 1u << 2);
++        /* First TX done means the host has issued an IN token. */
++        ruby_ep2_host_seen = 1;
+         freed = ruby_ep2_drain(mac);
+         if (freed)
+             ruby_busy_ticks = 0;
+@@ -1050,10 +1065,10 @@ ruby_ep2_push_log(vm_offset_t mac)
+         ruby_ep2_recover(mac);
+     }
+ 
+-    if (ruby_inflight > 0 && freed == 0) {
+-        if (++ruby_busy_ticks > 400)        /* ~0.4 s at 1 ms */
+-            ruby_ep2_recover(mac);
+-    } else if (ruby_inflight == 0) {
++    if (ruby_inflight > 0 && freed == 0 && ruby_ep2_host_seen) {
++        if (++ruby_busy_ticks > 2000)       /* ~2 s at 1 ms; P9 resumes only */
++            ruby_ep2_resume(mac);
++    } else if (ruby_inflight == 0 || !ruby_ep2_host_seen) {
+         ruby_busy_ticks = 0;
+     }
+ 
+@@ -1178,6 +1193,7 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+     ruby_gpd_enq = 0;
+     ruby_gpd_deq = 0;
+     ruby_inflight = 0;
++    ruby_ep2_host_seen = 0;
+     ruby_wr32(mac, TQCSR2_OFF, 1u << 2);   /* stop the TX QMU */
+ 
+     if (reason == RUBY_REARM_ATTACH) {

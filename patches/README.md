@@ -37,6 +37,7 @@ order.
 | `0108-ruby-ep2-frame63.patch` | WIP | `bsd/dev/ruby_usb.c` | EP2 log frames are 63 bytes, one below `wMaxPacketSize`: the verified P9 TX path only sent short packets, while 64-byte frames are an exact multiple that never produced a QMU TX done |
 | `0109-ruby-ep2-slot2.patch` | WIP | `bsd/dev/ruby_usb.c` | EP2 TX slot back to 2, the value the verified P9 probe uses: 0102 changed the bulk endpoint to slot 0, the only endpoint-configuration difference left after the 63-byte frame test showed that frame length was not the cause |
 | `0110-ruby-ep2-queue.patch` | WIP | `bsd/dev/ruby_usb.c` | keep the EP2 QMU ring populated like the vendor driver: one buffer per GPD, one free sentinel slot, refill on TX done from the 1 ms thread, and walk completed GPDs with the current-GPD address plus HWO; a read-only vendor request exposes the queue diagnostics |
+| `0111-ruby-ep2-resume.patch` | WIP | `bsd/dev/ruby_usb.c` | the EP2 timeout only resumes the QMU every two seconds like the bare-metal P9 path instead of pulsing `EP_RST`: resetting the endpoint while the host was not reading flushed the FIFO repeatedly and reordered the stream; the timeout is armed only after the first TX done, so a bulk IN queue stays silent until the host has issued an IN token |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
