@@ -33,6 +33,7 @@ order.
 | `0104-ruby-ep0-p9-parity.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 writes `DATAEND` even when the TX FIFO is still full instead of stalling (the P9 probe never stalled there, and the stall made the host abandon the enumeration); the bus-reset recovery drains the EP0 FIFO; every trace entry and log line carries a millisecond stamp so the device timeline can be anchored on the host connect event |
 | `0105-ruby-ep0-ack-fifo-drain.patch` | WIP | `bsd/dev/ruby_usb.c` | the EP0 status stage waits for the TX FIFO to drain before it is written: the host sends SET_ADDRESS as soon as it has the device descriptor, and ACKing into a full FIFO made the xHCI Address Device command fail with CompletionCode 4, so the host reset the port and enumerated again |
 | `0106-ruby-ep0-ack-fast-drain.patch` | WIP | `bsd/dev/ruby_usb.c` | the same drain wait, shortened from 50 ms to 2 ms: the long wait made the hub path enumerate but broke the direct path, where the controller's response window is tighter; the time actually spent is reported in the trace |
+| `0107-ruby-ep0-p9-latency.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 response latency back to the bare-metal P9 semantics: the data stage waits 2 ms (not 300 ms) for the TX FIFO before writing `DATAEND`, and the status stage is written without any wait, like the vendor driver and the P9 probe |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the

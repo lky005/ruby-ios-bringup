@@ -1,0 +1,66 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 37e3d3b..207a4d2 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -442,8 +442,6 @@ static void
+ ruby_ep0_ack(vm_offset_t mac, uint32_t t, uint16_t key, uint32_t wlen)
+ {
+     uint32_t csr;
+-    uint32_t spin;
+-    uint32_t waited = 0;
+ 
+     /*
+      * The host sends SET_ADDRESS as soon as it has the device descriptor,
+@@ -452,25 +450,15 @@ ruby_ep0_ack(vm_offset_t mac, uint32_t t, uint16_t key, uint32_t wlen)
+      * xHCI Address Device command fail with a transaction error, and the
+      * host then reset the port and enumerated again.
+      *
+-     * The wait has to stay short: the 50 ms version made the hub path work
+-     * but broke the direct path, where the controller's response window is
+-     * tighter.  Two milliseconds is one full-speed frame plus slack, and
+-     * the time actually spent is reported in the trace.
++     * No wait here: both the vendor driver and the bare-metal probe write
++     * the status stage straight away.  The 50 ms and 2 ms waits that were
++     * tried in between only moved the failure from one host path to the
++     * other.  The trace reports the CSR so the state is visible.
+      */
+-    delay(100);
+-    for (spin = 0; spin < 20 &&
+-        (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL); spin++) {
+-        delay(100);
+-        waited += 100;
+-    }
+-    if (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL)
+-        ruby_trace(t, RUBY_TR_NOTE, 8, key,
+-            ruby_rd32(mac, EP0CSR_OFF), waited);
+-
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     csr |= EP0_SETUPPKTRDY | EP0_DATAEND;
+     ruby_wr32(mac, EP0CSR_OFF, csr);
+-    ruby_trace(t, RUBY_TR_ACK, key, csr, wlen, waited);
++    ruby_trace(t, RUBY_TR_ACK, key, csr, wlen, 0);
+ }
+ 
+ static void
+@@ -532,14 +520,19 @@ ruby_ep0_send(vm_offset_t mac, uint32_t t, uint16_t key, const uint8_t *data,
+      * Descriptor Request Failed"); the bare-metal probe always wrote
+      * DATAEND.  If the endpoint does wedge, the host resets the port and
+      * the bus-reset recovery re-arms EP0.
++     *
++     * The wait has to stay short: the bare-metal probe spins ~1000 times
++     * (about a millisecond) and then writes DATAEND anyway.  Our 300 ms
++     * version spent most of the host's control-transfer budget before the
++     * status stage was written at all.
+      */
+     delay(100);
+-    for (spin = 0; spin < 3000 &&
++    for (spin = 0; spin < 20 &&
+         (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL); spin++)
+         delay(100);
+     if (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL)
+         ruby_trace(t, RUBY_TR_NOTE, 6, key,
+-            ruby_rd32(mac, EP0CSR_OFF), sent);
++            ruby_rd32(mac, EP0CSR_OFF), spin * 100);
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
+     ruby_trace(t, RUBY_TR_SEND, key, total, wlen, sent);
