@@ -1,0 +1,116 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1c1431e..e0a2ad0 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -212,6 +212,13 @@ static uint8_t ruby_config;
+ static volatile uint32_t ruby_cfg_seen;
+ static vm_offset_t ruby_mac_base;
+ static vm_offset_t ruby_ippc_base;
++/*
++ * Milliseconds since the USB probe started.  The window counts it from its
++ * own tick, the resident thread keeps counting at 1 ms per iteration, so
++ * the trace and the log lines share one timeline that the host can anchor
++ * on the connect event.
++ */
++static volatile uint32_t ruby_ms;
+ static void ruby_ep2_config(vm_offset_t mac);
+ static void ruby_ep2_push_log(vm_offset_t mac);
+ 
+@@ -368,10 +375,11 @@ static void
+ ruby_trace(uint32_t t, uint16_t type, uint16_t a, uint32_t b, uint32_t c,
+     uint32_t d)
+ {
++    (void)t;
+     if (ruby_event_count < RUBY_TRACE_MAX) {
+         struct ruby_evt *e = &ruby_events[ruby_event_count++];
+ 
+-        e->t = t;
++        e->t = ruby_ms;
+         e->type = type;
+         e->a = a;
+         e->b = b;
+@@ -493,18 +501,20 @@ ruby_ep0_send(vm_offset_t mac, uint32_t t, uint16_t key, const uint8_t *data,
+         sent += n;
+     }
+ 
+-    /* P9-proven: let the FIFO drain before DATAEND. */
++    /*
++     * P9 parity: waiting for the FIFO to drain is a courtesy, not a gate.
++     * Stalling here made the host give up on the whole enumeration ("Device
++     * Descriptor Request Failed"); the bare-metal probe always wrote
++     * DATAEND.  If the endpoint does wedge, the host resets the port and
++     * the bus-reset recovery re-arms EP0.
++     */
+     delay(100);
+     for (spin = 0; spin < 3000 &&
+         (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL); spin++)
+         delay(100);
+-    if (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL) {
+-        /* DATAEND into FIFOFULL wedges EP0 forever; STALL instead. */
++    if (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL)
+         ruby_trace(t, RUBY_TR_NOTE, 6, key,
+             ruby_rd32(mac, EP0CSR_OFF), sent);
+-        ruby_ep0_stall(mac, t, key, wlen);
+-        return;
+-    }
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
+     ruby_trace(t, RUBY_TR_SEND, key, total, wlen, sent);
+@@ -758,6 +768,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+             log_tick = 0;
+             ruby_ep2_push_log(ruby_mac_base);
+         }
++        ruby_ms++;
+         delay(1000);
+     }
+ }
+@@ -1052,7 +1063,12 @@ ruby_ep2_halt_clear(vm_offset_t mac)
+ static void
+ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+ {
+-    uint32_t csr, dc, v;
++    uint32_t csr, dc, v, count, i;
++
++    /* Drop whatever the host left in the FIFO before the reset. */
++    count = ruby_rd32(mac, RXCOUNT0_OFF);
++    for (i = 0; i < count; i++)
++        (void)ruby_rd8(mac, FIFO0_OFF);
+ 
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     csr |= EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL;
+@@ -1112,7 +1128,8 @@ ruby_usb_reset_check(vm_offset_t mac)
+     ruby_usb_rearm(mac, RUBY_REARM_RESET);
+     ruby_trace(0, RUBY_TR_STATE, 7, st, resets, 0);
+     if (resets <= 4)
+-        printf("RUBY USB: host bus reset #%u, address cleared\n", resets);
++        printf("RUBY USB: t=%u host bus reset #%u, address cleared\n",
++            ruby_ms, resets);
+ }
+ 
+ /*
+@@ -1144,7 +1161,7 @@ ruby_usb_attach_poll(vm_offset_t mac, vm_offset_t ippc)
+     if (!present) {
+         seen_detach = 1;
+         ruby_trace(0, RUBY_TR_STATE, 8, v, 0, 0);
+-        printf("RUBY USB: VBUS detached\n");
++        printf("RUBY USB: t=%u VBUS detached\n", ruby_ms);
+         return;
+     }
+     if (!seen_detach)
+@@ -1153,7 +1170,7 @@ ruby_usb_attach_poll(vm_offset_t mac, vm_offset_t ippc)
+     attaches++;
+     ruby_usb_rearm(mac, RUBY_REARM_ATTACH);
+     ruby_trace(0, RUBY_TR_STATE, 9, v, attaches, 0);
+-    printf("RUBY USB: VBUS attached, device re-armed\n");
++    printf("RUBY USB: t=%u VBUS attached, device re-armed\n", ruby_ms);
+ }
+ 
+ /*
+@@ -1242,6 +1259,7 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+         if (++sub == 10) {
+             sub = 0;
+             t++;
++            ruby_ms = t;
+         }
+     }
+ 
