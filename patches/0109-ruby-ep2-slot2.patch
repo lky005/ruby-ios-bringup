@@ -1,0 +1,19 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 4791e18..54b839b 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -922,8 +922,12 @@ ruby_ep2_config(vm_offset_t mac)
+     }
+ 
+     ruby_wr32(mac, TX2CSR0_OFF, 64u | (1u << 29));
+-    /* Slot 0: one 512 B FIFO segment; bulk type 0. */
+-    ruby_wr32(mac, TX2CSR1_OFF, 0);
++    /*
++     * P9 runs the same bulk endpoint with TX_SLOT(2); 0102 changed this to
++     * slot 0 and never restored it.  Bulk type is 0, so only the slot field
++     * differs from the verified reference.
++     */
++    ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
+ 
+     for (i = 0; i < RUBY_GPD_NUM; i++) {

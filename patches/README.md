@@ -35,6 +35,7 @@ order.
 | `0106-ruby-ep0-ack-fast-drain.patch` | WIP | `bsd/dev/ruby_usb.c` | the same drain wait, shortened from 50 ms to 2 ms: the long wait made the hub path enumerate but broke the direct path, where the controller's response window is tighter; the time actually spent is reported in the trace |
 | `0107-ruby-ep0-p9-latency.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 response latency back to the bare-metal P9 semantics: the data stage waits 2 ms (not 300 ms) for the TX FIFO before writing `DATAEND`, and the status stage is written without any wait, like the vendor driver and the P9 probe |
 | `0108-ruby-ep2-frame63.patch` | WIP | `bsd/dev/ruby_usb.c` | EP2 log frames are 63 bytes, one below `wMaxPacketSize`: the verified P9 TX path only sent short packets, while 64-byte frames are an exact multiple that never produced a QMU TX done |
+| `0109-ruby-ep2-slot2.patch` | WIP | `bsd/dev/ruby_usb.c` | EP2 TX slot back to 2, the value the verified P9 probe uses: 0102 changed the bulk endpoint to slot 0, the only endpoint-configuration difference left after the 63-byte frame test showed that frame length was not the cause |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
