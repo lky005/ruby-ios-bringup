@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 207a4d2..4791e18 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -818,7 +818,8 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define RUBY_GPD_NUM    4
+ #define RUBY_LOG_CHUNK  64
+ #define RUBY_HDR_LEN    16
+-#define RUBY_LOG_TEXT   (RUBY_LOG_CHUNK - RUBY_HDR_LEN)
++#define RUBY_EP2_FRAME  63
++#define RUBY_LOG_TEXT   (RUBY_EP2_FRAME - RUBY_HDR_LEN)
+ 
+ static uint8_t ruby_gpd_ring[RUBY_GPD_NUM * 16] __attribute__((aligned(4096)));
+ static uint8_t ruby_log_buf[RUBY_LOG_CHUNK] __attribute__((aligned(4096)));
+@@ -939,8 +940,10 @@ ruby_ep2_config(vm_offset_t mac)
+ 
+     ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
+     /*
+-     * 64-byte frames are exactly wMaxPacketSize; an appended ZLP makes the
+-     * host pipe stall after a few packets, so keep TX ZLP off for EP2.
++     * The verified P9 TX path only ever sent short packets.  Keep each
++     * frame one byte below wMaxPacketSize so every GPD ends on a short
++     * packet; 64-byte frames are an untested exact multiple and never
++     * produced a TX done.  TX ZLP stays off for the same reason.
+      */
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) & ~(1u << 2));
+     ruby_wr32(mac, TQERRIESR0_OFF,

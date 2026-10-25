@@ -69,6 +69,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0105-ruby-ep0-ack-fifo-drain.patch" \
     "$ROOT/patches/0106-ruby-ep0-ack-fast-drain.patch" \
     "$ROOT/patches/0107-ruby-ep0-p9-latency.patch" \
+    "$ROOT/patches/0108-ruby-ep2-frame63.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
