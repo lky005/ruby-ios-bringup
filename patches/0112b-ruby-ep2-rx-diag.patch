@@ -1,0 +1,221 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index a5e7633..11637bc 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -572,10 +572,16 @@ static void ruby_ep0_vendor_diag(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
+ static void ruby_ep0_vendor_rx(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
++static void ruby_ep0_vendor_rx_gpd(vm_offset_t mac, uint32_t t,
++    uint32_t wlen);
++static void ruby_ep0_vendor_rx_reset(vm_offset_t mac, uint32_t t,
++    uint32_t wlen);
+ static void ruby_ep2_halt_clear(vm_offset_t mac);
+ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+ static void ruby_ep2_rx_poll(vm_offset_t mac);
++static void ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters);
++static void ruby_ep2_rx_halt_clear(vm_offset_t mac);
+ static void ruby_usb_reset_check(vm_offset_t mac);
+ static void ruby_usb_attach_poll(vm_offset_t mac, vm_offset_t ippc);
+ 
+@@ -641,6 +647,8 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+     case 1: /* CLEAR_FEATURE */
+         if (wlen == 0 && value == 0 && index == 0x82)
+             ruby_ep2_halt_clear(mac);
++        else if (wlen == 0 && value == 0 && index == 0x02)
++            ruby_ep2_rx_halt_clear(mac);
+         if (wlen == 0)
+             ruby_ep0_ack(mac, t, key, wlen);
+         else
+@@ -735,6 +743,10 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_vendor_diag(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x23)
+         ruby_ep0_vendor_rx(mac, t, len);
++    else if (st[0] == 0xc0 && st[1] == 0x24)
++        ruby_ep0_vendor_rx_gpd(mac, t, len);
++    else if (st[0] == 0xc0 && st[1] == 0x26)
++        ruby_ep0_vendor_rx_reset(mac, t, len);
+     else
+         ruby_ep0_stall(mac, t, key, len);
+ }
+@@ -848,6 +860,9 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define QMU_RX_CS_ERR_BIT   (1u << 2)
+ #define QMU_RX_ZLP_ERR_BIT  (1u << 18)
+ #define QMU_RX_DONE_BIT     (1u << 18)
++#define RX_SENDSTALL_BIT    (1u << 21)
++#define RX_SENTSTALL_BIT    (1u << 22)
++#define RX_RXPKTRDY_BIT     (1u << 16)
+ #define QISAR1_TXQ_EMPTY    (1u << 0)
+ #define QISAR1_TXQ_CSERR    (1u << 1)
+ #define QISAR1_TXQ_LENERR   (1u << 2)
+@@ -905,6 +920,8 @@ static uint32_t ruby_rx_empty;
+ static uint32_t ruby_rx_done_events;
+ static uint32_t ruby_rx_bypasses;
+ static uint32_t ruby_rx_ext_bad;
++static uint32_t ruby_rx_zlp_err;
++static uint32_t ruby_rx_stall_seen;
+ 
+ #define RUBY_FNV_OFFSET 2166136261u
+ 
+@@ -1300,6 +1317,8 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     ruby_rx_done_events = 0;
+     ruby_rx_bypasses = 0;
+     ruby_rx_ext_bad = 0;
++    ruby_rx_zlp_err = 0;
++    ruby_rx_stall_seen = 0;
+     ruby_rx_deq = 0;
+ 
+     ruby_wr32(mac, RX2CSR0_OFF, 64u | RX_DMAREQEN);
+@@ -1324,6 +1343,66 @@ ruby_ep2_rx_config(vm_offset_t mac)
+         ruby_rx_buf_pa[2], ruby_rx_buf_pa[3]);
+ }
+ 
++static void
++ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
++{
++    uint32_t csr, i;
++
++    if (!ruby_rx_ring_pa)
++        return;
++
++    ruby_wr32(mac, RQCSR2_OFF, QMU_Q_STOP);
++    csr = ruby_rd32(mac, RX2CSR0_OFF) &
++        ~(RX_SENTSTALL_BIT | RX_RXPKTRDY_BIT);
++    csr = (csr & ~RX_SENDSTALL_BIT) | RX_SENTSTALL_BIT | RX_RXPKTRDY_BIT;
++    ruby_wr32(mac, RX2CSR0_OFF, csr);
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++
++    /* EP_RST may reset the per-endpoint configuration; restore it before
++     * re-arming the ring so every clean test starts from the same state. */
++    ruby_wr32(mac, RX2CSR0_OFF, 64u | RX_DMAREQEN);
++    ruby_wr32(mac, RX2CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
++    ruby_wr32(mac, RX2CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
++    ruby_wr32(mac, QCR0_OFF,
++        ruby_rd32(mac, QCR0_OFF) | QMU_RX_CS_EN_BIT);
++    ruby_wr32(mac, QCR3_OFF,
++        (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
++    ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
++        QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
++    ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
++        QMU_RX_ZLP_ERR_BIT);
++    ruby_wr32(mac, RQSAR2_OFF, (uint32_t)ruby_rx_ring_pa);
++    ruby_wr32(mac, RQHIAR2_OFF, (uint32_t)((ruby_rx_ring_pa >> 32) & 0xfu));
++
++    ruby_rx_ready = 0;
++    ruby_rx_deq = 0;
++    ruby_rx_stall_seen = 0;
++    if (reset_counters) {
++        ruby_rx_packets = 0;
++        ruby_rx_bytes = 0;
++        ruby_rx_zlp = 0;
++        ruby_rx_last_len = 0;
++        ruby_rx_crc = RUBY_FNV_OFFSET;
++        ruby_rx_errors = 0;
++        ruby_rx_empty = 0;
++        ruby_rx_done_events = 0;
++        ruby_rx_bypasses = 0;
++        ruby_rx_ext_bad = 0;
++        ruby_rx_zlp_err = 0;
++    }
++    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++        ruby_ep2_rx_arm(i);
++    ruby_wr32(mac, RQCSR2_OFF, QMU_Q_START);
++    ruby_rx_ready = 1;
++}
++
++static void
++ruby_ep2_rx_halt_clear(vm_offset_t mac)
++{
++    ruby_ep2_rx_reset(mac, 0);
++}
++
+ static uint32_t
+ ruby_ep2_rx_cur_slot(vm_offset_t mac)
+ {
+@@ -1425,6 +1504,9 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+     if (!ruby_rx_ready)
+         return;
+ 
++    if (ruby_rd32(mac, RX2CSR0_OFF) & RX_SENTSTALL_BIT)
++        ruby_rx_stall_seen = 1;
++
+     q1 = ruby_rd32(mac, QISAR1_OFF);
+     rxq = q1 & (QISAR1_RXQ_EMPTY | QISAR1_RXQ_CSERR |
+         QISAR1_RXQ_LENERR | QISAR1_RXQ_ZLPERR);
+@@ -1443,6 +1525,7 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+             err = ruby_rd32(mac, RQERRIR1_OFF);
+             if (err)
+                 ruby_wr32(mac, RQERRIR1_OFF, err);
++            ruby_rx_zlp_err++;
+             /* A ZLP is a valid RX event; it is counted by length 0. */
+         }
+     }
+@@ -1672,6 +1755,66 @@ ruby_ep0_vendor_rx(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     ruby_ep0_send(mac, t, 0xc023, (const uint8_t *)v, sizeof(v), wlen);
+ }
+ 
++/* Vendor IN request 0xC0/0x24: raw current/prev/next RX GPD + RX CSRs. */
++static void
++ruby_ep0_vendor_rx_gpd(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    uint32_t v[16];
++    uint32_t rqcpr, rqhiar, rqcsr, rx0, rx1, rx2, hwo = 0, cur, i;
++    uint32_t *g;
++
++    ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++        if (ruby_rx_gpd_ring[i * 16] & 1u)
++            hwo |= 1u << i;
++
++    rqcpr = ruby_rd32(mac, RQCPR2_OFF);
++    rqhiar = ruby_rd32(mac, RQHIAR2_OFF);
++    rqcsr = ruby_rd32(mac, RQCSR2_OFF);
++    rx0 = ruby_rd32(mac, RX2CSR0_OFF);
++    rx1 = ruby_rd32(mac, RX2CSR1_OFF);
++    rx2 = ruby_rd32(mac, RX2CSR2_OFF);
++    cur = ruby_ep2_rx_cur_slot(mac);
++
++    v[0] = 0x47325045u;         /* "EP2G" */
++    v[1] = rqcpr;
++    v[2] = rqhiar;
++    v[3] = rqcsr;
++    v[4] = rx0;
++    v[5] = rx1;
++    v[6] = rx2;
++    v[7] = hwo;
++    v[8] = cur;
++    v[9] = v[10] = v[11] = v[12] = v[13] = v[14] = 0;
++    if (cur != 0xffu) {
++        uint32_t prev = (cur + RUBY_RX_GPD_NUM - 1u) % RUBY_RX_GPD_NUM;
++        uint32_t next = (cur + 1u) % RUBY_RX_GPD_NUM;
++
++        g = (uint32_t *)(ruby_rx_gpd_ring + cur * 16);
++        v[9] = g[0];
++        v[10] = g[1];
++        v[11] = g[2];
++        v[12] = g[3];
++        v[13] = *(uint32_t *)(ruby_rx_gpd_ring + prev * 16 + 12);
++        v[14] = *(uint32_t *)(ruby_rx_gpd_ring + next * 16 + 12);
++    }
++    v[15] = (ruby_rx_zlp_err & 0xffffu) |
++        ((ruby_rx_stall_seen & 1u) << 16) |
++        ((ruby_rx_ready & 1u) << 31);
++    ruby_ep0_send(mac, t, 0xc024, (const uint8_t *)v, sizeof(v), wlen);
++}
++
++/* Vendor IN request 0xC0/0x26: reset the RX ring/counters for a clean test. */
++static void
++ruby_ep0_vendor_rx_reset(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    uint32_t v[1];
++
++    ruby_ep2_rx_reset(mac, 1);
++    v[0] = 0x4b4f5852u;         /* "RXOK" */
++    ruby_ep0_send(mac, t, 0xc026, (const uint8_t *)v, sizeof(v), wlen);
++}
++
+ static void
+ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+ {

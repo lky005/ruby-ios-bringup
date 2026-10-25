@@ -39,6 +39,7 @@ order.
 | `0110-ruby-ep2-queue.patch` | WIP | `bsd/dev/ruby_usb.c` | keep the EP2 QMU ring populated like the vendor driver: one buffer per GPD, one free sentinel slot, refill on TX done from the 1 ms thread, and walk completed GPDs with the current-GPD address plus HWO; a read-only vendor request exposes the queue diagnostics |
 | `0111-ruby-ep2-resume.patch` | WIP | `bsd/dev/ruby_usb.c` | the EP2 timeout only resumes the QMU every two seconds like the bare-metal P9 path instead of pulsing `EP_RST`: resetting the endpoint while the host was not reading flushed the FIFO repeatedly and reordered the stream; the timeout is armed only after the first TX done, so a bulk IN queue stays silent until the host has issued an IN token |
 | `0112-ruby-ep2-rx.patch` | WIP | `bsd/dev/ruby_usb.c` | add EP2 bulk OUT Stage A: 16 pre-armed RX GPDs with per-slot 64-byte buffers, the vendor RX GPD layout and RQCPR/HWO completion, slot 2/FIFO and ZLP configuration, and a read-only `0xC0/0x23` RX counter/CRC diagnostic; `QISAR1` is now cleared per direction so RX errors are not swallowed by the TX path |
+| `0112b-ruby-ep2-rx-diag.patch` | WIP | `bsd/dev/ruby_usb.c` | RX diagnostics only: a raw current/prev/next GPD request (`0xC0/0x24`), an RX reset for clean per-length tests (`0xC0/0x26`), CLEAR_FEATURE for EP2 OUT, RX2CSR0 stall and ZLP-error visibility; no buffer, GPD-layout, queue or TX change |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
