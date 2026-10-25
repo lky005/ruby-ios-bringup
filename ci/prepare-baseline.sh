@@ -71,6 +71,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0107-ruby-ep0-p9-latency.patch" \
     "$ROOT/patches/0108-ruby-ep2-frame63.patch" \
     "$ROOT/patches/0109-ruby-ep2-slot2.patch" \
+    "$ROOT/patches/0110-ruby-ep2-queue.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
