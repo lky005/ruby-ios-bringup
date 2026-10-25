@@ -29,7 +29,7 @@ order.
 | `0100-ruby-ep2-recover.patch` | WIP | `bsd/dev/ruby_usb.c` | P9-style endpoint recovery (W1C stall + `EP_RST`), busy watchdog, error telemetry in the vendor state |
 | `0101-ruby-ep0-nodataend.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 never writes `DATAEND` into a full FIFO: it stalls instead, so a missed transfer cannot wedge EP0 |
 | `0102-ruby-ep2-slot0.patch` | WIP | `bsd/dev/ruby_usb.c` | EP2 TX slot 0 (one 512 B FIFO segment), 0.5 s busy watchdog, FIFO capacity in the vendor state |
-| `0103-ruby-ep0-reset.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 setup capture waits for a short packet instead of stalling; the host bus reset (MAC2 common-USB status) is polled and recovered (address back to 0, EP0 re-armed, EP2/QMU stopped); EP0 is armed before the pull-up |
+| `0103-ruby-ep0-reset.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 setup capture waits for a short packet instead of stalling; the host bus reset (MAC2 common-USB status) is polled and recovered (address back to 0, EP0 re-armed, EP2/QMU stopped); EP0 is armed before the pull-up; a debounced VBUS sense re-arms the device after an unplug |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
