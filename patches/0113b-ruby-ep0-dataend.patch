@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 008698b..b56dd6f 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -570,11 +570,13 @@ ruby_ep0_tx_service(vm_offset_t mac, uint32_t t)
+         ruby_ep0_txpkts++;
+         return;
+     }
+-    if (csr & EP0_FIFOFULL) {
+-        if (++ruby_ep0_fifo_waits == 10)
+-            ruby_trace(t, RUBY_TR_NOTE, 6, 0, 0, csr);
+-        return;
+-    }
++    /*
++     * On this IP EP0_FIFOFULL remains set until DATAEND is written
++     * (0105/0107 finding).  Gating DATAEND on it deadlocks short and
++     * multi-packet transfers, so count it and terminate anyway.
++     */
++    if (csr & EP0_FIFOFULL)
++        ruby_ep0_fifo_waits++;
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
+     ruby_ep0_tx_pending = 0;
