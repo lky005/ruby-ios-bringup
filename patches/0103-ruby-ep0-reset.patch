@@ -1,0 +1,157 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 2dea529..9f60a9e 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -132,6 +132,18 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define EP0_W1C_BITS    (~(EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL))
+ #define EP0_FIFOFULL   (1u << 23)
+ 
++/*
++ * MAC2 common-USB interrupt registers.  Bit 2 of the status is the host
++ * bus reset; the P9 bare-metal probe latched it there and recovered the
++ * device from it.  Offsets are MAC-relative, like the EP0 registers.
++ */
++#define MAC2_INTR_ENABLE_OFF 0x2418
++#define MAC2_INTR_STATUS_OFF 0x241c
++#define MAC2_INTR_RESET      (1u << 2)
++
++/* Polls a partial SETUP packet may take to complete before giving up. */
++#define RUBY_EP0_PARTIAL_POLLS 50
++
+ /* P2a trace ring: snapshots and EP0 setup attempts, dumped once. */
+ #define RUBY_TRACE_MAX  512
+ #define RUBY_TR_SNAP    1
+@@ -519,6 +531,7 @@ static void ruby_ep0_vendor_state(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
+ static void ruby_ep2_halt_clear(vm_offset_t mac);
+ static void ruby_ep2_status_poll(vm_offset_t mac);
++static void ruby_usb_reset_check(vm_offset_t mac);
+ 
+ static void
+ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+@@ -602,14 +615,35 @@ static void
+ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+ {
+     static uint32_t last_key, last_value, last_len, retry;
++    static uint32_t partial_polls;
+     uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
+     uint32_t csr = ruby_rd32(mac, EP0CSR_OFF);
+     uint32_t w0, w1, key;
+     uint32_t value, index, len;
+     uint8_t st[8];
+ 
+-    if (count != 8) {
+-        ruby_trace(t, RUBY_TR_NOTE, 1, count, csr, 0);
++    /*
++     * A SETUP packet is 8 bytes, but RXCOUNT0 can read short while the
++     * packet is still arriving (at full speed it is split over frames).
++     * Give the packet a bounded window to complete; stalling on the first
++     * short read made the host give up on the whole enumeration.
++     */
++    if (count < 8) {
++        if (partial_polls == 0)
++            ruby_trace(t, RUBY_TR_NOTE, 1, count, csr, 0);
++        if (partial_polls++ < RUBY_EP0_PARTIAL_POLLS)
++            return;
++        partial_polls = 0;
++        ruby_ep0_stall(mac, t, 0, 0);
++        return;
++    }
++    partial_polls = 0;
++
++    if (count > 8) {
++        /* Stale bytes in the FIFO: drop them and let the host retry. */
++        for (uint32_t i = 0; i < count; i++)
++            (void)ruby_rd8(mac, FIFO0_OFF);
++        ruby_trace(t, RUBY_TR_NOTE, 7, count, csr, 0);
+         ruby_ep0_stall(mac, t, 0, 0);
+         return;
+     }
+@@ -660,7 +694,10 @@ extern void thread_deallocate(thread_t);
+ static void
+ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+ {
+-    uint32_t v = ruby_rd32(mac, EP0CSR_OFF);
++    uint32_t v;
++
++    ruby_usb_reset_check(mac);
++    v = ruby_rd32(mac, EP0CSR_OFF);
+ 
+     if (!(v & EP0_SETUPPKTRDY) && (v & EP0_MAXPKTSZ_MSK) != 64) {
+         ruby_ep0_set_maxpacket(mac);
+@@ -995,6 +1032,58 @@ ruby_ep2_halt_clear(vm_offset_t mac)
+     ruby_ep2_recover(mac);
+ }
+ 
++/*
++ * The host resets the bus whenever an enumeration attempt fails.  The
++ * MAC2 common-USB status latches that event; without handling it the
++ * device keeps its old address and a stale EP0 state, so the host's next
++ * attempt is answered by garbage and the device looks dead until reboot.
++ */
++static void
++ruby_usb_reset_check(vm_offset_t mac)
++{
++    static uint32_t seen, resets, armed;
++    uint32_t st = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
++    uint32_t csr, dc;
++
++    if (!(st & MAC2_INTR_RESET)) {
++        seen = 0;
++        armed = 1;         /* the bit reads back clear at least once */
++        return;
++    }
++    if (!armed)
++        return;             /* stuck high: not a usable reset source */
++    if (!seen) {
++        /* Confirm on the next poll: a single sample may be a glitch. */
++        seen = 1;
++        return;
++    }
++    seen = 0;
++    ruby_wr32(mac, MAC2_INTR_STATUS_OFF, st & MAC2_INTR_RESET);
++
++    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++    csr |= EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL;
++    csr &= ~EP0_MAXPKTSZ_MSK;
++    csr |= 64;
++    ruby_wr32(mac, EP0CSR_OFF, csr);
++
++    dc = ruby_rd32(mac, DEVICE_CONF - MTU3_PA);
++    dc &= ~0x7f000000u;         /* device address back to 0 */
++    ruby_wr32(mac, DEVICE_CONF - MTU3_PA, dc);
++
++    ruby_config = 0;
++    ruby_cfg_seen = 0;
++    ruby_ep_ready = 0;
++    ruby_tx_busy = 0;
++    ruby_busy_ticks = 0;
++    ruby_gpd_enq = 0;
++    ruby_wr32(mac, TQCSR2_OFF, 1u << 2);   /* stop the TX QMU */
++
++    resets++;
++    ruby_trace(0, RUBY_TR_STATE, 7, st, resets, 0);
++    if (resets <= 4)
++        printf("RUBY USB: host bus reset #%u, address cleared\n", resets);
++}
++
+ /*
+  * Vendor IN request 0xC0/0x21: live EP2/QMU state for the host, so a stuck
+  * queue can be inspected without another boot or a console read.
+@@ -1303,6 +1392,16 @@ ruby_usb_probe(void)
+     ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 0);
+     v = ruby_rd32(ippc, 0x50);
+     ruby_wr32(ippc, 0x50, v & ~U2_OTG_SEL);
++
++    /*
++     * Arm EP0 and latch the host bus-reset flag before the pull-up makes
++     * the device visible, so the first request is never met by an EP0
++     * that is not ready yet.
++     */
++    ruby_ep0_set_maxpacket(mac);
++    v = ruby_rd32(mac, MAC2_INTR_ENABLE_OFF);
++    ruby_wr32(mac, MAC2_INTR_ENABLE_OFF, v | MAC2_INTR_RESET);
++
+     v = ruby_rd32(mac, MISC_CTRL - MTU3_PA);
+     ruby_wr32(mac, MISC_CTRL - MTU3_PA, v | 0x3u);
+     v = ruby_rd32(mac, PM_CTRL - MTU3_PA);

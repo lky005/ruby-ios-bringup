@@ -22,6 +22,14 @@ order.
 | `0093-ruby-poll-pid.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 poll 1 ms -> 100 us; PID 0x0001 -> 0x0002 so WinUSB selects the configuration |
 | `0094-ruby-ep0-thread.patch` | WIP | `bsd/dev/ruby_usb.c` | leave the EP0 window 200 ms after SET_CONFIGURATION; 1 ms EP0 kernel thread keeps servicing control requests after boot |
 | `0095-ruby-ep2-log.patch` | WIP | `bsd/dev/ruby_usb.c` | EP2 IN QMU log pipe: 4-GPD ring, PA translation + 36-bit high nibble, `dc civac`, checksum, 64 B SWEETLOG increments every ~100 ms |
+| `0096-ruby-ep2-ring-guard.patch` | WIP | `bsd/dev/ruby_usb.c` | static ring/log PA, HWO drop instead of reusing a live GPD, `QISAR1` ack-only, 16 B per-packet diagnostic header |
+| `0097-ruby-ep2-serialize.patch` | WIP | `bsd/dev/ruby_usb.c` | one GPD in flight: the TX-done bit releases the slot, nothing else clears the busy flag |
+| `0098-ruby-ep2-state.patch` | WIP | `bsd/dev/ruby_usb.c` | vendor IN `0xC0/0x21` returns the live EP2/QMU state, `SENTSTALL` poll, `CLEAR_FEATURE` recovery, P9 kick order |
+| `0099-ruby-ep2-nozlp.patch` | WIP | `bsd/dev/ruby_usb.c` | disable the EP2 TX ZLP (a 64 B frame is already `wMaxPacketSize`) |
+| `0100-ruby-ep2-recover.patch` | WIP | `bsd/dev/ruby_usb.c` | P9-style endpoint recovery (W1C stall + `EP_RST`), busy watchdog, error telemetry in the vendor state |
+| `0101-ruby-ep0-nodataend.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 never writes `DATAEND` into a full FIFO: it stalls instead, so a missed transfer cannot wedge EP0 |
+| `0102-ruby-ep2-slot0.patch` | WIP | `bsd/dev/ruby_usb.c` | EP2 TX slot 0 (one 512 B FIFO segment), 0.5 s busy watchdog, FIFO capacity in the vendor state |
+| `0103-ruby-ep0-reset.patch` | WIP | `bsd/dev/ruby_usb.c` | EP0 setup capture waits for a short packet instead of stalling; the host bus reset (MAC2 common-USB status) is polled and recovered (address back to 0, EP0 re-armed, EP2/QMU stopped); EP0 is armed before the pull-up |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the

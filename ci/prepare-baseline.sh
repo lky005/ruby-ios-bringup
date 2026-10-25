@@ -64,6 +64,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0100-ruby-ep2-recover.patch" \
     "$ROOT/patches/0101-ruby-ep0-nodataend.patch" \
     "$ROOT/patches/0102-ruby-ep2-slot0.patch" \
+    "$ROOT/patches/0103-ruby-ep0-reset.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
