@@ -1,0 +1,400 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 11637bc..008698b 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -120,6 +120,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define EP0CSR_OFF      0x0100
+ #define RXCOUNT0_OFF    0x0108
+ #define FIFO0_OFF       0x0300
++#define EPISR_OFF       0x0080
+ 
+ #define EP0_SENDSTALL   (1u << 25)
+ #define EP0_SENTSTALL   (1u << 22)
+@@ -132,6 +133,9 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define EP0_W1C_BITS    (~(EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL))
+ #define EP0_FIFOFULL   (1u << 23)
+ 
++#define EPISR_EP0ISR    (1u << 0)
++#define EPISR_SETUPEND  (1u << 16)
++
+ /*
+  * MAC2 common-USB interrupt registers.  Bit 2 of the status is the host
+  * bus reset; the P9 bare-metal probe latched it there and recovered the
+@@ -141,8 +145,8 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define MAC2_INTR_STATUS_OFF 0x241c
+ #define MAC2_INTR_RESET      (1u << 2)
+ 
+-/* Polls a partial SETUP packet may take to complete before giving up. */
+-#define RUBY_EP0_PARTIAL_POLLS 50
++/* EP0 responses are copied here: handler buffers may live on the stack. */
++#define RUBY_EP0_TXBUF 512
+ 
+ /* IPPC OTG status: bit 9 is the VBUS sense (the P4 probe read it as such). */
+ #define IPPC_OTG_STS_OFF 0x18
+@@ -415,6 +419,27 @@ ruby_ep0_set_maxpacket(vm_offset_t mac)
+     ruby_wr32(mac, EP0CSR_OFF, v);
+ }
+ 
++/*
++ * EP0 data stage context.  A control-IN response can span several 64-byte
++ * packets; the source buffer may be on the handler's stack, so copy it
++ * first and keep the state machine's buffer independent of the caller.
++ */
++static uint8_t ruby_ep0_txbuf[RUBY_EP0_TXBUF];
++static uint32_t ruby_ep0_tx_total;
++static uint32_t ruby_ep0_tx_sent;
++static uint32_t ruby_ep0_tx_pending;
++static uint32_t ruby_ep0_tx_waits;
++static uint32_t ruby_ep0_fifo_waits;
++
++static uint32_t ruby_ep0_setups;
++static uint32_t ruby_ep0_short;
++static uint32_t ruby_ep0_long;
++static uint32_t ruby_ep0_txpkts;
++static uint32_t ruby_ep0_dataends;
++static uint32_t ruby_ep0_sentstalls;
++static uint32_t ruby_ep0_rewinds;
++static uint32_t ruby_bus_resets;
++
+ static void
+ ruby_ep0_write_fifo(vm_offset_t mac, const uint8_t *src, uint32_t len)
+ {
+@@ -478,65 +503,84 @@ ruby_ep0_send(vm_offset_t mac, uint32_t t, uint16_t key, const uint8_t *data,
+     uint32_t len, uint32_t wlen)
+ {
+     uint32_t total = len < wlen ? len : wlen;
+-    uint32_t sent = 0;
+-    uint32_t csr;
+-    uint32_t spin = 0;
++    uint32_t csr, n, i;
+ 
+     if (wlen == 0) {
+         ruby_ep0_ack(mac, t, key, wlen);
+         return;
+     }
++    if (total > sizeof(ruby_ep0_txbuf))
++        total = sizeof(ruby_ep0_txbuf);
++    for (i = 0; i < total; i++)
++        ruby_ep0_txbuf[i] = data[i];
++
++    ruby_ep0_tx_total = total;
++    ruby_ep0_tx_sent = 0;
++    ruby_ep0_tx_waits = 0;
++    ruby_ep0_fifo_waits = 0;
+ 
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     csr |= EP0_SETUPPKTRDY | EP0_DPHTX;
+     ruby_wr32(mac, EP0CSR_OFF, csr);
+ 
+-    while (sent < total) {
+-        uint32_t n = total - sent;
++    if (!total) {
++        ruby_ep0_tx_pending = 0;
++        ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
++        ruby_ep0_dataends++;
++        return;
++    }
+ 
++    n = total > 64 ? 64 : total;
++    ruby_ep0_write_fifo(mac, ruby_ep0_txbuf, n);
++    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++    ruby_wr32(mac, EP0CSR_OFF, csr | EP0_TXPKTRDY);
++    ruby_ep0_tx_sent = n;
++    ruby_ep0_tx_pending = 1;
++    ruby_ep0_txpkts++;
++    ruby_trace(t, RUBY_TR_SEND, key, total, wlen, n);
++}
++
++/*
++ * Advance a pending IN data stage.  Runs once per service tick; waits for
++ * the host to take each packet, then writes DATAEND after the last one.
++ * A new SETUP aborts the stage (see ruby_ep0_service); no STALL here.
++ */
++static void
++ruby_ep0_tx_service(vm_offset_t mac, uint32_t t)
++{
++    uint32_t csr, n;
++
++    if (!ruby_ep0_tx_pending)
++        return;
++    csr = ruby_rd32(mac, EP0CSR_OFF);
++    if (csr & EP0_TXPKTRDY) {
++        if (++ruby_ep0_tx_waits == 10)
++            ruby_trace(t, RUBY_TR_NOTE, 5, ruby_ep0_tx_sent,
++                ruby_ep0_tx_total, csr);
++        return;
++    }
++    if (ruby_ep0_tx_sent < ruby_ep0_tx_total) {
++        n = ruby_ep0_tx_total - ruby_ep0_tx_sent;
+         if (n > 64)
+             n = 64;
+-        ruby_ep0_write_fifo(mac, data + sent, n);
++        ruby_ep0_write_fifo(mac, ruby_ep0_txbuf + ruby_ep0_tx_sent, n);
+         csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+         ruby_wr32(mac, EP0CSR_OFF, csr | EP0_TXPKTRDY);
+-        for (spin = 0; spin < 1000; spin++) {
+-            if (!(ruby_rd32(mac, EP0CSR_OFF) & EP0_TXPKTRDY))
+-                break;
+-            delay(10);
+-        }
+-        if (spin >= 1000) {
+-            /* Host never took this packet: STALL, never DATAEND. */
+-            ruby_trace(t, RUBY_TR_NOTE, 5, key,
+-                ruby_rd32(mac, EP0CSR_OFF), sent);
+-            ruby_ep0_stall(mac, t, key, wlen);
+-            return;
+-        }
+-        sent += n;
++        ruby_ep0_tx_sent += n;
++        ruby_ep0_txpkts++;
++        return;
++    }
++    if (csr & EP0_FIFOFULL) {
++        if (++ruby_ep0_fifo_waits == 10)
++            ruby_trace(t, RUBY_TR_NOTE, 6, 0, 0, csr);
++        return;
+     }
+-
+-    /*
+-     * P9 parity: waiting for the FIFO to drain is a courtesy, not a gate.
+-     * Stalling here made the host give up on the whole enumeration ("Device
+-     * Descriptor Request Failed"); the bare-metal probe always wrote
+-     * DATAEND.  If the endpoint does wedge, the host resets the port and
+-     * the bus-reset recovery re-arms EP0.
+-     *
+-     * The wait has to stay short: the bare-metal probe spins ~1000 times
+-     * (about a millisecond) and then writes DATAEND anyway.  Our 300 ms
+-     * version spent most of the host's control-transfer budget before the
+-     * status stage was written at all.
+-     */
+-    delay(100);
+-    for (spin = 0; spin < 20 &&
+-        (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL); spin++)
+-        delay(100);
+-    if (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL)
+-        ruby_trace(t, RUBY_TR_NOTE, 6, key,
+-            ruby_rd32(mac, EP0CSR_OFF), spin * 100);
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
+-    ruby_trace(t, RUBY_TR_SEND, key, total, wlen, sent);
+-    ruby_trace(t, RUBY_TR_TX, key, csr, 0, ruby_rd32(mac, EP0CSR_OFF));
++    ruby_ep0_tx_pending = 0;
++    ruby_ep0_dataends++;
++    ruby_trace(t, RUBY_TR_SEND, 0, ruby_ep0_tx_total, 0,
++        ruby_ep0_tx_sent);
+ }
+ 
+ static const uint8_t *
+@@ -576,6 +620,10 @@ static void ruby_ep0_vendor_rx_gpd(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
+ static void ruby_ep0_vendor_rx_reset(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
++static void ruby_ep0_vendor_ep0_diag(vm_offset_t mac, uint32_t t,
++    uint32_t wlen);
++static void ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t,
++    uint32_t wlen);
+ static void ruby_ep2_halt_clear(vm_offset_t mac);
+ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+@@ -670,7 +718,7 @@ static void
+ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+ {
+     static uint32_t last_key, last_value, last_len, retry;
+-    static uint32_t partial_polls;
++    static uint32_t short_run;
+     uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
+     uint32_t csr = ruby_rd32(mac, EP0CSR_OFF);
+     uint32_t w0, w1, key;
+@@ -678,30 +726,27 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+     uint8_t st[8];
+ 
+     /*
+-     * A SETUP packet is 8 bytes, but RXCOUNT0 can read short while the
+-     * packet is still arriving (at full speed it is split over frames).
+-     * Give the packet a bounded window to complete; stalling on the first
+-     * short read made the host give up on the whole enumeration.
++     * A SETUP packet is 8 bytes; a short count means the packet is still
++     * arriving.  Never STALL here: the vendor ISR logs and returns, P9
++     * prints and returns.  A new SETUP or the next poll will re-read it.
+      */
+     if (count < 8) {
+-        if (partial_polls == 0)
++        ruby_ep0_short++;
++        if (short_run++ == 0)
+             ruby_trace(t, RUBY_TR_NOTE, 1, count, csr, 0);
+-        if (partial_polls++ < RUBY_EP0_PARTIAL_POLLS)
+-            return;
+-        partial_polls = 0;
+-        ruby_ep0_stall(mac, t, 0, 0);
+         return;
+     }
+-    partial_polls = 0;
++    short_run = 0;
+ 
+     if (count > 8) {
+         /* Stale bytes in the FIFO: drop them and let the host retry. */
+         for (uint32_t i = 0; i < count; i++)
+             (void)ruby_rd8(mac, FIFO0_OFF);
++        ruby_ep0_long++;
+         ruby_trace(t, RUBY_TR_NOTE, 7, count, csr, 0);
+-        ruby_ep0_stall(mac, t, 0, 0);
+         return;
+     }
++    ruby_ep0_setups++;
+ 
+     /*
+      * U3D_FIFO0 is a 32-bit data port.  Read both setup words from the
+@@ -747,6 +792,10 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_vendor_rx_gpd(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x26)
+         ruby_ep0_vendor_rx_reset(mac, t, len);
++    else if (st[0] == 0xc0 && st[1] == 0x27)
++        ruby_ep0_vendor_ep0_diag(mac, t, len);
++    else if (st[0] == 0xc0 && st[1] == 0x28)
++        ruby_ep0_vendor_ep0_bulk(mac, t, len);
+     else
+         ruby_ep0_stall(mac, t, key, len);
+ }
+@@ -757,9 +806,26 @@ extern void thread_deallocate(thread_t);
+ static void
+ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+ {
+-    uint32_t v;
++    uint32_t v, epi;
+ 
+     ruby_usb_reset_check(mac);
++
++    /*
++     * EPISR is W1C and is drained every round (vendor ISR inspects
++     * EP0ISR|SETUPEND before clearing it).  SETUPEND means hardware
++     * aborted the current data stage: drop the software context, do not
++     * wait for TXPKTRDY and do not STALL.
++     */
++    epi = ruby_rd32(mac, EPISR_OFF);
++    if (epi & EPISR_SETUPEND) {
++        ruby_ep0_tx_pending = 0;
++        ruby_ep0_tx_sent = 0;
++        ruby_ep0_tx_total = 0;
++        ruby_ep0_rewinds++;
++    }
++    if (epi)
++        ruby_wr32(mac, EPISR_OFF, epi);
++
+     v = ruby_rd32(mac, EP0CSR_OFF);
+ 
+     if (!(v & EP0_SETUPPKTRDY) && (v & EP0_MAXPKTSZ_MSK) != 64) {
+@@ -768,16 +834,24 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+         v = ruby_rd32(mac, EP0CSR_OFF);
+     }
+     if (v & EP0_SENTSTALL) {
+-        static uint32_t stall_notes;
+-
+         /* EP0_SENTSTALL is W1C; write it back to clear the stall. */
++        ruby_ep0_sentstalls++;
+         ruby_wr32(mac, EP0CSR_OFF,
+             (ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS) | EP0_SENTSTALL);
+-        if (stall_notes++ == 0 || (stall_notes & 0xf) == 0)
++        if (ruby_ep0_sentstalls == 1 ||
++            (ruby_ep0_sentstalls & 0xf) == 0)
+             ruby_trace(t, RUBY_TR_NOTE, 3, v, 0, 0);
+     }
+-    if (v & EP0_SETUPPKTRDY)
++    if (v & EP0_SETUPPKTRDY) {
++        /* A new SETUP aborts any unfinished data stage. */
++        ruby_ep0_tx_pending = 0;
++        ruby_ep0_tx_sent = 0;
++        ruby_ep0_tx_total = 0;
+         ruby_ep0_capture(mac, t);
++        return;
++    }
++    if (ruby_ep0_tx_pending)
++        ruby_ep0_tx_service(mac, t);
+ 
+     v = ruby_rd32(mac, EP0CSR_OFF);
+     if (v & EP0_RXPKTRDY) {
+@@ -1559,6 +1633,12 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+     csr |= 64;
+     ruby_wr32(mac, EP0CSR_OFF, csr);
+ 
++    /* Drop any EP0 data stage and the latched EP0/SETUPEND events. */
++    ruby_ep0_tx_pending = 0;
++    ruby_ep0_tx_sent = 0;
++    ruby_ep0_tx_total = 0;
++    ruby_wr32(mac, EPISR_OFF, ruby_rd32(mac, EPISR_OFF));
++
+     dc = ruby_rd32(mac, DEVICE_CONF - MTU3_PA);
+     dc &= ~0x7f000000u;         /* device address back to 0 */
+     ruby_wr32(mac, DEVICE_CONF - MTU3_PA, dc);
+@@ -1598,7 +1678,7 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+ static void
+ ruby_usb_reset_check(vm_offset_t mac)
+ {
+-    static uint32_t seen, resets, armed;
++    static uint32_t seen, armed;
+     uint32_t st = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
+ 
+     if (!(st & MAC2_INTR_RESET)) {
+@@ -1616,12 +1696,12 @@ ruby_usb_reset_check(vm_offset_t mac)
+     seen = 0;
+     ruby_wr32(mac, MAC2_INTR_STATUS_OFF, st & MAC2_INTR_RESET);
+ 
+-    resets++;
++    ruby_bus_resets++;
+     ruby_usb_rearm(mac, RUBY_REARM_RESET);
+-    ruby_trace(0, RUBY_TR_STATE, 7, st, resets, 0);
+-    if (resets <= 4)
++    ruby_trace(0, RUBY_TR_STATE, 7, st, ruby_bus_resets, 0);
++    if (ruby_bus_resets <= 4)
+         printf("RUBY USB: t=%u host bus reset #%u, address cleared\n",
+-            ruby_ms, resets);
++            ruby_ms, ruby_bus_resets);
+ }
+ 
+ /*
+@@ -1815,6 +1895,46 @@ ruby_ep0_vendor_rx_reset(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     ruby_ep0_send(mac, t, 0xc026, (const uint8_t *)v, sizeof(v), wlen);
+ }
+ 
++/* Vendor IN request 0xC0/0x27: EP0 state machine counters. */
++static void
++ruby_ep0_vendor_ep0_diag(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    uint32_t v[16];
++
++    v[0] = 0x44305045u;         /* "EP0D" */
++    v[1] = ruby_ep0_setups;
++    v[2] = ruby_ep0_short;
++    v[3] = ruby_ep0_long;
++    v[4] = ruby_ep0_txpkts;
++    v[5] = ruby_ep0_dataends;
++    v[6] = ruby_ep0_sentstalls;
++    v[7] = ruby_ep0_rewinds;
++    v[8] = ruby_bus_resets;
++    v[9] = (ruby_config & 0xffu) | ((ruby_ep_ready & 1u) << 8) |
++        ((ruby_rx_ready & 1u) << 9);
++    v[10] = ruby_rd32(mac, EP0CSR_OFF);
++    v[11] = ruby_rd32(mac, EPISR_OFF);
++    v[12] = (ruby_ep0_tx_pending & 1u) |
++        ((ruby_ep0_tx_sent & 0xffffu) << 8);
++    v[13] = (ruby_ep0_tx_total & 0xffffu) |
++        ((ruby_ep0_tx_waits & 0xffffu) << 16);
++    v[14] = ruby_ep0_fifo_waits;
++    v[15] = ruby_ms;
++    ruby_ep0_send(mac, t, 0xc027, (const uint8_t *)v, sizeof(v), wlen);
++}
++
++/* Vendor IN request 0xC0/0x28: 200-byte pattern for the >64B path. */
++static void
++ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    uint8_t pat[200];
++    uint32_t i;
++
++    for (i = 0; i < sizeof(pat); i++)
++        pat[i] = (uint8_t)(0xa5u ^ (i & 0xffu));
++    ruby_ep0_send(mac, t, 0xc028, pat, sizeof(pat), wlen);
++}
++
+ static void
+ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+ {
