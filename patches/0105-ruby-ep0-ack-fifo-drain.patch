@@ -1,0 +1,32 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index e0a2ad0..196a5b8 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -441,8 +441,26 @@ ruby_ep0_write_fifo(vm_offset_t mac, const uint8_t *src, uint32_t len)
+ static void
+ ruby_ep0_ack(vm_offset_t mac, uint32_t t, uint16_t key, uint32_t wlen)
+ {
+-    uint32_t csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++    uint32_t csr;
++    uint32_t spin;
++
++    /*
++     * The host sends SET_ADDRESS as soon as it has the device descriptor,
++     * so this ACK can land while the previous descriptor is still in the TX
++     * FIFO.  Writing the status stage into a full FIFO made the host's
++     * xHCI Address Device command fail with a transaction error, and the
++     * host then reset the port and enumerated again.  Let the FIFO drain
++     * first, the same courtesy wait the data stage does.
++     */
++    delay(100);
++    for (spin = 0; spin < 500 &&
++        (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL); spin++)
++        delay(100);
++    if (ruby_rd32(mac, EP0CSR_OFF) & EP0_FIFOFULL)
++        ruby_trace(t, RUBY_TR_NOTE, 8, key,
++            ruby_rd32(mac, EP0CSR_OFF), 0);
+ 
++    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     csr |= EP0_SETUPPKTRDY | EP0_DATAEND;
+     ruby_wr32(mac, EP0CSR_OFF, csr);
+     ruby_trace(t, RUBY_TR_ACK, key, csr, wlen, 0);
