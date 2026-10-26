@@ -1,0 +1,88 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 69fe206..14f01fc 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -448,6 +448,14 @@ static uint32_t ruby_ep0_sentstalls;
+ static uint32_t ruby_ep0_rewinds;
+ static uint32_t ruby_bus_resets;
+ 
++/*
++ * SET_ADDRESS address change is parked until the status stage completes:
++ * DATAEND clears only when the host ACKs it, and the host completes that
++ * stage at the old address (USB 2.0 9.4.6).
++ */
++#define RUBY_ADDR_NONE  0x100u
++static uint32_t ruby_addr_pending = RUBY_ADDR_NONE;
++
+ static void
+ ruby_ep0_write_fifo(vm_offset_t mac, const uint8_t *src, uint32_t len)
+ {
+@@ -731,12 +739,14 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+             return;
+         }
+         {
+-            uint32_t v = ruby_rd32(mac, DEVICE_CONF - MTU3_PA);
+-
+-            v &= ~0x7f000000u;
+-            v |= (value & 0x7fu) << 24;
+-            ruby_wr32(mac, DEVICE_CONF - MTU3_PA, v);
+-            ruby_trace(t, RUBY_TR_ADDR, value & 0x7f, v, 0, 0);
++            /*
++             * Park the address: writing it now would move the device while
++             * the host still finishes the status stage at the old address,
++             * and its IN would be ignored.  ruby_ep0_service applies it as
++             * soon as EP0_DATAEND clears.
++             */
++            ruby_addr_pending = value & 0x7fu;
++            ruby_trace(t, RUBY_TR_ADDR, ruby_addr_pending, 0, 1, 0);
+         }
+         ruby_ep0_ack(mac, t, key, wlen);
+         return;
+@@ -839,6 +849,13 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+     len = st[6] | (st[7] << 8);
+     key = ((uint32_t)st[0] << 8) | st[1];
+ 
++    /*
++     * A SET_ADDRESS whose status stage never completed must not be applied
++     * later: this SETUP means the host moved on, so drop the parked value.
++     */
++    if (key != 0x0005u)
++        ruby_addr_pending = RUBY_ADDR_NONE;
++
+     if (key == last_key && value == last_value && len == last_len) {
+         retry++;
+     } else {
+@@ -896,6 +913,25 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+     if (epi)
+         ruby_wr32(mac, EPISR_OFF, epi);
+ 
++    /*
++     * Apply a parked SET_ADDRESS as soon as the status stage is done:
++     * EP0_DATAEND clears when the host ACKs it, and the host switches to
++     * the new address immediately afterwards, so this must run before any
++     * new SETUP is handled.
++     */
++    if (ruby_addr_pending != RUBY_ADDR_NONE) {
++        v = ruby_rd32(mac, EP0CSR_OFF);
++        if (!(v & EP0_DATAEND)) {
++            uint32_t dc = ruby_rd32(mac, DEVICE_CONF - MTU3_PA);
++
++            dc &= ~0x7f000000u;
++            dc |= ruby_addr_pending << 24;
++            ruby_wr32(mac, DEVICE_CONF - MTU3_PA, dc);
++            ruby_trace(t, RUBY_TR_ADDR, ruby_addr_pending, dc, 2, 0);
++            ruby_addr_pending = RUBY_ADDR_NONE;
++        }
++    }
++
+     v = ruby_rd32(mac, EP0CSR_OFF);
+ 
+     if (!(v & EP0_SETUPPKTRDY) && (v & EP0_MAXPKTSZ_MSK) != 64) {
+@@ -1715,6 +1751,7 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+ 
+     ruby_config = 0;
+     ruby_cfg_seen = 0;
++    ruby_addr_pending = RUBY_ADDR_NONE;
+     ruby_ep_ready = 0;
+     ruby_tx_busy = 0;
+     ruby_busy_ticks = 0;
