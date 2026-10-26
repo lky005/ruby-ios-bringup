@@ -1,0 +1,95 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index cf8a42d..69fe206 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2201,6 +2201,31 @@ ruby_dump_dt_strings(void)
+     }
+ }
+ 
++/*
++ * Put EP0 back to a known state while the device is off the bus: reset the
++ * endpoint, drop whatever the previous host left in the RX FIFO, and clear
++ * the W1C status bits.  MTU3 has no FLUSHFIFO for EP0, so TX is left alone;
++ * the next packet write overwrites it.
++ */
++static void
++ruby_ep0_quiet_reset(vm_offset_t mac)
++{
++    uint32_t count, csr, i;
++
++    ruby_wr32(mac, EP_RST_OFF, 1u << 0);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++
++    count = ruby_rd32(mac, RXCOUNT0_OFF);
++    if (count > 512u)
++        count = 512u;
++    for (i = 0; i < count; i++)
++        (void)ruby_rd8(mac, FIFO0_OFF);
++
++    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++    csr |= EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL;
++    ruby_wr32(mac, EP0CSR_OFF, csr);
++}
++
+ void
+ ruby_usb_probe(void)
+ {
+@@ -2270,13 +2295,13 @@ ruby_usb_probe(void)
+     ruby_usb_u2_phy_on(phy);
+     delay(1000);
+ 
+-    /* Device PHY mode: IDDIG + D+ pull-up. */
++    /* Device PHY mode: IDDIG forced; D+ stays down until the attach step. */
+     v = ruby_rd32(phy, PHY_U2_DTM1);
+     v |= DTM1_FORCE_IDDIG | DTM1_RG_IDDIG;
+     ruby_wr32(phy, PHY_U2_DTM1, v);
+ 
+     v = ruby_rd32(phy, PHY_U2_ACR3);
+-    v |= ACR3_PUPD_BIST_EN | ACR3_EN_PU_DP;
++    v = (v | ACR3_PUPD_BIST_EN) & ~ACR3_EN_PU_DP;
+     ruby_wr32(phy, PHY_U2_ACR3, v);
+ 
+     /* PS5169 enable on GPIO121. */
+@@ -2290,16 +2315,28 @@ ruby_usb_probe(void)
+     v |= GPIO121_BIT;
+     ruby_wr32(gpio, GPIO_DO3, v);
+ 
+-    /* MAC: high-speed, force VBUS, device config, soft-connect. */
++    /* MAC: high-speed, force VBUS, device config; soft-connect stays off. */
+     ruby_wr32(mac, LV1IECR - MTU3_PA, ~0u);
+     v = ruby_rd32(mac, USB3_CONFIG - MTU3_PA);
+     ruby_wr32(mac, USB3_CONFIG - MTU3_PA, v & ~(1u << 0));
+     v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
+-    ruby_wr32(mac, PM_CTRL - MTU3_PA, v | (1u << 5));
++    ruby_wr32(mac, PM_CTRL - MTU3_PA,
++        (v | (1u << 5)) & ~((1u << 6) | (1u << 0)));
+     ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 0);
+     v = ruby_rd32(ippc, 0x50);
+     ruby_wr32(ippc, 0x50, v & ~U2_OTG_SEL);
+ 
++    /*
++     * Detach window.  The bootloader leaves D+ up, so the host never sees a
++     * disconnect across the bootloader->kernel handoff and often stops
++     * enumerating; hold both layers down for 150 ms (MAC soft-connect is
++     * already off above, the PHY pull-up went down with the PHY setup) and
++     * clean EP0 while nothing can reach it.
++     */
++    printf("RUBY USB: detach 150 ms (PHY D+ down, soft-connect off)\n");
++    ruby_ep0_quiet_reset(mac);
++    delay(150000);
++
+     /*
+      * Arm EP0 and latch the host bus-reset flag before the pull-up makes
+      * the device visible, so the first request is never met by an EP0
+@@ -2311,6 +2348,11 @@ ruby_usb_probe(void)
+ 
+     v = ruby_rd32(mac, MISC_CTRL - MTU3_PA);
+     ruby_wr32(mac, MISC_CTRL - MTU3_PA, v | 0x3u);
++
++    /* Attach: PHY pull-up first, then the MAC soft-connect. */
++    v = ruby_rd32(phy, PHY_U2_ACR3);
++    ruby_wr32(phy, PHY_U2_ACR3, v | ACR3_EN_PU_DP);
++    delay(1000);
+     v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
+     ruby_wr32(mac, PM_CTRL - MTU3_PA, v | (1u << 6) | (1u << 0));
+     delay(2000);
