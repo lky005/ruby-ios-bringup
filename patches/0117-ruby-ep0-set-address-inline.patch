@@ -1,0 +1,47 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1ac1455..bbe9eaa 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -731,15 +731,36 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+             ruby_ep0_stall(mac, t, key, wlen);
+             return;
+         }
++        /*
++         * The status stage runs at the old address: the host keeps
++         * addressing the old address until it completes, and it moves to
++         * the new one immediately after.  ACK first, wait inline for the
++         * host to finish (DATAEND clears on its ACK), then switch.
++         * Switching before that ACK leaves the status retries unanswered
++         * (every attempt then ends in a port reset); switching one tick
++         * later misses the host's first request to the new address (0115).
++         */
++        ruby_ep0_ack(mac, t, key, wlen);
+         {
+-            uint32_t v = ruby_rd32(mac, DEVICE_CONF - MTU3_PA);
++            uint32_t i;
+ 
+-            v &= ~0x7f000000u;
+-            v |= (value & 0x7fu) << 24;
+-            ruby_wr32(mac, DEVICE_CONF - MTU3_PA, v);
+-            ruby_trace(t, RUBY_TR_ADDR, value & 0x7f, v, 0, 0);
++            for (i = 0; i < 100; i++) {
++                if (!(ruby_rd32(mac, EP0CSR_OFF) & EP0_DATAEND))
++                    break;
++                delay(10);
++            }
++            if (!(ruby_rd32(mac, EP0CSR_OFF) & EP0_DATAEND)) {
++                uint32_t v = ruby_rd32(mac, DEVICE_CONF - MTU3_PA);
++
++                v &= ~0x7f000000u;
++                v |= (value & 0x7fu) << 24;
++                ruby_wr32(mac, DEVICE_CONF - MTU3_PA, v);
++                ruby_trace(t, RUBY_TR_ADDR, value & 0x7f, v, 2, i);
++            } else {
++                /* Status stage never completed: keep the old address. */
++                ruby_trace(t, RUBY_TR_ADDR, value & 0x7f, 0, 3, i);
++            }
+         }
+-        ruby_ep0_ack(mac, t, key, wlen);
+         return;
+     case 9: /* SET_CONFIGURATION */
+         ruby_config = value & 0xff;
