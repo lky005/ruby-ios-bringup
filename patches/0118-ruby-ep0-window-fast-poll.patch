@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1ac1455..2f6e5c9 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2127,8 +2127,16 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+             last_op = v;
+         }
+ 
+-        delay(100);
+-        if (++sub == 10) {
++        /*
++         * Service EP0 every 10 us while the window runs.  The host answers
++         * a SETUP at microsecond scale and the hardware latches
++         * DEVICE_CONF when the SET_ADDRESS transfer ends, so a 100 us
++         * tick loses that race on some boots (the host then moves to the
++         * new address while the device is still on the old one and goes
++         * silent).  100 x 10 us still advances the 1 ms window clock.
++         */
++        delay(10);
++        if (++sub == 100) {
+             sub = 0;
+             t++;
+             ruby_ms = t;
