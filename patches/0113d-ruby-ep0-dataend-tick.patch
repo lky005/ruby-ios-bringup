@@ -1,0 +1,72 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index a2b7fa1..cf8a42d 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -477,9 +477,15 @@ ruby_ep0_write_fifo(vm_offset_t mac, const uint8_t *src, uint32_t len)
+  *
+  * strict=1 runs inline, right after a packet was loaded.  It waits for the
+  * condition the vendor ISR tests before it loads another packet -- TXPKTRDY
+- * clear (the SIE took the packet) and, before another packet, EP0_FIFOFULL
+- * clear (the FIFO has room again) -- for RUBY_EP0_SPINS x 10 us, then gives
+- * up: no STALL, the stage stays pending.
++ * clear (the SIE took the packet) and EP0_FIFOFULL clear (the FIFO has room
++ * again) -- for RUBY_EP0_SPINS x 10 us, then gives up: no STALL, the stage
++ * stays pending.
++ *
++ * DATAEND is written only by the tick path.  Writing it inline right after
++ * the last packet was taken is the one difference 0113c introduced against
++ * the enumerating 0113b, and with it the device stopped enumerating: the
++ * host answered every GET_DESCRIPTOR with a port reset even though the
++ * driver had loaded the full response and written DATAEND.
+  *
+  * strict=0 is the 1 ms service tick, kept at the 0113b rule that TXPKTRDY
+  * clear alone is enough.  So the strict test can only ever cost a tick, it
+@@ -522,6 +528,9 @@ ruby_ep0_tx_step(vm_offset_t mac, uint32_t t, int strict)
+         ruby_ep0_txpkts++;
+         return 1;
+     }
++    /* Last packet is out; leave DATAEND to the service tick (0113b timing). */
++    if (strict)
++        return 0;
+     /*
+      * On this IP EP0_FIFOFULL remains set until DATAEND is written
+      * (0105/0107 finding).  Gating DATAEND on it deadlocks short and
+@@ -623,12 +632,14 @@ ruby_ep0_send(vm_offset_t mac, uint32_t t, uint16_t key, const uint8_t *data,
+     ruby_trace(t, RUBY_TR_SEND, key, total, wlen, n);
+ 
+     /*
+-     * Vendor writes the next packet and DATAEND from the context that saw
+-     * the TXPKTRDY-clear event; P9 finishes a >64-byte stage inside its
+-     * SETUP handler.  Leaving the remaining packets to the service tick
+-     * costs one tick each.
++     * Advance only when another packet follows: a single-packet response
++     * keeps the exact 0113b timing (load here, DATAEND on the next tick).
++     * Vendor writes the next packet from the context that saw the
++     * TXPKTRDY-clear event; leaving it to the service tick costs a tick
++     * per packet.
+      */
+-    ruby_ep0_tx_pump(mac, t);
++    if (total > n)
++        ruby_ep0_tx_pump(mac, t);
+ }
+ 
+ /*
+@@ -2059,6 +2070,18 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+     ruby_snapshot(mac, ippc, gpio, window_ms);
+     printf("RUBY USB: trace n=%u overflow=%u\n",
+         ruby_event_count, ruby_event_overflow);
++    /*
++     * Counters in sweetlog so a boot that never enumerates still reports
++     * what EP0 did; the 0xC0/0x27 read needs a working host.
++     */
++    printf("RUBY USB: ep0 setups=%u short=%u long=%u txpkts=%u "
++        "dataends=%u sentstalls=%u rewinds=%u busresets=%u spinwaits=%u "
++        "blocked=%u fifowaits=%u pending=%u sent=%u/%u\n",
++        ruby_ep0_setups, ruby_ep0_short, ruby_ep0_long,
++        ruby_ep0_txpkts, ruby_ep0_dataends, ruby_ep0_sentstalls,
++        ruby_ep0_rewinds, ruby_bus_resets, ruby_ep0_tx_waits,
++        ruby_ep0_fifo_blocked, ruby_ep0_fifo_waits,
++        ruby_ep0_tx_pending, ruby_ep0_tx_sent, ruby_ep0_tx_total);
+     for (uint32_t i = 0; i < ruby_event_count; i++)
+         printf("RUBY USB TRACE t=%u type=%u a=%u b=%08x c=%08x d=%08x\n",
+             ruby_events[i].t, ruby_events[i].type, ruby_events[i].a,
