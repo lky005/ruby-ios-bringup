@@ -1,0 +1,140 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 69fe206..1ac1455 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -223,6 +223,7 @@ static uint8_t ruby_config;
+ static volatile uint32_t ruby_cfg_seen;
+ static vm_offset_t ruby_mac_base;
+ static vm_offset_t ruby_ippc_base;
++static vm_offset_t ruby_phy_base;
+ /*
+  * Milliseconds since the USB probe started.  The window counts it from its
+  * own tick, the resident thread keeps counting at 1 ms per iteration, so
+@@ -2007,6 +2008,56 @@ ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     ruby_ep0_send(mac, t, 0xc028, pat, sizeof(pat), wlen);
+ }
+ 
++/*
++ * Put EP0 back to a known state while the device is off the bus: reset the
++ * endpoint, drop whatever the previous host left in the RX FIFO, and clear
++ * the W1C status bits.  MTU3 has no FLUSHFIFO for EP0, so TX is left alone;
++ * the next packet write overwrites it.
++ */
++static void
++ruby_ep0_quiet_reset(vm_offset_t mac)
++{
++    uint32_t count, csr, i;
++
++    ruby_wr32(mac, EP_RST_OFF, 1u << 0);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++
++    count = ruby_rd32(mac, RXCOUNT0_OFF);
++    if (count > 512u)
++        count = 512u;
++    for (i = 0; i < count; i++)
++        (void)ruby_rd8(mac, FIFO0_OFF);
++
++    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++    csr |= EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL;
++    ruby_wr32(mac, EP0CSR_OFF, csr);
++}
++
++/*
++ * Redo the detach/attach without leaving the window: used when the host
++ * never reacts to the first attach.  Same order as the probe path.
++ */
++static void
++ruby_usb_reattach(vm_offset_t mac, vm_offset_t phy)
++{
++    uint32_t v;
++
++    v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
++    ruby_wr32(mac, PM_CTRL - MTU3_PA, v & ~((1u << 6) | (1u << 0)));
++    v = ruby_rd32(phy, PHY_U2_ACR3);
++    ruby_wr32(phy, PHY_U2_ACR3, v & ~ACR3_EN_PU_DP);
++    ruby_ep0_quiet_reset(mac);
++    delay(150000);
++
++    ruby_ep0_set_maxpacket(mac);
++    v = ruby_rd32(phy, PHY_U2_ACR3);
++    ruby_wr32(phy, PHY_U2_ACR3, v | ACR3_EN_PU_DP);
++    delay(1000);
++    v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
++    ruby_wr32(mac, PM_CTRL - MTU3_PA, v | (1u << 6) | (1u << 0));
++    delay(2000);
++}
++
+ static void
+ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+ {
+@@ -2017,6 +2068,7 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+     uint32_t t = 0, si = 0, sub = 0, cfg_t = 0;
+     int cfg_armed = 0;
+     uint32_t last_otg = 0, last_op = 0;
++    uint32_t attach_left = 3, retry_at = 2000;
+     uint32_t v;
+ 
+     PE_parse_boot_argn("rubyusb_window_ms", &window_ms, sizeof(window_ms));
+@@ -2035,6 +2087,22 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+         }
+ 
+         ruby_ep0_service(mac, t);
++
++        /*
++         * The host sometimes never reacts to the first attach (0114: the
++         * same image enumerates on one boot and not on the next).  If it
++         * has shown no sign of life two seconds after attach, redo the
++         * detach/attach a bounded number of times; any SETUP or bus reset
++         * stops it.
++         */
++        if (attach_left > 0 && t >= retry_at &&
++            ruby_ep0_setups == 0 && ruby_bus_resets == 0) {
++            attach_left--;
++            printf("RUBY USB: no host activity by t=%u, re-attach (%u left)\n",
++                t, attach_left);
++            ruby_usb_reattach(mac, ruby_phy_base);
++            retry_at = t + 2000;
++        }
+         if (ruby_cfg_seen) {
+             if (!cfg_armed) {
+                 cfg_armed = 1;
+@@ -2201,31 +2269,6 @@ ruby_dump_dt_strings(void)
+     }
+ }
+ 
+-/*
+- * Put EP0 back to a known state while the device is off the bus: reset the
+- * endpoint, drop whatever the previous host left in the RX FIFO, and clear
+- * the W1C status bits.  MTU3 has no FLUSHFIFO for EP0, so TX is left alone;
+- * the next packet write overwrites it.
+- */
+-static void
+-ruby_ep0_quiet_reset(vm_offset_t mac)
+-{
+-    uint32_t count, csr, i;
+-
+-    ruby_wr32(mac, EP_RST_OFF, 1u << 0);
+-    ruby_wr32(mac, EP_RST_OFF, 0);
+-
+-    count = ruby_rd32(mac, RXCOUNT0_OFF);
+-    if (count > 512u)
+-        count = 512u;
+-    for (i = 0; i < count; i++)
+-        (void)ruby_rd8(mac, FIFO0_OFF);
+-
+-    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+-    csr |= EP0_RXPKTRDY | EP0_SETUPPKTRDY | EP0_SENTSTALL;
+-    ruby_wr32(mac, EP0CSR_OFF, csr);
+-}
+-
+ void
+ ruby_usb_probe(void)
+ {
+@@ -2363,6 +2406,7 @@ ruby_usb_probe(void)
+     printf("RUBY USB: PHY dtm1 0x%08x acr3 0x%08x GPIO121 dir3 0x%08x do3 0x%08x\n",
+         ruby_rd32(phy, PHY_U2_DTM1), ruby_rd32(phy, PHY_U2_ACR3),
+         ruby_rd32(gpio, GPIO_DIR3), ruby_rd32(gpio, GPIO_DO3));
++    ruby_phy_base = phy;
+     ruby_usb_ep0_window(mac, ippc, gpio);
+     if (ruby_dump_on())
+         ruby_dump_regs(1, ippc, mac, phy);

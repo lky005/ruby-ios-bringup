@@ -80,6 +80,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0113c-ruby-ep0-tx-spin.patch" \
     "$ROOT/patches/0113d-ruby-ep0-dataend-tick.patch" \
     "$ROOT/patches/0114-ruby-usb-phy-detach.patch" \
+    "$ROOT/patches/0116-ruby-usb-attach-retry.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
