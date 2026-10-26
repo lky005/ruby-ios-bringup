@@ -1,0 +1,190 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index b56dd6f..a2b7fa1 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -148,6 +148,13 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* EP0 responses are copied here: handler buffers may live on the stack. */
+ #define RUBY_EP0_TXBUF 512
+ 
++/*
++ * Inline window for one EP0 packet: 15 x 10 us covers a high-speed
++ * microframe (125 us) plus slack for the IN token that follows it.
++ */
++#define RUBY_EP0_SPINS       15
++#define RUBY_EP0_SPIN_US     10
++
+ /* IPPC OTG status: bit 9 is the VBUS sense (the P4 probe read it as such). */
+ #define IPPC_OTG_STS_OFF 0x18
+ #define OTG_VBUS_VALID   (1u << 9)
+@@ -430,6 +437,7 @@ static uint32_t ruby_ep0_tx_sent;
+ static uint32_t ruby_ep0_tx_pending;
+ static uint32_t ruby_ep0_tx_waits;
+ static uint32_t ruby_ep0_fifo_waits;
++static uint32_t ruby_ep0_fifo_blocked;
+ 
+ static uint32_t ruby_ep0_setups;
+ static uint32_t ruby_ep0_short;
+@@ -463,6 +471,80 @@ ruby_ep0_write_fifo(vm_offset_t mac, const uint8_t *src, uint32_t len)
+         *(volatile uint8_t *)(mac + FIFO0_OFF) = src[i];
+ }
+ 
++/*
++ * Advance a pending IN data stage by one hardware action: load the next
++ * packet, or write DATAEND after the last one.
++ *
++ * strict=1 runs inline, right after a packet was loaded.  It waits for the
++ * condition the vendor ISR tests before it loads another packet -- TXPKTRDY
++ * clear (the SIE took the packet) and, before another packet, EP0_FIFOFULL
++ * clear (the FIFO has room again) -- for RUBY_EP0_SPINS x 10 us, then gives
++ * up: no STALL, the stage stays pending.
++ *
++ * strict=0 is the 1 ms service tick, kept at the 0113b rule that TXPKTRDY
++ * clear alone is enough.  So the strict test can only ever cost a tick, it
++ * can never strand a transfer that the old path would have finished.
++ *
++ * Returns 1 when the hardware was touched, 0 when the caller should wait.
++ */
++static int
++ruby_ep0_tx_step(vm_offset_t mac, uint32_t t, int strict)
++{
++    uint32_t csr, n, i;
++
++    if (!ruby_ep0_tx_pending)
++        return 0;
++
++    for (i = 0;; i++) {
++        csr = ruby_rd32(mac, EP0CSR_OFF);
++        if (!(csr & EP0_TXPKTRDY))
++            break;
++        if (!strict || i >= RUBY_EP0_SPINS) {
++            if (strict)
++                ruby_ep0_tx_waits++;
++            return 0;
++        }
++        delay(RUBY_EP0_SPIN_US);
++    }
++
++    if (ruby_ep0_tx_sent < ruby_ep0_tx_total) {
++        if (strict && (csr & EP0_FIFOFULL)) {
++            ruby_ep0_fifo_blocked++;
++            return 0;
++        }
++        n = ruby_ep0_tx_total - ruby_ep0_tx_sent;
++        if (n > 64)
++            n = 64;
++        ruby_ep0_write_fifo(mac, ruby_ep0_txbuf + ruby_ep0_tx_sent, n);
++        csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++        ruby_wr32(mac, EP0CSR_OFF, csr | EP0_TXPKTRDY);
++        ruby_ep0_tx_sent += n;
++        ruby_ep0_txpkts++;
++        return 1;
++    }
++    /*
++     * On this IP EP0_FIFOFULL remains set until DATAEND is written
++     * (0105/0107 finding).  Gating DATAEND on it deadlocks short and
++     * multi-packet transfers, so count it and terminate anyway.
++     */
++    if (csr & EP0_FIFOFULL)
++        ruby_ep0_fifo_waits++;
++    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++    ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
++    ruby_ep0_tx_pending = 0;
++    ruby_ep0_dataends++;
++    ruby_trace(t, RUBY_TR_SEND, 0, ruby_ep0_tx_total, 0,
++        ruby_ep0_tx_sent);
++    return 1;
++}
++
++static void
++ruby_ep0_tx_pump(vm_offset_t mac, uint32_t t)
++{
++    while (ruby_ep0_tx_step(mac, t, 1))
++        ;
++}
++
+ static void
+ ruby_ep0_ack(vm_offset_t mac, uint32_t t, uint16_t key, uint32_t wlen)
+ {
+@@ -518,6 +600,7 @@ ruby_ep0_send(vm_offset_t mac, uint32_t t, uint16_t key, const uint8_t *data,
+     ruby_ep0_tx_sent = 0;
+     ruby_ep0_tx_waits = 0;
+     ruby_ep0_fifo_waits = 0;
++    ruby_ep0_fifo_blocked = 0;
+ 
+     csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+     csr |= EP0_SETUPPKTRDY | EP0_DPHTX;
+@@ -538,51 +621,25 @@ ruby_ep0_send(vm_offset_t mac, uint32_t t, uint16_t key, const uint8_t *data,
+     ruby_ep0_tx_pending = 1;
+     ruby_ep0_txpkts++;
+     ruby_trace(t, RUBY_TR_SEND, key, total, wlen, n);
++
++    /*
++     * Vendor writes the next packet and DATAEND from the context that saw
++     * the TXPKTRDY-clear event; P9 finishes a >64-byte stage inside its
++     * SETUP handler.  Leaving the remaining packets to the service tick
++     * costs one tick each.
++     */
++    ruby_ep0_tx_pump(mac, t);
+ }
+ 
+ /*
+- * Advance a pending IN data stage.  Runs once per service tick; waits for
+- * the host to take each packet, then writes DATAEND after the last one.
+- * A new SETUP aborts the stage (see ruby_ep0_service); no STALL here.
++ * Resume a pending IN data stage from the service tick: one step, using the
++ * 0113b rule that TXPKTRDY clear alone is enough.  A new SETUP aborts the
++ * stage (see ruby_ep0_service); no STALL here.
+  */
+ static void
+ ruby_ep0_tx_service(vm_offset_t mac, uint32_t t)
+ {
+-    uint32_t csr, n;
+-
+-    if (!ruby_ep0_tx_pending)
+-        return;
+-    csr = ruby_rd32(mac, EP0CSR_OFF);
+-    if (csr & EP0_TXPKTRDY) {
+-        if (++ruby_ep0_tx_waits == 10)
+-            ruby_trace(t, RUBY_TR_NOTE, 5, ruby_ep0_tx_sent,
+-                ruby_ep0_tx_total, csr);
+-        return;
+-    }
+-    if (ruby_ep0_tx_sent < ruby_ep0_tx_total) {
+-        n = ruby_ep0_tx_total - ruby_ep0_tx_sent;
+-        if (n > 64)
+-            n = 64;
+-        ruby_ep0_write_fifo(mac, ruby_ep0_txbuf + ruby_ep0_tx_sent, n);
+-        csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+-        ruby_wr32(mac, EP0CSR_OFF, csr | EP0_TXPKTRDY);
+-        ruby_ep0_tx_sent += n;
+-        ruby_ep0_txpkts++;
+-        return;
+-    }
+-    /*
+-     * On this IP EP0_FIFOFULL remains set until DATAEND is written
+-     * (0105/0107 finding).  Gating DATAEND on it deadlocks short and
+-     * multi-packet transfers, so count it and terminate anyway.
+-     */
+-    if (csr & EP0_FIFOFULL)
+-        ruby_ep0_fifo_waits++;
+-    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+-    ruby_wr32(mac, EP0CSR_OFF, csr | EP0_DATAEND);
+-    ruby_ep0_tx_pending = 0;
+-    ruby_ep0_dataends++;
+-    ruby_trace(t, RUBY_TR_SEND, 0, ruby_ep0_tx_total, 0,
+-        ruby_ep0_tx_sent);
++    ruby_ep0_tx_step(mac, t, 0);
+ }
+ 
+ static const uint8_t *
+@@ -1917,7 +1974,9 @@ ruby_ep0_vendor_ep0_diag(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     v[10] = ruby_rd32(mac, EP0CSR_OFF);
+     v[11] = ruby_rd32(mac, EPISR_OFF);
+     v[12] = (ruby_ep0_tx_pending & 1u) |
+-        ((ruby_ep0_tx_sent & 0xffffu) << 8);
++        ((ruby_ep0_tx_sent & 0xffffu) << 8) |
++        (((ruby_ep0_fifo_blocked > 0xffu) ? 0xffu :
++            ruby_ep0_fifo_blocked) << 24);
+     v[13] = (ruby_ep0_tx_total & 0xffffu) |
+         ((ruby_ep0_tx_waits & 0xffffu) << 16);
+     v[14] = ruby_ep0_fifo_waits;
