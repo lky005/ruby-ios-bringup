@@ -1,0 +1,73 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1ac1455..fc02e21 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2046,7 +2046,16 @@ ruby_usb_reattach(vm_offset_t mac, vm_offset_t phy)
+     ruby_wr32(mac, PM_CTRL - MTU3_PA, v & ~((1u << 6) | (1u << 0)));
+     v = ruby_rd32(phy, PHY_U2_ACR3);
+     ruby_wr32(phy, PHY_U2_ACR3, v & ~ACR3_EN_PU_DP);
+-    ruby_ep0_quiet_reset(mac);
++    /*
++     * A detach drops the PHY session and leaves a stale address behind
++     * (see ruby_usb_attach_poll).  Until 0116 this path only quieted EP0,
++     * which was harmless because the retry could only fire before the
++     * host had ever spoken.  Now that the retry can fire after a failed
++     * enumeration, the device may still be sitting on address 1 while the
++     * host restarts at address 0, so re-arm: address 0, EP0 armed, QMUs
++     * stopped, EP2 state dropped.
++     */
++    ruby_usb_rearm(mac, RUBY_REARM_RESET);
+     delay(150000);
+ 
+     ruby_ep0_set_maxpacket(mac);
+@@ -2068,7 +2077,8 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+     uint32_t t = 0, si = 0, sub = 0, cfg_t = 0;
+     int cfg_armed = 0;
+     uint32_t last_otg = 0, last_op = 0;
+-    uint32_t attach_left = 3, retry_at = 2000;
++    uint32_t attach_left = 3, retry_at = 4000;
++    uint32_t evt_seen = 0, last_evt = 0;
+     uint32_t v;
+ 
+     PE_parse_boot_argn("rubyusb_window_ms", &window_ms, sizeof(window_ms));
+@@ -2089,19 +2099,30 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+         ruby_ep0_service(mac, t);
+ 
+         /*
+-         * The host sometimes never reacts to the first attach (0114: the
+-         * same image enumerates on one boot and not on the next).  If it
+-         * has shown no sign of life two seconds after attach, redo the
+-         * detach/attach a bounded number of times; any SETUP or bus reset
+-         * stops it.
++         * The host sometimes gives up in the middle of enumeration (0116:
++         * one boot in four answers every descriptor and never sends
++         * SET_CONFIGURATION).  The 0116 condition -- setups==0 &&
++         * busresets==0 -- can never hold there: the host has already
++         * touched the device (setups 8-16, busresets 4-5), so the retry
++         * never fired once.  Watch for "not configured yet" instead.
++         *
++         * The earliest retry is 4 s, and only after the host has been
++         * quiet for 2 s, so a slow enumeration that is still making
++         * progress is never interrupted.  Three attempts at most; a
++         * successful SET_CONFIGURATION ends it for good.
+          */
+-        if (attach_left > 0 && t >= retry_at &&
+-            ruby_ep0_setups == 0 && ruby_bus_resets == 0) {
++        if (ruby_ep0_setups + ruby_bus_resets != evt_seen) {
++            evt_seen = ruby_ep0_setups + ruby_bus_resets;
++            last_evt = t;
++        }
++        if (attach_left > 0 && !ruby_cfg_seen && t >= retry_at &&
++            t - last_evt >= 2000) {
+             attach_left--;
+-            printf("RUBY USB: no host activity by t=%u, re-attach (%u left)\n",
+-                t, attach_left);
++            printf("RUBY USB: no config by t=%u (setups=%u resets=%u), "
++                "re-attach (%u left)\n",
++                t, ruby_ep0_setups, ruby_bus_resets, attach_left);
+             ruby_usb_reattach(mac, ruby_phy_base);
+-            retry_at = t + 2000;
++            retry_at = t + 4000;
+         }
+         if (ruby_cfg_seen) {
+             if (!cfg_armed) {
