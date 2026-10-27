@@ -1,0 +1,18 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1520,9 +1520,12 @@
+     if (!queued)
+         return;
+ 
+-    /* P9 order: checksum enable and stale done clear before every kick. */
++    /*
++     * Do not clear QISAR0 here.  The vendor clears the TX done bit only
++     * after qmu_done_isr() has consumed it; clearing it after a kick can
++     * drop a completion that arrives before the next push_log().
++     */
+     ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
+-    ruby_wr32(mac, QISAR0_OFF, 1u << 2);
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
+         ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
