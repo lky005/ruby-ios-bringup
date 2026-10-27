@@ -1,0 +1,130 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1005,6 +1005,13 @@
+ #define RUBY_EP2_STOP_SPINS     1000u
+ #define RUBY_EP2_STOP_SPIN_US   1u
+ #define RUBY_EP2_RECOVER_HOLD_MS 100u
++#define RUBY_EP2_RSN_TX_DONE    0x001u
++#define RUBY_EP2_RSN_EMPTY      0x002u
++#define RUBY_EP2_RSN_CSERR      0x004u
++#define RUBY_EP2_RSN_LENERR     0x008u
++#define RUBY_EP2_RSN_TQERR      0x010u
++#define RUBY_EP2_RSN_STALL      0x100u
++#define RUBY_EP2_RSN_HALT_CLEAR 0x200u
+ #define RX_DMAREQEN     (1u << 29)
+ #define RX_SLOT(x)      (((x) & 0x3fu) << 8)
+ #define RX_TYPE(x)      (((x) & 0x3u) << 4)
+@@ -1266,7 +1273,7 @@
+  * sequence.  The trigger conditions are deliberately unchanged.
+  */
+ static void
+-ruby_ep2_recover(vm_offset_t mac)
++ruby_ep2_recover(vm_offset_t mac, uint32_t reason)
+ {
+     uint32_t q0, q1, err, tqcsr, tx0;
+ 
+@@ -1280,8 +1287,8 @@
+     err = ruby_rd32(mac, TQERRIR0_OFF);
+     tqcsr = ruby_rd32(mac, TQCSR2_OFF);
+     tx0 = ruby_rd32(mac, TX2CSR0_OFF);
+-    printf("RUBY USB: EP2 recover q0=%08x q1=%08x err=%08x "
+-        "tqcsr=%08x tx0=%08x\n", q0, q1, err, tqcsr, tx0);
++    printf("RUBY USB: EP2 recover reason=%03x q0=%08x q1=%08x err=%08x "
++        "tqcsr=%08x tx0=%08x\n", reason, q0, q1, err, tqcsr, tx0);
+ 
+     ruby_recoveries++;
+     if (ruby_ep2_qmu_stop(mac) != 0) {
+@@ -1383,6 +1390,31 @@
+     return (uint32_t)((cur_pa - ruby_ring_pa) / 16u);
+ }
+ 
++static void
++ruby_ep2_log_trigger(vm_offset_t mac, uint32_t reason, uint32_t q0,
++    uint32_t q1, uint32_t txq1, uint32_t err)
++{
++    uint32_t hwo = 0, i, cur, tqcsr, tx0;
++
++    /*
++     * Diagnostic only: make the GPD ring HWO bits visible before recover
++     * resets them.  The QMU may have prefetched; HWO=0 is not proof that
++     * the slot is free.
++     */
++    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    for (i = 0; i < RUBY_GPD_NUM; i++)
++        if (ruby_gpd_ring[i * 16] & 1u)
++            hwo |= 1u << i;
++    cur = ruby_ep2_cur_slot(mac);
++    tqcsr = ruby_rd32(mac, TQCSR2_OFF);
++    tx0 = ruby_rd32(mac, TX2CSR0_OFF);
++    printf("RUBY USB: EP2 trigger reason=%03x q0=%08x q1=%08x "
++        "txq1=%02x err=%08x tqcsr=%08x tx0=%08x hwo=%x cur=%02x "
++        "enq=%u deq=%u inflight=%u host=%u\n",
++        reason, q0, q1, txq1, err, tqcsr, tx0, hwo, cur,
++        ruby_gpd_enq, ruby_gpd_deq, ruby_inflight, ruby_ep2_host_seen);
++}
++
+ /*
+  * Walk completed GPDs up to the QMU's current pointer, like the vendor
+  * qmu_done_tx.  HWO clears when the QMU takes a GPD, so the current-GPD
+@@ -1443,15 +1475,34 @@
+     }
+     /*
+      * QISAR1 is shared with RX.  Clear only the TX aggregate bits so the
+-     * RX poll can still see RXQ_EMPTY/CS/LEN/ZLP.
++     * RX poll can still see RXQ_EMPTY/CS/LEN/ZLP.  Log the raw trigger
++     * first: the snapshot inside recover would otherwise see zeros.
+      */
+     txq1 = q1 & (QISAR1_TXQ_EMPTY | QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR);
+-    if (txq1)
+-        ruby_wr32(mac, QISAR1_OFF, txq1);
+-    if (err || (txq1 & (QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR))) {
++    {
++        uint32_t reason = 0;
++
++        if (q0 & (1u << 2))
++            reason |= RUBY_EP2_RSN_TX_DONE;
++        if (txq1 & QISAR1_TXQ_EMPTY)
++            reason |= RUBY_EP2_RSN_EMPTY;
++        if (txq1 & QISAR1_TXQ_CSERR)
++            reason |= RUBY_EP2_RSN_CSERR;
++        if (txq1 & QISAR1_TXQ_LENERR)
++            reason |= RUBY_EP2_RSN_LENERR;
+         if (err)
+-            ruby_wr32(mac, TQERRIR0_OFF, err);
+-        ruby_ep2_recover(mac);
++            reason |= RUBY_EP2_RSN_TQERR;
++
++        if (err || (txq1 & (QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR))) {
++            ruby_ep2_log_trigger(mac, reason, q0, q1, txq1, err);
++            if (txq1)
++                ruby_wr32(mac, QISAR1_OFF, txq1);
++            if (err)
++                ruby_wr32(mac, TQERRIR0_OFF, err);
++            ruby_ep2_recover(mac, reason);
++        } else if (txq1) {
++            ruby_wr32(mac, QISAR1_OFF, txq1);
++        }
+     }
+ 
+     if (ruby_inflight > 0 && freed == 0 && ruby_ep2_host_seen) {
+@@ -1538,7 +1589,8 @@
+     csr = ruby_rd32(mac, TX2CSR0_OFF);
+     if (csr & TX_SENTSTALL) {
+         ruby_stall_seen++;
+-        ruby_ep2_recover(mac);
++        ruby_ep2_log_trigger(mac, RUBY_EP2_RSN_STALL, 0, 0, 0, 0);
++        ruby_ep2_recover(mac, RUBY_EP2_RSN_STALL);
+     }
+ }
+ 
+@@ -1547,7 +1599,8 @@
+ {
+     if (!ruby_ep_ready)
+         return;
+-    ruby_ep2_recover(mac);
++    ruby_ep2_log_trigger(mac, RUBY_EP2_RSN_HALT_CLEAR, 0, 0, 0, 0);
++    ruby_ep2_recover(mac, RUBY_EP2_RSN_HALT_CLEAR);
+ }
+ 
+ /* ---- EP2 bulk OUT (RX), 0112 Stage A ---- */
