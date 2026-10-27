@@ -1,0 +1,201 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -996,11 +996,15 @@
+ #define CAP_EPINFO_OFF  0x0c10
+ #define TX_SENDSTALL    (1u << 21)
+ #define TX_SENTSTALL    (1u << 22)
++#define TX_FLUSHFIFO    (1u << 20)
+ 
+ #define QMU_Q_START     1u
+ #define QMU_Q_STOP      4u
+ #define QMU_Q_RESUME    2u
+ #define QMU_Q_ACTIVE    0x8000u
++#define RUBY_EP2_STOP_SPINS     1000u
++#define RUBY_EP2_STOP_SPIN_US   1u
++#define RUBY_EP2_RECOVER_HOLD_MS 100u
+ #define RX_DMAREQEN     (1u << 29)
+ #define RX_SLOT(x)      (((x) & 0x3fu) << 8)
+ #define RX_TYPE(x)      (((x) & 0x3u) << 4)
+@@ -1051,6 +1055,12 @@
+ static uint32_t ruby_q1_last;
+ static uint32_t ruby_err_last;
+ static uint32_t ruby_recoveries;
++static uint32_t ruby_ep2_stop_timeouts;
++static uint32_t ruby_ep2_start_failures;
++static uint32_t ruby_ep2_recover_skipped;
++static uint32_t ruby_ep2_stop_spins_last;
++static uint32_t ruby_ep2_stop_spins_max;
++static uint32_t ruby_ep2_recover_hold_until;
+ static uint32_t ruby_busy_ticks;
+ static uint32_t ruby_txdone_count;
+ 
+@@ -1137,22 +1147,162 @@
+     ruby_busy_ticks = 0;
+ }
+ 
+-/* P9/vendor stall clear for a non-EP0 endpoint: W1C the stall, pulse EP_RST. */
+ static void
+-ruby_ep2_recover(vm_offset_t mac)
++ruby_ep2_clear_errors(vm_offset_t mac)
+ {
+     uint32_t csr = ruby_rd32(mac, TX2CSR0_OFF);
++    uint32_t err;
++
++    /* TX_SENTSTALL is W1C; TX_SENDSTALL is a control bit. */
++    if (csr & (TX_SENDSTALL | TX_SENTSTALL))
++        ruby_wr32(mac, TX2CSR0_OFF,
++            (csr & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
++
++    ruby_wr32(mac, QISAR0_OFF, 1u << 2);      /* TX EP2 done */
++    ruby_wr32(mac, QISAR1_OFF,
++        QISAR1_TXQ_EMPTY | QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR);
++
++    err = ruby_rd32(mac, TQERRIR0_OFF);
++    if (err)
++        ruby_wr32(mac, TQERRIR0_OFF, err);
++}
++
++/*
++ * Vendor/mainline stop sequence: STOP, flush the TX FIFO before and after
++ * waiting for ACTIVE to clear.  MT6877 still uses the legacy 16-byte GPD;
++ * only the stop/flush timing is borrowed from mainline 5aba179c34.
++ */
++static int
++ruby_ep2_qmu_stop(vm_offset_t mac)
++{
++    uint32_t v = ruby_rd32(mac, TQCSR2_OFF);
++    uint32_t i;
++
++    if (v & QMU_Q_ACTIVE) {
++        ruby_wr32(mac, TQCSR2_OFF, QMU_Q_STOP);
++        ruby_wr32(mac, TX2CSR0_OFF,
++            ruby_rd32(mac, TX2CSR0_OFF) | TX_FLUSHFIFO);
++    }
++
++    for (i = 0; i < RUBY_EP2_STOP_SPINS; i++) {
++        if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
++            break;
++        delay(RUBY_EP2_STOP_SPIN_US);
++    }
++    ruby_ep2_stop_spins_last = i;
++    if (i > ruby_ep2_stop_spins_max)
++        ruby_ep2_stop_spins_max = i;
++    if (i == RUBY_EP2_STOP_SPINS) {
++        ruby_ep2_stop_timeouts++;
++        return -1;
++    }
+ 
+     ruby_wr32(mac, TX2CSR0_OFF,
+-        (csr & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+-    ruby_wr32(mac, EP_RST_OFF, 1u << 18);   /* EP_RST(in, 2) = BIT(16) << 2 */
+-    ruby_wr32(mac, EP_RST_OFF, 0);
++        ruby_rd32(mac, TX2CSR0_OFF) | TX_FLUSHFIFO);
++    return 0;
++}
++
++static void
++ruby_ep2_ring_reset(vm_offset_t mac)
++{
++    uint32_t i;
++
++    (void)mac;
+     ruby_inflight = 0;
+-    ruby_gpd_deq = ruby_gpd_enq;
++    ruby_gpd_enq = 0;
++    ruby_gpd_deq = 0;
+     ruby_ep2_host_seen = 0;
+     ruby_tx_busy = 0;
+     ruby_busy_ticks = 0;
++
++    for (i = 0; i < RUBY_GPD_NUM; i++) {
++        uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
++        uint64_t np = ruby_gpd_pa[nxt];
++        uint8_t *g = ruby_gpd_ring + i * 16;
++
++        ruby_gpd_clear(i);
++        g[2] = (uint8_t)(((np >> 32) & 0xfu) << 4);
++        g[3] = 0;
++        *(volatile uint32_t *)(g + 4) = (uint32_t)np;
++    }
++    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++}
++
++static int
++ruby_ep2_qmu_start(vm_offset_t mac)
++{
++    if (!ruby_ring_pa) {
++        ruby_ep2_start_failures++;
++        return -1;
++    }
++
++    ruby_wr32(mac, TX2CSR0_OFF, 64u | (1u << 29));
++    ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
++    ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
++
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) & ~(1u << 2));
++    ruby_wr32(mac, TQERRIESR0_OFF,
++        ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 18) | (1u << 2));
++
++    ruby_wr32(mac, TQSAR2_OFF, (uint32_t)ruby_ring_pa);
++    ruby_wr32(mac, TQHIAR2_OFF, (uint32_t)((ruby_ring_pa >> 32) & 0xfu));
++
++    if (ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE) {
++        ruby_ep2_start_failures++;
++        return -1;
++    }
++    ruby_wr32(mac, TQCSR2_OFF, QMU_Q_START);
++    if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE)) {
++        ruby_ep2_start_failures++;
++        return -1;
++    }
++    ruby_ep_ready = 1;
++    return 0;
++}
++
++/*
++ * 0121: replace the bare EP_RST with the vendor/mainline stop/flush/restart
++ * sequence.  The trigger conditions are deliberately unchanged.
++ */
++static void
++ruby_ep2_recover(vm_offset_t mac)
++{
++    uint32_t q0, q1, err, tqcsr, tx0;
++
++    if ((int32_t)(ruby_ms - ruby_ep2_recover_hold_until) < 0) {
++        ruby_ep2_recover_skipped++;
++        return;
++    }
++
++    q0 = ruby_rd32(mac, QISAR0_OFF);
++    q1 = ruby_rd32(mac, QISAR1_OFF);
++    err = ruby_rd32(mac, TQERRIR0_OFF);
++    tqcsr = ruby_rd32(mac, TQCSR2_OFF);
++    tx0 = ruby_rd32(mac, TX2CSR0_OFF);
++    printf("RUBY USB: EP2 recover q0=%08x q1=%08x err=%08x "
++        "tqcsr=%08x tx0=%08x\n", q0, q1, err, tqcsr, tx0);
++
+     ruby_recoveries++;
++    if (ruby_ep2_qmu_stop(mac) != 0) {
++        printf("RUBY USB: EP2 stop timeout spins=%u timeouts=%u\n",
++            ruby_ep2_stop_spins_last, ruby_ep2_stop_timeouts);
++        ruby_ep2_recover_hold_until = ruby_ms + RUBY_EP2_RECOVER_HOLD_MS;
++        return;
++    }
++
++    ruby_ep2_clear_errors(mac);
++    ruby_ep2_ring_reset(mac);
++    if (ruby_ep2_qmu_start(mac) != 0) {
++        printf("RUBY USB: EP2 start failed spins=%u failures=%u\n",
++            ruby_ep2_stop_spins_last, ruby_ep2_start_failures);
++        ruby_ep2_recover_hold_until = ruby_ms + RUBY_EP2_RECOVER_HOLD_MS;
++        return;
++    }
++
++    ruby_ep2_recover_hold_until = 0;
++    printf("RUBY USB: EP2 recover ok spins=%u max=%u\n",
++        ruby_ep2_stop_spins_last, ruby_ep2_stop_spins_max);
+ }
+ 
+ static void
