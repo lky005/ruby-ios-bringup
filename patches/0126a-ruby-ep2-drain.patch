@@ -1,0 +1,412 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1031,12 +1031,16 @@
+ #define RUBY_RX_GPD_NUM 16
+ #define RUBY_RX_BUF     64
+ #define RUBY_GPD_NUM    4
++#define RUBY_GPD_DESC   16
++#define RUBY_GPD_STRIDE 16
++#define RUBY_GPD_RING_SZ (RUBY_GPD_NUM * RUBY_GPD_STRIDE)
++#define RUBY_EP2_MAX_INFLIGHT (RUBY_GPD_NUM - 1u)
+ #define RUBY_LOG_CHUNK  64
+ #define RUBY_HDR_LEN    16
+ #define RUBY_EP2_FRAME  63
+ #define RUBY_LOG_TEXT   (RUBY_EP2_FRAME - RUBY_HDR_LEN)
+ 
+-static uint8_t ruby_gpd_ring[RUBY_GPD_NUM * 16] __attribute__((aligned(4096)));
++static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+ static uint8_t ruby_log_buf[RUBY_GPD_NUM][RUBY_LOG_CHUNK]
+     __attribute__((aligned(4096)));
+ static uint32_t ruby_gpd_enq;
+@@ -1066,6 +1070,14 @@
+ static uint32_t ruby_ep2_drain_freed0;
+ static uint32_t ruby_ep2_inflight_stuck;
+ static uint32_t ruby_ep2_no_log;
++static uint32_t ruby_ep2_drain_calls;
++static uint32_t ruby_ep2_drain_freed_total;
++static uint32_t ruby_ep2_drain_max;
++static uint32_t ruby_ep2_drain_noq0;
++static uint32_t ruby_ep2_cur_bad;
++static uint32_t ruby_ep2_hwo_gap;
++static uint32_t ruby_ep2_drain_invariant;
++static uint32_t ruby_ep2_drain_bad_last;
+ static uint32_t ruby_busy_ticks;
+ static uint32_t ruby_txdone_count;
+ 
+@@ -1119,6 +1131,18 @@
+     __asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++static inline void
++ruby_dma_wmb(void)
++{
++    __asm__ volatile("dmb sy" ::: "memory");
++}
++
++static inline void
++ruby_dma_mb(void)
++{
++    __asm__ volatile("dsb sy" ::: "memory");
++}
++
+ static uint8_t
+ ruby_gpd_chksum(uint8_t *g)
+ {
+@@ -1135,10 +1159,10 @@
+ static void
+ ruby_gpd_clear(uint32_t i)
+ {
+-    uint8_t *g = ruby_gpd_ring + i * 16;
++    uint8_t *g = ruby_gpd_ring + i * RUBY_GPD_STRIDE;
+     uint32_t k;
+ 
+-    for (k = 0; k < 16; k++)
++    for (k = 0; k < RUBY_GPD_DESC; k++)
+         g[k] = 0;
+ }
+ 
+@@ -1223,7 +1247,7 @@
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
+         uint64_t np = ruby_gpd_pa[nxt];
+-        uint8_t *g = ruby_gpd_ring + i * 16;
++        uint8_t *g = ruby_gpd_ring + i * RUBY_GPD_STRIDE;
+ 
+         ruby_gpd_clear(i);
+         g[2] = (uint8_t)(((np >> 32) & 0xfu) << 4);
+@@ -1313,20 +1337,33 @@
+ static void
+ ruby_ep2_config(vm_offset_t mac)
+ {
+-    uint32_t i;
++    uint32_t i, ok = 1, bad_i = 0;
+ 
+     if (ruby_ep_ready)
+         return;
+     ruby_ep2_host_seen = 0;
+     ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
++    if (!ruby_ring_pa || (ruby_ring_pa & (PAGE_SIZE - 1u)))
++        ok = 0;
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         ruby_log_pa[i] = ruby_dma_pa(ruby_log_buf[i]);
+-        ruby_gpd_pa[i] = ruby_dma_pa(ruby_gpd_ring + i * 16);
++        ruby_gpd_pa[i] = ruby_dma_pa(ruby_gpd_ring +
++            i * RUBY_GPD_STRIDE);
++        if (!ruby_log_pa[i] || (ruby_log_pa[i] & 0x3fu) ||
++            ((ruby_log_pa[i] & (PAGE_SIZE - 1u)) >
++                PAGE_SIZE - RUBY_LOG_CHUNK) ||
++            !ruby_gpd_pa[i] ||
++            (ruby_ring_pa &&
++                ruby_gpd_pa[i] != ruby_ring_pa +
++                    i * RUBY_GPD_STRIDE)) {
++            ok = 0;
++            bad_i = i;
++        }
+     }
+-    if (!ruby_ring_pa || !ruby_log_pa[0] || !ruby_log_pa[1] ||
+-        !ruby_log_pa[2] || !ruby_log_pa[3] || !ruby_gpd_pa[0] ||
+-        !ruby_gpd_pa[1] || !ruby_gpd_pa[2] || !ruby_gpd_pa[3]) {
+-        printf("RUBY USB: EP2 buffers not mapped\n");
++    if (!ok) {
++        printf("RUBY USB: EP2 map bad i=%u ring=0x%llx log=0x%llx "
++            "gpd=0x%llx\n", bad_i, ruby_ring_pa, ruby_log_pa[bad_i],
++            ruby_gpd_pa[bad_i]);
+         ruby_ring_pa = 0;
+         return;
+     }
+@@ -1343,7 +1380,7 @@
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
+         uint64_t np = ruby_gpd_pa[nxt];
+-        uint8_t *g = ruby_gpd_ring + i * 16;
++        uint8_t *g = ruby_gpd_ring + i * RUBY_GPD_STRIDE;
+ 
+         ruby_gpd_clear(i);
+         g[2] = (uint8_t)(((np >> 32) & 0xfu) << 4);
+@@ -1351,6 +1388,7 @@
+         *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+     }
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    ruby_dma_mb();
+ 
+     ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
+     /*
+@@ -1366,9 +1404,11 @@
+     ruby_wr32(mac, TQHIAR2_OFF, (uint32_t)((ruby_ring_pa >> 32) & 0xfu));
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_START);
+     ruby_ep_ready = 1;
+-    printf("RUBY USB: EP2 QMU ring pa=0x%llx log pa=0x%llx/0x%llx/0x%llx/0x%llx\n",
+-        ruby_ring_pa, ruby_log_pa[0], ruby_log_pa[1], ruby_log_pa[2],
+-        ruby_log_pa[3]);
++    printf("RUBY USB: EP2 QMU ring pa=0x%llx gpd[0]=0x%llx gpd[%u]=0x%llx "
++        "log[0]=0x%llx log[%u]=0x%llx\n",
++        ruby_ring_pa, ruby_gpd_pa[0], (uint32_t)(RUBY_GPD_NUM - 1u),
++        ruby_gpd_pa[RUBY_GPD_NUM - 1], ruby_log_pa[0],
++        (uint32_t)(RUBY_GPD_NUM - 1u), ruby_log_pa[RUBY_GPD_NUM - 1]);
+     /* Fill the queue before the first host IN token; leave one slot free. */
+     ruby_ep2_push_log(mac);
+ }
+@@ -1383,9 +1423,9 @@
+     txhiar = ruby_rd32(mac, TQHIAR2_OFF);
+     cur_pa = ((uint64_t)((txhiar >> 8) & 0xfu) << 32) | txcpr;
+     if (cur_pa < ruby_ring_pa ||
+-        cur_pa >= ruby_ring_pa + (RUBY_GPD_NUM * 16u))
++        cur_pa >= ruby_ring_pa + RUBY_GPD_RING_SZ)
+         return 0xffu;
+-    return (uint32_t)((cur_pa - ruby_ring_pa) / 16u);
++    return (uint32_t)((cur_pa - ruby_ring_pa) / RUBY_GPD_STRIDE);
+ }
+ 
+ static uint32_t
+@@ -1395,40 +1435,66 @@
+ 
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+-        if (ruby_gpd_ring[i * 16] & 1u)
++        if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
+             hwo |= 1u << i;
+     return hwo;
+ }
+ 
++static uint32_t
++ruby_ep2_ring_dist(uint32_t from, uint32_t to)
++{
++    return (to + RUBY_GPD_NUM - from) % RUBY_GPD_NUM;
++}
++
+ /*
+  * Walk completed GPDs up to the QMU's current pointer, like the vendor
+  * qmu_done_tx.  HWO clears when the QMU takes a GPD, so the current-GPD
+- * address is what tells us how far the ring actually advanced.
++ * address is what tells us how far the ring actually advanced.  A valid
++ * cur is required: a guessed pointer can release a GPD still in flight.
+  */
+ static uint32_t
+-ruby_ep2_drain(vm_offset_t mac)
++ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+ {
+-    uint32_t cur, freed = 0, i, hwo = 0;
++    uint32_t cur, freed = 0, i, hwo;
+ 
+-    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+-    for (i = 0; i < RUBY_GPD_NUM; i++)
+-        if (ruby_gpd_ring[i * 16] & 1u)
+-            hwo |= 1u << i;
++    ruby_ep2_drain_calls++;
++    if (ruby_inflight == 0)
++        return 0;
+ 
+     cur = ruby_ep2_cur_slot(mac);
+-    while (ruby_inflight > 0) {
++    if (cur == 0xffu) {
++        ruby_ep2_cur_bad++;
++        return 0;
++    }
++    if (ruby_ep2_ring_dist(ruby_gpd_deq, cur) > ruby_inflight) {
++        ruby_ep2_cur_bad++;
++        return 0;
++    }
++
++    ruby_dma_mb();          /* TQCPR read complete before HWO snapshot */
++    hwo = ruby_ep2_hwo_bits();
++    while (ruby_inflight > 0 && ruby_gpd_deq != cur) {
+         i = ruby_gpd_deq;
+-        if (i == cur)
+-            break;
+-        if (hwo & (1u << i))
++        if (hwo & (1u << i)) {
++            ruby_ep2_hwo_gap++;
+             break;
++        }
+         ruby_gpd_deq = (i + 1u) % RUBY_GPD_NUM;
+         ruby_inflight--;
+         freed++;
+-        if (cur == 0xffu)
+-            break;      /* no usable current pointer: release one per done */
+     }
+-    ruby_txdone_count += freed;
++
++    if (freed) {
++        ruby_txdone_count += freed;
++        ruby_ep2_drain_freed_total += freed;
++        if (freed > ruby_ep2_drain_max)
++            ruby_ep2_drain_max = freed;
++        if (!(q0 & (1u << 2)))
++            ruby_ep2_drain_noq0++;
++    }
++
++    if (cur == ruby_gpd_enq && ruby_inflight != 0)
++        ruby_ep2_drain_invariant++;
+     return freed;
+ }
+ 
+@@ -1451,15 +1517,21 @@
+     ruby_q1_last = q1;
+     ruby_err_last = err;
+     if (q0 & (1u << 2)) {
+-        uint32_t cur;
+-
+         ruby_wr32(mac, QISAR0_OFF, 1u << 2);
+         /* First TX done means the host has issued an IN token. */
+         ruby_ep2_host_seen = 1;
+         ruby_ep2_q0_seen++;
+-        freed = ruby_ep2_drain(mac);
+-        if (freed)
+-            ruby_busy_ticks = 0;
++    }
++
++    freed = 0;
++    if (ruby_inflight > 0)
++        freed = ruby_ep2_drain(mac, q0);
++    if (freed)
++        ruby_busy_ticks = 0;
++
++    if (q0 & (1u << 2)) {
++        uint32_t cur;
++
+         if (freed == 0 && ruby_inflight > 0) {
+             ruby_ep2_drain_freed0++;
+             if (ruby_ep2_drain_freed0 <= 3 ||
+@@ -1485,6 +1557,35 @@
+                 (unsigned long long)sweet_log_position(),
+                 (unsigned long long)ruby_log_pos, ruby_ep2_q0_seen);
+         }
++    } else if (freed) {
++        if (ruby_ep2_drain_noq0 <= 3 ||
++            (ruby_ep2_drain_noq0 & 0xff) == 0)
++            printf("RUBY USB: EP2 drain_poll cur=%02x enq=%u deq=%u "
++                "inflight=%u hwo=%x freed=%u calls=%u total=%llu "
++                "pos=%llu\n",
++                ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
++                ruby_inflight, ruby_ep2_hwo_bits(), freed,
++                ruby_ep2_drain_calls,
++                (unsigned long long)sweet_log_position(),
++                (unsigned long long)ruby_log_pos);
++    }
++
++    if (ruby_ep2_cur_bad || ruby_ep2_hwo_gap ||
++        ruby_ep2_drain_invariant) {
++        uint32_t bad = ruby_ep2_cur_bad + ruby_ep2_hwo_gap +
++            ruby_ep2_drain_invariant;
++
++        if (bad != ruby_ep2_drain_bad_last) {
++            ruby_ep2_drain_bad_last = bad;
++            if (bad <= 3 || (bad & 0xff) == 0)
++                printf("RUBY USB: EP2 drain_bad q0=%08x cur=%02x "
++                    "enq=%u deq=%u inflight=%u hwo=%x freed=%u "
++                    "calls=%u bad=%u gap=%u inv=%u\n",
++                    q0, ruby_ep2_cur_slot(mac), ruby_gpd_enq,
++                    ruby_gpd_deq, ruby_inflight, ruby_ep2_hwo_bits(),
++                    freed, ruby_ep2_drain_calls, ruby_ep2_cur_bad,
++                    ruby_ep2_hwo_gap, ruby_ep2_drain_invariant);
++        }
+     }
+     /*
+      * QISAR1 is shared with RX.  Clear only the TX aggregate bits so the
+@@ -1501,14 +1602,25 @@
+ 
+     if (ruby_inflight > 0 && freed == 0 && ruby_ep2_host_seen) {
+         if (++ruby_busy_ticks > 2000) {     /* ~2 s at 1 ms; P9 resumes only */
+-            ruby_ep2_inflight_stuck++;
+-            printf("RUBY USB: EP2 stuck q0=%08x cur=%02x enq=%u "
+-                "deq=%u inflight=%u hwo=%x total=%llu pos=%llu\n",
+-                q0, ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
+-                ruby_inflight, ruby_ep2_hwo_bits(),
+-                (unsigned long long)sweet_log_position(),
+-                (unsigned long long)ruby_log_pos);
+-            ruby_ep2_resume(mac);
++            freed = ruby_ep2_drain(mac, q0);
++            if (freed) {
++                ruby_busy_ticks = 0;
++            } else {
++                ruby_ep2_inflight_stuck++;
++                printf("RUBY USB: EP2 stuck q0=%08x cur=%02x enq=%u "
++                    "deq=%u inflight=%u hwo=%x total=%llu pos=%llu\n",
++                    q0, ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
++                    ruby_inflight, ruby_ep2_hwo_bits(),
++                    (unsigned long long)sweet_log_position(),
++                    (unsigned long long)ruby_log_pos);
++                printf("RUBY USB: EP2 stuck2 drain=%u noq0=%u bad=%u "
++                    "gap=%u inv=%u max=%u calls=%u\n",
++                    ruby_ep2_drain_freed_total, ruby_ep2_drain_noq0,
++                    ruby_ep2_cur_bad, ruby_ep2_hwo_gap,
++                    ruby_ep2_drain_invariant, ruby_ep2_drain_max,
++                    ruby_ep2_drain_calls);
++                ruby_ep2_resume(mac);
++            }
+         }
+     } else if (ruby_inflight == 0 || !ruby_ep2_host_seen) {
+         ruby_busy_ticks = 0;
+@@ -1521,12 +1633,12 @@
+      */
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+-        if (ruby_gpd_ring[i * 16] & 1u)
++        if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
+             hwo |= 1u << i;
+ 
+-    while (ruby_inflight < (RUBY_GPD_NUM - 1u)) {
++    while (ruby_inflight < RUBY_EP2_MAX_INFLIGHT) {
+         enq = ruby_gpd_enq;
+-        g = ruby_gpd_ring + enq * 16;
++        g = ruby_gpd_ring + enq * RUBY_GPD_STRIDE;
+         if (hwo & (1u << enq))
+             break;              /* safety net: never rewrite an owned slot */
+ 
+@@ -1568,10 +1680,11 @@
+         *(volatile uint32_t *)(g + 8) = (uint32_t)log_pa;
+         *(volatile uint16_t *)(g + 12) = (uint16_t)(RUBY_HDR_LEN + n);
+         g[1] = ruby_gpd_chksum(g);
++        ruby_dma_wmb();             /* fields before HWO */
+         g[0] = (1u << 0) | (1u << 7);
+ 
+         ruby_dc_civac(buf, RUBY_LOG_CHUNK);
+-        ruby_dc_civac(g, 16);
++        ruby_dc_civac(g, RUBY_GPD_DESC);
+         ruby_log_pos = pos;
+         ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+         ruby_inflight++;
+@@ -1588,6 +1701,7 @@
+      * after qmu_done_isr() has consumed it; clearing it after a kick can
+      * drop a completion that arrives before the next push_log().
+      */
++    ruby_dma_mb();              /* descriptor clean complete before doorbell */
+     ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
+@@ -1627,6 +1741,12 @@
+             ruby_ep2_hwo_bits(),
+             (unsigned long long)sweet_log_position(),
+             (unsigned long long)ruby_log_pos);
++        printf("RUBY USB: EP2 stall2 drain=%u noq0=%u bad=%u "
++            "gap=%u inv=%u max=%u calls=%u\n",
++            ruby_ep2_drain_freed_total, ruby_ep2_drain_noq0,
++            ruby_ep2_cur_bad, ruby_ep2_hwo_gap,
++            ruby_ep2_drain_invariant, ruby_ep2_drain_max,
++            ruby_ep2_drain_calls);
+         ruby_ep2_recover(mac);
+     }
+ }
+@@ -1651,6 +1771,12 @@
+         ruby_ep2_hwo_bits(),
+         (unsigned long long)sweet_log_position(),
+         (unsigned long long)ruby_log_pos);
++    printf("RUBY USB: EP2 halt_clear2 drain=%u noq0=%u bad=%u "
++        "gap=%u inv=%u max=%u calls=%u\n",
++        ruby_ep2_drain_freed_total, ruby_ep2_drain_noq0,
++        ruby_ep2_cur_bad, ruby_ep2_hwo_gap,
++        ruby_ep2_drain_invariant, ruby_ep2_drain_max,
++        ruby_ep2_drain_calls);
+     ruby_ep2_recover(mac);
+ }
+ 
+@@ -2117,7 +2243,7 @@
+ 
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+-        if (ruby_gpd_ring[i * 16] & 1u)
++        if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
+             hwo |= 1u << i;
+     txcpr = ruby_rd32(mac, TQCPR2_OFF);
+     txhiar = ruby_rd32(mac, TQHIAR2_OFF);

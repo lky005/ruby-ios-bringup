@@ -86,6 +86,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0121-ruby-ep2-recover.patch" \
     "$ROOT/patches/0124-ruby-ep2-qisar0.patch" \
     "$ROOT/patches/0125-ruby-ep2-telemetry.patch" \
+    "$ROOT/patches/0126a-ruby-ep2-drain.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
