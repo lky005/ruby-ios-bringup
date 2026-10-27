@@ -1,0 +1,102 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index fc02e21..e526dee 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -695,6 +695,10 @@ static void ruby_ep0_vendor_ep0_diag(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
+ static void ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
++static void ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t,
++    uint32_t wlen);
++static void ruby_ep0_vendor_log(vm_offset_t mac, uint32_t t, uint32_t value,
++    uint32_t index, uint32_t wlen);
+ static void ruby_ep2_halt_clear(vm_offset_t mac);
+ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+@@ -867,6 +871,10 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_vendor_ep0_diag(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x28)
+         ruby_ep0_vendor_ep0_bulk(mac, t, len);
++    else if (st[0] == 0xc0 && st[1] == 0x2a)
++        ruby_ep0_vendor_log(mac, t, value, index, len);
++    else if (st[0] == 0xc0 && st[1] == 0x2b)
++        ruby_ep0_vendor_log_info(mac, t, len);
+     else
+         ruby_ep0_stall(mac, t, key, len);
+ }
+@@ -2008,6 +2016,75 @@ ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     ruby_ep0_send(mac, t, 0xc028, pat, sizeof(pat), wlen);
+ }
+ 
++/*
++ * Vendor IN 0xC0/0x2B: SWEETLOG snapshot descriptor.  The console ring lives
++ * in sweet_ufs.c as a static array, so this never reaches into it: that file
++ * already exports sweet_log_position()/sweet_log_copy() for the EP2 stream,
++ * and the EP0 path reuses them.  Layout, little endian, 32 B:
++ *   u32 magic "SLOG" | u32 version | u32 ring size | u64 total | 3 x u32 pad
++ * The host reads this first and snapshots total, so it can stop at a boundary
++ * that will not move while it pulls the slices.
++ */
++#define RUBY_LOG_MAGIC  0x474f4c53u     /* "SLOG" */
++#define RUBY_LOG_SIZE   (4u << 20)      /* SWEET_LOG_SIZE, sweet_ufs.c */
++#define RUBY_LOG_SLICE  64u
++
++static void
++ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    uint64_t total = sweet_log_position();
++    uint32_t v[8];
++
++    v[0] = RUBY_LOG_MAGIC;
++    v[1] = 1;
++    v[2] = RUBY_LOG_SIZE;
++    v[3] = (uint32_t)total;
++    v[4] = (uint32_t)(total >> 32);
++    v[5] = 0;
++    v[6] = 0;
++    v[7] = 0;
++    ruby_ep0_send(mac, t, 0xc02b, (const uint8_t *)v, sizeof(v), wlen);
++}
++
++/*
++ * Vendor IN 0xC0/0x2A: one slice of the console ring.
++ *   wValue = offset bits 0-15, wIndex = bits 16-31, wLength = 8..64.
++ *
++ * The offset comes straight from the host, so it is validated here:
++ * sweet_log_copy() subtracts its cursor from the total, and an offset past
++ * the end would wrap that subtraction and stream from the wrong place.  Out
++ * of range is a STALL, never a read outside the ring.
++ */
++static void
++ruby_ep0_vendor_log(vm_offset_t mac, uint32_t t, uint32_t value,
++    uint32_t index, uint32_t wlen)
++{
++    uint64_t off = ((uint64_t)index << 16) | (value & 0xffffu);
++    uint64_t pos = off;
++    uint64_t total;
++    uint8_t buf[RUBY_LOG_SLICE];
++    uint32_t want, n;
++
++    /*
++     * sweet_log_copy() silently skips ahead when the cursor is more than one
++     * ring behind, which would return bytes from the wrong offset.  Refuse
++     * anything outside the live window instead, so the host sees a STALL
++     * rather than data it cannot trust.
++     */
++    total = sweet_log_position();
++    if (off >= total || total - off > RUBY_LOG_SIZE) {
++        ruby_ep0_stall(mac, t, 0xc02a, wlen);
++        return;
++    }
++    want = wlen > sizeof(buf) ? (uint32_t)sizeof(buf) : wlen;
++    n = sweet_log_copy(&pos, (char *)buf, want);
++    if (!n) {
++        ruby_ep0_stall(mac, t, 0xc02a, wlen);
++        return;
++    }
++    ruby_ep0_send(mac, t, 0xc02a, buf, n, wlen);
++}
++
+ /*
+  * Put EP0 back to a known state while the device is off the bus: reset the
+  * endpoint, drop whatever the previous host left in the RX FIFO, and clear
