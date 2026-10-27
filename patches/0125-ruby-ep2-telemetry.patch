@@ -1,0 +1,174 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1061,6 +1061,11 @@
+ static uint32_t ruby_ep2_stop_spins_last;
+ static uint32_t ruby_ep2_stop_spins_max;
+ static uint32_t ruby_ep2_recover_hold_until;
++static uint32_t ruby_ep2_q0_seen;
++static uint32_t ruby_ep2_q0_after_kick;
++static uint32_t ruby_ep2_drain_freed0;
++static uint32_t ruby_ep2_inflight_stuck;
++static uint32_t ruby_ep2_no_log;
+ static uint32_t ruby_busy_ticks;
+ static uint32_t ruby_txdone_count;
+ 
+@@ -1383,6 +1388,18 @@
+     return (uint32_t)((cur_pa - ruby_ring_pa) / 16u);
+ }
+ 
++static uint32_t
++ruby_ep2_hwo_bits(void)
++{
++    uint32_t hwo = 0, i;
++
++    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    for (i = 0; i < RUBY_GPD_NUM; i++)
++        if (ruby_gpd_ring[i * 16] & 1u)
++            hwo |= 1u << i;
++    return hwo;
++}
++
+ /*
+  * Walk completed GPDs up to the QMU's current pointer, like the vendor
+  * qmu_done_tx.  HWO clears when the QMU takes a GPD, so the current-GPD
+@@ -1434,12 +1451,40 @@
+     ruby_q1_last = q1;
+     ruby_err_last = err;
+     if (q0 & (1u << 2)) {
++        uint32_t cur;
++
+         ruby_wr32(mac, QISAR0_OFF, 1u << 2);
+         /* First TX done means the host has issued an IN token. */
+         ruby_ep2_host_seen = 1;
++        ruby_ep2_q0_seen++;
+         freed = ruby_ep2_drain(mac);
+         if (freed)
+             ruby_busy_ticks = 0;
++        if (freed == 0 && ruby_inflight > 0) {
++            ruby_ep2_drain_freed0++;
++            if (ruby_ep2_drain_freed0 <= 3 ||
++                (ruby_ep2_drain_freed0 & 0x3f) == 0) {
++                cur = ruby_ep2_cur_slot(mac);
++                printf("RUBY USB: EP2 drain0 q0=%08x cur=%02x "
++                    "enq=%u deq=%u inflight=%u hwo=%x total=%llu "
++                    "pos=%llu seen=%u\n",
++                    q0, cur, ruby_gpd_enq, ruby_gpd_deq,
++                    ruby_inflight, ruby_ep2_hwo_bits(),
++                    (unsigned long long)sweet_log_position(),
++                    (unsigned long long)ruby_log_pos,
++                    ruby_ep2_q0_seen);
++            }
++        } else if (ruby_ep2_q0_seen <= 3 ||
++            (ruby_ep2_q0_seen & 0x3f) == 0) {
++            cur = ruby_ep2_cur_slot(mac);
++            printf("RUBY USB: EP2 drain q0=%08x cur=%02x enq=%u "
++                "deq=%u inflight=%u hwo=%x freed=%u total=%llu "
++                "pos=%llu seen=%u\n",
++                q0, cur, ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
++                ruby_ep2_hwo_bits(), freed,
++                (unsigned long long)sweet_log_position(),
++                (unsigned long long)ruby_log_pos, ruby_ep2_q0_seen);
++        }
+     }
+     /*
+      * QISAR1 is shared with RX.  Clear only the TX aggregate bits so the
+@@ -1455,8 +1500,16 @@
+     }
+ 
+     if (ruby_inflight > 0 && freed == 0 && ruby_ep2_host_seen) {
+-        if (++ruby_busy_ticks > 2000)       /* ~2 s at 1 ms; P9 resumes only */
++        if (++ruby_busy_ticks > 2000) {     /* ~2 s at 1 ms; P9 resumes only */
++            ruby_ep2_inflight_stuck++;
++            printf("RUBY USB: EP2 stuck q0=%08x cur=%02x enq=%u "
++                "deq=%u inflight=%u hwo=%x total=%llu pos=%llu\n",
++                q0, ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
++                ruby_inflight, ruby_ep2_hwo_bits(),
++                (unsigned long long)sweet_log_position(),
++                (unsigned long long)ruby_log_pos);
+             ruby_ep2_resume(mac);
++        }
+     } else if (ruby_inflight == 0 || !ruby_ep2_host_seen) {
+         ruby_busy_ticks = 0;
+     }
+@@ -1481,8 +1534,18 @@
+         log_pa = ruby_log_pa[enq];
+         pos = ruby_log_pos;
+         n = sweet_log_copy(&pos, (char *)buf + RUBY_HDR_LEN, RUBY_LOG_TEXT);
+-        if (!n)
++        if (!n) {
++            ruby_ep2_no_log++;
++            if (ruby_ep2_no_log <= 3 ||
++                (ruby_ep2_no_log & 0x3f) == 0)
++                printf("RUBY USB: EP2 no_log n=%u enq=%u deq=%u "
++                    "inflight=%u total=%llu pos=%llu\n",
++                    ruby_ep2_no_log, ruby_gpd_enq, ruby_gpd_deq,
++                    ruby_inflight,
++                    (unsigned long long)sweet_log_position(),
++                    (unsigned long long)ruby_log_pos);
+             break;
++        }
+ 
+         np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
+         hdr = (uint32_t *)buf;
+@@ -1529,6 +1592,18 @@
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE))
+         ruby_wr32(mac, TQCSR2_OFF, QMU_Q_RESUME);
++
++    if (ruby_rd32(mac, QISAR0_OFF) & (1u << 2)) {
++        ruby_ep2_q0_after_kick++;
++        if (ruby_ep2_q0_after_kick <= 3 ||
++            (ruby_ep2_q0_after_kick & 0x3f) == 0)
++            printf("RUBY USB: EP2 q0_after_kick n=%u enq=%u deq=%u "
++                "inflight=%u total=%llu pos=%llu\n",
++                ruby_ep2_q0_after_kick, ruby_gpd_enq, ruby_gpd_deq,
++                ruby_inflight,
++                (unsigned long long)sweet_log_position(),
++                (unsigned long long)ruby_log_pos);
++    }
+ }
+ 
+ static void
+@@ -1541,6 +1616,17 @@
+     csr = ruby_rd32(mac, TX2CSR0_OFF);
+     if (csr & TX_SENTSTALL) {
+         ruby_stall_seen++;
++        printf("RUBY USB: EP2 stall tx0=%08x q0=%08x q1=%08x "
++            "err=%08x tqcsr=%08x cur=%02x enq=%u deq=%u "
++            "inflight=%u hwo=%x total=%llu pos=%llu\n",
++            csr, ruby_rd32(mac, QISAR0_OFF),
++            ruby_rd32(mac, QISAR1_OFF),
++            ruby_rd32(mac, TQERRIR0_OFF),
++            ruby_rd32(mac, TQCSR2_OFF), ruby_ep2_cur_slot(mac),
++            ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
++            ruby_ep2_hwo_bits(),
++            (unsigned long long)sweet_log_position(),
++            (unsigned long long)ruby_log_pos);
+         ruby_ep2_recover(mac);
+     }
+ }
+@@ -1548,8 +1634,23 @@
+ static void
+ ruby_ep2_halt_clear(vm_offset_t mac)
+ {
++    uint32_t q0, q1, err, tqcsr, tx0;
++
+     if (!ruby_ep_ready)
+         return;
++    q0 = ruby_rd32(mac, QISAR0_OFF);
++    q1 = ruby_rd32(mac, QISAR1_OFF);
++    err = ruby_rd32(mac, TQERRIR0_OFF);
++    tqcsr = ruby_rd32(mac, TQCSR2_OFF);
++    tx0 = ruby_rd32(mac, TX2CSR0_OFF);
++    printf("RUBY USB: EP2 halt_clear q0=%08x q1=%08x err=%08x "
++        "tqcsr=%08x tx0=%08x cur=%02x enq=%u deq=%u "
++        "inflight=%u hwo=%x total=%llu pos=%llu\n",
++        q0, q1, err, tqcsr, tx0, ruby_ep2_cur_slot(mac),
++        ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
++        ruby_ep2_hwo_bits(),
++        (unsigned long long)sweet_log_position(),
++        (unsigned long long)ruby_log_pos);
+     ruby_ep2_recover(mac);
+ }
+ 
