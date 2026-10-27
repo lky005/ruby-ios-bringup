@@ -1,0 +1,77 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1028,6 +1028,7 @@
+ #define QISAR1_RXQ_LENERR   (1u << 18)
+ #define QISAR1_RXQ_ZLPERR   (1u << 20)
+ #define EP_RST_RX2_BIT      (1u << 2)
++#define EP_RST_TX2_BIT      (1u << 18)  /* EP_RST(in, 2) = BIT(16) << 2 */
+ #define RUBY_RX_GPD_NUM 16
+ #define RUBY_RX_BUF     64
+ #define RUBY_GPD_NUM    4
+@@ -1078,6 +1079,7 @@
+ static uint32_t ruby_ep2_hwo_gap;
+ static uint32_t ruby_ep2_drain_invariant;
+ static uint32_t ruby_ep2_drain_bad_last;
++static uint32_t ruby_ep2_halt_clears;
+ static uint32_t ruby_busy_ticks;
+ static uint32_t ruby_txdone_count;
+ 
+@@ -1756,7 +1758,7 @@
+ static void
+ ruby_ep2_halt_clear(vm_offset_t mac)
+ {
+-    uint32_t q0, q1, err, tqcsr, tx0;
++    uint32_t q0, q1, err, tqcsr, tx0, freed = 0, resumed = 0;
+ 
+     if (!ruby_ep_ready)
+         return;
+@@ -1765,21 +1767,43 @@
+     err = ruby_rd32(mac, TQERRIR0_OFF);
+     tqcsr = ruby_rd32(mac, TQCSR2_OFF);
+     tx0 = ruby_rd32(mac, TX2CSR0_OFF);
++    if (ruby_inflight > 0)
++        freed = ruby_ep2_drain(mac, q0);
+     printf("RUBY USB: EP2 halt_clear q0=%08x q1=%08x err=%08x "
+         "tqcsr=%08x tx0=%08x cur=%02x enq=%u deq=%u "
+-        "inflight=%u hwo=%x total=%llu pos=%llu\n",
++        "inflight=%u hwo=%x total=%llu pos=%llu freed=%u\n",
+         q0, q1, err, tqcsr, tx0, ruby_ep2_cur_slot(mac),
+         ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+         ruby_ep2_hwo_bits(),
+         (unsigned long long)sweet_log_position(),
+-        (unsigned long long)ruby_log_pos);
++        (unsigned long long)ruby_log_pos, freed);
+     printf("RUBY USB: EP2 halt_clear2 drain=%u noq0=%u bad=%u "
+-        "gap=%u inv=%u max=%u calls=%u\n",
++        "gap=%u inv=%u max=%u calls=%u clears=%u\n",
+         ruby_ep2_drain_freed_total, ruby_ep2_drain_noq0,
+         ruby_ep2_cur_bad, ruby_ep2_hwo_gap,
+         ruby_ep2_drain_invariant, ruby_ep2_drain_max,
+-        ruby_ep2_drain_calls);
+-    ruby_ep2_recover(mac);
++        ruby_ep2_drain_calls, ruby_ep2_halt_clears);
++
++    /*
++     * 0127: vendor CLEAR_FEATURE parity: W1C SENTSTALL, clear SENDSTALL,
++     * pulse EP_RST.  No QMU stop/flush/start and no GPD ring reset.
++     */
++    ruby_wr32(mac, TX2CSR0_OFF,
++        (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX2_BIT);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++    ruby_ep2_halt_clears++;
++    ruby_busy_ticks = 0;
++
++    if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE)) {
++        ruby_ep2_resume(mac);
++        resumed = 1;
++    }
++    printf("RUBY USB: EP2 halt_clear3 tqcsr=%08x cur=%02x enq=%u deq=%u "
++        "inflight=%u hwo=%x resumed=%u clears=%u\n",
++        ruby_rd32(mac, TQCSR2_OFF), ruby_ep2_cur_slot(mac),
++        ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
++        ruby_ep2_hwo_bits(), resumed, ruby_ep2_halt_clears);
+ }
+ 
+ /* ---- EP2 bulk OUT (RX), 0112 Stage A ---- */
