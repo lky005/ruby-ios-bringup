@@ -1,0 +1,24 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1343,15 +1343,17 @@
+         return;
+     ruby_ep2_host_seen = 0;
+     ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
+-    if (!ruby_ring_pa || (ruby_ring_pa & (PAGE_SIZE - 1u)))
++    if (!ruby_ring_pa || (ruby_ring_pa & 0x3fu) ||
++        ((ruby_ring_pa & (PAGE_SIZE - 1u)) + RUBY_GPD_RING_SZ >
++            PAGE_SIZE))
+         ok = 0;
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         ruby_log_pa[i] = ruby_dma_pa(ruby_log_buf[i]);
+         ruby_gpd_pa[i] = ruby_dma_pa(ruby_gpd_ring +
+             i * RUBY_GPD_STRIDE);
+         if (!ruby_log_pa[i] || (ruby_log_pa[i] & 0x3fu) ||
+-            ((ruby_log_pa[i] & (PAGE_SIZE - 1u)) >
+-                PAGE_SIZE - RUBY_LOG_CHUNK) ||
++            ((ruby_log_pa[i] & (PAGE_SIZE - 1u)) + RUBY_LOG_CHUNK >
++                PAGE_SIZE) ||
+             !ruby_gpd_pa[i] ||
+             (ruby_ring_pa &&
+                 ruby_gpd_pa[i] != ruby_ring_pa +
