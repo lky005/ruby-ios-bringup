@@ -1,0 +1,181 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1031,6 +1031,7 @@
+ #define EP_RST_TX2_BIT      (1u << 18)  /* EP_RST(in, 2) = BIT(16) << 2 */
+ #define RUBY_RX_GPD_NUM 16
+ #define RUBY_RX_BUF     64
++#define RUBY_CMD_MAX    64
+ #define RUBY_GPD_NUM    16
+ #define RUBY_GPD_DESC   16
+ #define RUBY_GPD_STRIDE 64
+@@ -1104,6 +1105,10 @@
+ static uint32_t ruby_rx_ext_bad;
+ static uint32_t ruby_rx_zlp_err;
+ static uint32_t ruby_rx_stall_seen;
++static char ruby_cmd_buf[RUBY_CMD_MAX];
++static uint32_t ruby_cmd_len;
++static uint32_t ruby_cmd_count;
++static uint32_t ruby_cmd_errors;
+ 
+ #define RUBY_FNV_OFFSET 2166136261u
+ 
+@@ -1893,6 +1898,9 @@
+     ruby_rx_zlp_err = 0;
+     ruby_rx_stall_seen = 0;
+     ruby_rx_deq = 0;
++    ruby_cmd_len = 0;
++    ruby_cmd_count = 0;
++    ruby_cmd_errors = 0;
+ 
+     ruby_wr32(mac, RX2CSR0_OFF, 64u | RX_DMAREQEN);
+     ruby_wr32(mac, RX2CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+@@ -1951,6 +1959,7 @@
+     ruby_rx_ready = 0;
+     ruby_rx_deq = 0;
+     ruby_rx_stall_seen = 0;
++    ruby_cmd_len = 0;
+     if (reset_counters) {
+         ruby_rx_packets = 0;
+         ruby_rx_bytes = 0;
+@@ -1963,6 +1972,8 @@
+         ruby_rx_bypasses = 0;
+         ruby_rx_ext_bad = 0;
+         ruby_rx_zlp_err = 0;
++        ruby_cmd_count = 0;
++        ruby_cmd_errors = 0;
+     }
+     for (i = 0; i < RUBY_RX_GPD_NUM; i++)
+         ruby_ep2_rx_arm(i);
+@@ -1999,6 +2010,123 @@
+         ruby_wr32(mac, RQCSR2_OFF, QMU_Q_RESUME);
+ }
+ 
++static int
++ruby_cmd_streq(const char *a, const char *b)
++{
++    while (*a && *a == *b) {
++        a++;
++        b++;
++    }
++    return (*a == '\0' && *b == '\0');
++}
++
++static int
++ruby_cmd_prefix(const char *a, const char *b)
++{
++    while (*b) {
++        if (*a++ != *b++)
++            return 0;
++    }
++    return 1;
++}
++
++static void
++ruby_cmd_ring(vm_offset_t mac)
++{
++    uint32_t rx_hwo = 0, i;
++
++    ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++        if (ruby_rx_gpd_ring[i * 16] & 1u)
++            rx_hwo |= 1u << i;
++    printf("RUBY CMD: ring tx cur=%02x enq=%u deq=%u inflight=%u "
++        "hwo=%x\n", ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
++        ruby_inflight, ruby_ep2_hwo_bits());
++    printf("RUBY CMD: ring rx cur=%02x deq=%u hwo=%x\n",
++        ruby_ep2_rx_cur_slot(mac), ruby_rx_deq, rx_hwo);
++}
++
++static void
++ruby_cmd_dispatch(vm_offset_t mac, char *line)
++{
++    const char *text;
++
++    while (*line == ' ' || *line == '\t')
++        line++;
++    if (!*line)
++        return;
++    if (ruby_cmd_streq(line, "help")) {
++        printf("RUBY CMD: help stat ring echo <text>\n");
++        return;
++    }
++    if (ruby_cmd_streq(line, "stat")) {
++        printf("RUBY CMD: stat push=%u seq=%u q0=%08x q1=%08x "
++            "err=%08x tqcsr=%08x tx0=%08x rec=%u clears=%u\n",
++            ruby_push_tries, ruby_push_seq,
++            ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
++            ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, TQCSR2_OFF),
++            ruby_rd32(mac, TX2CSR0_OFF), ruby_recoveries,
++            ruby_ep2_halt_clears);
++        printf("RUBY CMD: stat rx pkts=%u bytes=%u last=%u err=%u "
++            "zlp=%u ext_bad=%u cmds=%u cmd_err=%u\n",
++            ruby_rx_packets, ruby_rx_bytes, ruby_rx_last_len,
++            ruby_rx_errors, ruby_rx_zlp, ruby_rx_ext_bad,
++            ruby_cmd_count, ruby_cmd_errors);
++        printf("RUBY CMD: stat drain=%u noq0=%u bad=%u gap=%u inv=%u "
++            "max=%u txdone=%u\n",
++            ruby_ep2_drain_freed_total, ruby_ep2_drain_noq0,
++            ruby_ep2_cur_bad, ruby_ep2_hwo_gap,
++            ruby_ep2_drain_invariant, ruby_ep2_drain_max,
++            ruby_txdone_count);
++        return;
++    }
++    if (ruby_cmd_streq(line, "ring")) {
++        ruby_cmd_ring(mac);
++        return;
++    }
++    if (ruby_cmd_streq(line, "echo")) {
++        printf("RUBY CMD: echo:\n");
++        return;
++    }
++    if (ruby_cmd_prefix(line, "echo ")) {
++        text = line + 5;
++        while (*text == ' ' || *text == '\t')
++            text++;
++        printf("RUBY CMD: echo: %s\n", text);
++        return;
++    }
++    printf("RUBY CMD: err: %s\n", line);
++}
++
++static void
++ruby_cmd_consume(vm_offset_t mac, const uint8_t *data, uint32_t len)
++{
++    uint32_t i;
++
++    for (i = 0; i < len; i++) {
++        uint8_t c = data[i];
++
++        if (c == '\r' || c == '\n') {
++            if (ruby_cmd_len) {
++                ruby_cmd_buf[ruby_cmd_len] = '\0';
++                ruby_cmd_dispatch(mac, ruby_cmd_buf);
++                ruby_cmd_count++;
++                ruby_cmd_len = 0;
++            }
++            continue;
++        }
++        if (c == 0)
++            continue;
++        if (ruby_cmd_len + 1u >= sizeof(ruby_cmd_buf)) {
++            ruby_cmd_errors++;
++            printf("RUBY CMD: err: overflow\n");
++            ruby_cmd_len = 0;
++            continue;
++        }
++        ruby_cmd_buf[ruby_cmd_len++] = (char)c;
++    }
++}
++
+ static void
+ ruby_ep2_rx_drain(vm_offset_t mac)
+ {
+@@ -2034,6 +2162,7 @@
+             ruby_rx_zlp++;
+         ruby_rx_last_len = len;
+         ruby_rx_crc = ruby_fnv1a(ruby_rx_crc, ruby_rx_buf[i], len);
++        ruby_cmd_consume(mac, ruby_rx_buf[i], len);
+ 
+         /* The 36-bit ext bits live in dw3 for RX; the length write must not
+          * clobber them.  Count a mismatch before re-arming the slot. */
