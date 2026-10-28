@@ -1,0 +1,55 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1031,9 +1031,9 @@
+ #define EP_RST_TX2_BIT      (1u << 18)  /* EP_RST(in, 2) = BIT(16) << 2 */
+ #define RUBY_RX_GPD_NUM 16
+ #define RUBY_RX_BUF     64
+-#define RUBY_GPD_NUM    4
++#define RUBY_GPD_NUM    16
+ #define RUBY_GPD_DESC   16
+-#define RUBY_GPD_STRIDE 16
++#define RUBY_GPD_STRIDE 64
+ #define RUBY_GPD_RING_SZ (RUBY_GPD_NUM * RUBY_GPD_STRIDE)
+ #define RUBY_EP2_MAX_INFLIGHT (RUBY_GPD_NUM - 1u)
+ #define RUBY_LOG_CHUNK  64
+@@ -1445,6 +1445,19 @@
+ }
+ 
+ static uint32_t
++ruby_popcount16(uint32_t v)
++{
++    uint32_t n = 0;
++
++    v &= 0xffffu;
++    while (v) {
++        n += v & 1u;
++        v >>= 1;
++    }
++    return n;
++}
++
++static uint32_t
+ ruby_ep2_ring_dist(uint32_t from, uint32_t to)
+ {
+     return (to + RUBY_GPD_NUM - from) % RUBY_GPD_NUM;
+@@ -1666,7 +1679,8 @@
+         np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
+         hdr = (uint32_t *)buf;
+         hdr[0] = (ruby_push_seq & 0xffffu) | ((enq & 0xfu) << 16) |
+-            ((hwo & 0xfu) << 20) | ((ruby_stall_seen & 0xfu) << 24);
++            ((ruby_popcount16(hwo) & 0xfu) << 20) |
++            ((ruby_stall_seen & 0xfu) << 24) | ((freed & 0xfu) << 28);
+         hdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
+             ((ruby_rd32(mac, TQCSR2_OFF) & 0xffffu) << 16);
+         hdr[2] = err;
+@@ -2276,7 +2290,8 @@
+ 
+     v[0] = 0x45503244u;         /* "EP2D" */
+     v[1] = txcpr;
+-    v[2] = ((txhiar >> 8) & 0xfu) | ((hwo & 0xfu) << 8) |
++    v[2] = ((txhiar >> 8) & 0xfu) |
++        ((ruby_popcount16(hwo) & 0xfu) << 8) |
+         ((ruby_inflight & 0xfu) << 16) | ((ruby_gpd_enq & 0xfu) << 20) |
+         ((ruby_gpd_deq & 0xfu) << 24);
+     v[3] = ruby_txdone_count;
