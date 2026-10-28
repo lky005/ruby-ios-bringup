@@ -1,0 +1,512 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -224,6 +224,11 @@
+ static vm_offset_t ruby_mac_base;
+ static vm_offset_t ruby_ippc_base;
+ static vm_offset_t ruby_phy_base;
++static vm_offset_t ruby_gpio_base;
++static vm_offset_t ruby_ifrao_base;
++static uint32_t ruby_probe_enabled;
++static volatile uint32_t ruby_probe_wr_pending;
++static uint32_t ruby_probe_wr_pa;
+ /*
+  * Milliseconds since the USB probe started.  The window counts it from its
+  * own tick, the resident thread keeps counting at 1 ms per iteration, so
+@@ -262,6 +267,75 @@
+     __asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++extern uint64_t sweet_log_position(void);
++
++static void
++ruby_seq(const char *ev, uint32_t a, uint32_t b)
++{
++    printf("RUBY SEQ: t=%u ev=%s a=%08x b=%08x total=%llu\n",
++        ruby_ms, ev, a, b,
++        (unsigned long long)sweet_log_position());
++}
++
++struct ruby_probe_region {
++    uint32_t pa;
++    uint32_t size;
++    vm_offset_t *va;
++    const char *name;
++};
++
++static struct ruby_probe_region ruby_probe_regions[] = {
++    { MTU3_PA, MTU3_SIZE, &ruby_mac_base, "mtu3" },
++    { IPPC_PA, IPPC_SIZE, &ruby_ippc_base, "ippc" },
++    { PHY_PA, PHY_SIZE, &ruby_phy_base, "phy" },
++    { GPIO_PA, GPIO_SIZE, &ruby_gpio_base, "gpio" },
++    { IFRAO_PA, IFRAO_SIZE, &ruby_ifrao_base, "ifrao" },
++};
++
++static vm_offset_t
++ruby_probe_lookup(uint32_t pa, uint32_t len, const char **name)
++{
++    uint32_t i;
++
++    if (pa & 3u)
++        return 0;
++    for (i = 0; i < sizeof(ruby_probe_regions) /
++        sizeof(ruby_probe_regions[0]); i++) {
++        struct ruby_probe_region *r = &ruby_probe_regions[i];
++
++        if (r->va == NULL || *r->va == 0)
++            continue;
++        if (pa < r->pa || len > r->size || pa - r->pa > r->size - len)
++            continue;
++        if (name)
++            *name = r->name;
++        return *r->va + (pa - r->pa);
++    }
++    return 0;
++}
++
++static int
++ruby_probe_read32(uint32_t pa, uint32_t *out)
++{
++    vm_offset_t va = ruby_probe_lookup(pa, 4, NULL);
++
++    if (!va)
++        return 0;
++    *out = ruby_rd32(va, 0);
++    return 1;
++}
++
++static int
++ruby_probe_write32(uint32_t pa, uint32_t val)
++{
++    vm_offset_t va = ruby_probe_lookup(pa, 4, NULL);
++
++    if (!va)
++        return 0;
++    ruby_wr32(va, 0, val);
++    return 1;
++}
++
+ static int
+ ruby_usb_wait_sts(vm_offset_t ippc, uint32_t *s1_out, uint32_t *s2_out)
+ {
+@@ -699,6 +773,10 @@
+     uint32_t wlen);
+ static void ruby_ep0_vendor_log(vm_offset_t mac, uint32_t t, uint32_t value,
+     uint32_t index, uint32_t wlen);
++static void ruby_ep0_vendor_probe_read(vm_offset_t mac, uint32_t t,
++    uint32_t value, uint32_t index, uint32_t wlen);
++static void ruby_ep0_vendor_probe_write(vm_offset_t mac, uint32_t t,
++    uint32_t value, uint32_t index, uint32_t wlen);
+ static void ruby_ep2_halt_clear(vm_offset_t mac);
+ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+@@ -746,6 +824,7 @@
+         ruby_ep0_ack(mac, t, key, wlen);
+         return;
+     case 9: /* SET_CONFIGURATION */
++        ruby_seq("CFG_IN", value, ruby_config | (ruby_cfg_seen << 8));
+         ruby_config = value & 0xff;
+         ruby_cfg_seen = 1;
+         ruby_trace(t, RUBY_TR_CFG, ruby_config, 0, 0, 0);
+@@ -875,6 +954,10 @@
+         ruby_ep0_vendor_log(mac, t, value, index, len);
+     else if (st[0] == 0xc0 && st[1] == 0x2b)
+         ruby_ep0_vendor_log_info(mac, t, len);
++    else if (st[0] == 0xc0 && st[1] == 0x2c)
++        ruby_ep0_vendor_probe_read(mac, t, value, index, len);
++    else if (st[0] == 0x40 && st[1] == 0x2d)
++        ruby_ep0_vendor_probe_write(mac, t, value, index, len);
+     else
+         ruby_ep0_stall(mac, t, key, len);
+ }
+@@ -926,6 +1009,7 @@
+         ruby_ep0_tx_pending = 0;
+         ruby_ep0_tx_sent = 0;
+         ruby_ep0_tx_total = 0;
++        ruby_probe_wr_pending = 0;
+         ruby_ep0_capture(mac, t);
+         return;
+     }
+@@ -937,8 +1021,32 @@
+         uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
+         uint32_t csr;
+ 
+-        for (uint32_t i = 0; i < count; i++)
+-            (void)ruby_rd8(mac, FIFO0_OFF);
++        if (ruby_probe_wr_pending) {
++            uint32_t pa = ruby_probe_wr_pa;
++            uint32_t val = 0;
++
++            ruby_probe_wr_pending = 0;
++            if (count == 4) {
++                val = ruby_rd32(mac, FIFO0_OFF);
++                if (ruby_probe_write32(pa, val)) {
++                    uint32_t rb = 0;
++
++                    (void)ruby_probe_read32(pa, &rb);
++                    ruby_seq("PROBE_W32", pa, val);
++                    printf("RUBY USB: probe w32[%08x]=%08x -> %08x\n",
++                        pa, val, rb);
++                } else {
++                    printf("RUBY USB: probe w32 unmapped %08x\n", pa);
++                }
++            } else {
++                for (uint32_t i = 0; i < count; i++)
++                    (void)ruby_rd8(mac, FIFO0_OFF);
++                printf("RUBY USB: probe w32 bad len=%u\n", count);
++            }
++        } else {
++            for (uint32_t i = 0; i < count; i++)
++                (void)ruby_rd8(mac, FIFO0_OFF);
++        }
+         csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+         csr |= EP0_RXPKTRDY | EP0_DATAEND;
+         ruby_wr32(mac, EP0CSR_OFF, csr);
+@@ -1346,8 +1454,11 @@
+ {
+     uint32_t i, ok = 1, bad_i = 0;
+ 
+-    if (ruby_ep_ready)
++    ruby_seq("TXCFG_IN", ruby_ep_ready, ruby_cfg_seen);
++    if (ruby_ep_ready) {
++        ruby_seq("TXCFG_SKIP", ruby_cfg_seen, 0);
+         return;
++    }
+     ruby_ep2_host_seen = 0;
+     ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
+     if (!ruby_ring_pa || (ruby_ring_pa & 0x3fu) ||
+@@ -1377,6 +1488,18 @@
+         return;
+     }
+ 
++    /*
++     * 0131: reset EP2 IN before re-programming it.  EP_RST is the documented
++     * way to clear the U2 data toggle / U3 SeqN / flow-control state; the
++     * mainline and U-Boot deconfig paths pulse it, and without it a host
++     * reset/reconfigure can leave the IN toggle out of sync.
++     */
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX2_BIT);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++    (void)ruby_rd32(mac, EP_RST_OFF);
++    ruby_seq("EPRST_TX", ruby_rd32(mac, TX2CSR0_OFF),
++        ruby_rd32(mac, TX2CSR2_OFF));
++
+     ruby_wr32(mac, TX2CSR0_OFF, 64u | (1u << 29));
+     /*
+      * P9 runs the same bulk endpoint with TX_SLOT(2); 0102 changed this to
+@@ -1385,6 +1508,8 @@
+      */
+     ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
++    ruby_seq("TXCFG_CR", ruby_rd32(mac, TX2CSR0_OFF),
++        ruby_rd32(mac, TX2CSR2_OFF));
+ 
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
+@@ -1413,6 +1538,7 @@
+     ruby_wr32(mac, TQHIAR2_OFF, (uint32_t)((ruby_ring_pa >> 32) & 0xfu));
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_START);
+     ruby_ep_ready = 1;
++    ruby_seq("TXCFG_OUT", (uint32_t)ruby_ring_pa, ruby_ep_ready);
+     printf("RUBY USB: EP2 QMU ring pa=0x%llx gpd[0]=0x%llx gpd[%u]=0x%llx "
+         "log[0]=0x%llx log[%u]=0x%llx\n",
+         ruby_ring_pa, ruby_gpd_pa[0], (uint32_t)(RUBY_GPD_NUM - 1u),
+@@ -1813,6 +1939,8 @@
+         (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+     ruby_wr32(mac, EP_RST_OFF, EP_RST_TX2_BIT);
+     ruby_wr32(mac, EP_RST_OFF, 0);
++    ruby_seq("HALT_TX", ruby_rd32(mac, TX2CSR0_OFF),
++        ruby_rd32(mac, TQCSR2_OFF));
+     ruby_ep2_halt_clears++;
+     ruby_busy_ticks = 0;
+ 
+@@ -1868,8 +1996,11 @@
+ {
+     uint32_t i;
+ 
+-    if (ruby_rx_ready)
++    ruby_seq("RXCFG_IN", ruby_rx_ready, ruby_cfg_seen);
++    if (ruby_rx_ready) {
++        ruby_seq("RXCFG_SKIP", ruby_cfg_seen, 0);
+         return;
++    }
+     ruby_rx_ring_pa = ruby_dma_pa(ruby_rx_gpd_ring);
+     for (i = 0; i < RUBY_RX_GPD_NUM; i++) {
+         ruby_rx_buf_pa[i] = ruby_dma_pa(ruby_rx_buf[i]);
+@@ -1921,6 +2052,7 @@
+         ruby_ep2_rx_arm(i);
+     ruby_wr32(mac, RQCSR2_OFF, QMU_Q_START);
+     ruby_rx_ready = 1;
++    ruby_seq("RXCFG_OUT", (uint32_t)ruby_rx_ring_pa, ruby_rx_ready);
+     printf("RUBY USB: EP2 RX ring pa=0x%llx buf=0x%llx/0x%llx/0x%llx/0x%llx\n",
+         ruby_rx_ring_pa, ruby_rx_buf_pa[0], ruby_rx_buf_pa[1],
+         ruby_rx_buf_pa[2], ruby_rx_buf_pa[3]);
+@@ -1941,6 +2073,8 @@
+     ruby_wr32(mac, RX2CSR0_OFF, csr);
+     ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
+     ruby_wr32(mac, EP_RST_OFF, 0);
++    ruby_seq("EPRST_RX", ruby_rd32(mac, RX2CSR0_OFF),
++        ruby_rd32(mac, RQCSR2_OFF));
+ 
+     /* EP_RST may reset the per-endpoint configuration; restore it before
+      * re-arming the ring so every clean test starts from the same state. */
+@@ -1986,6 +2120,8 @@
+ static void
+ ruby_ep2_rx_halt_clear(vm_offset_t mac)
+ {
++    ruby_seq("HALT_RX", ruby_rd32(mac, RX2CSR0_OFF),
++        ruby_rd32(mac, RQCSR2_OFF));
+     ruby_ep2_rx_reset(mac, 0);
+ }
+ 
+@@ -2032,6 +2168,110 @@
+     return 1;
+ }
+ 
++static const char *
++ruby_skip_spaces(const char *s)
++{
++    while (*s == ' ' || *s == '\t')
++        s++;
++    return s;
++}
++
++static int
++ruby_parse_u32(const char **sp, uint32_t *out)
++{
++    const char *s = ruby_skip_spaces(*sp);
++    uint64_t v = 0;
++    uint32_t base = 10, digits = 0;
++
++    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
++        base = 16;
++        s += 2;
++    }
++    for (;;) {
++        uint32_t d;
++
++        if (*s >= '0' && *s <= '9')
++            d = (uint32_t)(*s - '0');
++        else if (base == 16 && *s >= 'a' && *s <= 'f')
++            d = (uint32_t)(*s - 'a' + 10);
++        else if (base == 16 && *s >= 'A' && *s <= 'F')
++            d = (uint32_t)(*s - 'A' + 10);
++        else
++            break;
++        if (v > 0xffffffffull / base)
++            return 0;
++        v = v * base + d;
++        if (v > 0xffffffffull)
++            return 0;
++        digits++;
++        s++;
++    }
++    if (!digits)
++        return 0;
++    *sp = s;
++    *out = (uint32_t)v;
++    return 1;
++}
++
++static void
++ruby_cmd_r32(uint32_t pa)
++{
++    uint32_t v;
++
++    if (!ruby_probe_read32(pa, &v)) {
++        printf("RUBY CMD: err: unmapped %08x\n", pa);
++        return;
++    }
++    printf("RUBY CMD: r32[%08x]=%08x\n", pa, v);
++}
++
++static void
++ruby_cmd_w32(uint32_t pa, uint32_t val)
++{
++    uint32_t rb;
++
++    if (!ruby_probe_enabled) {
++        printf("RUBY CMD: err: probe locked\n");
++        return;
++    }
++    if (!ruby_probe_write32(pa, val)) {
++        printf("RUBY CMD: err: unmapped %08x\n", pa);
++        return;
++    }
++    (void)ruby_probe_read32(pa, &rb);
++    ruby_seq("PROBE_W32", pa, val);
++    printf("RUBY CMD: w32[%08x]=%08x -> %08x\n", pa, val, rb);
++}
++
++static void
++ruby_cmd_dump(uint32_t pa, uint32_t count)
++{
++    const char *name = NULL;
++    uint32_t i;
++
++    if (count == 0 || count > 64) {
++        printf("RUBY CMD: err: dump count 1..64\n");
++        return;
++    }
++    if (!ruby_probe_lookup(pa, count * 4u, &name)) {
++        printf("RUBY CMD: err: unmapped %08x+%u\n", pa, count * 4u);
++        return;
++    }
++    printf("RUBY CMD: dump %s\n", name ? name : "?");
++    for (i = 0; i < count; i += 4) {
++        uint32_t v0 = 0, v1 = 0, v2 = 0, v3 = 0;
++        (void)ruby_probe_read32(pa + (i + 0u) * 4u, &v0);
++        if (i + 1u < count)
++            (void)ruby_probe_read32(pa + (i + 1u) * 4u, &v1);
++        if (i + 2u < count)
++            (void)ruby_probe_read32(pa + (i + 2u) * 4u, &v2);
++        if (i + 3u < count)
++            (void)ruby_probe_read32(pa + (i + 3u) * 4u, &v3);
++        printf("RUBY CMD: dump[%08x] %08x %08x %08x %08x\n",
++            pa + i * 4u, v0, v1, v2, v3);
++    }
++}
++
+ static void
+ ruby_cmd_ring(vm_offset_t mac)
+ {
+@@ -2058,7 +2298,39 @@
+     if (!*line)
+         return;
+     if (ruby_cmd_streq(line, "help")) {
+-        printf("RUBY CMD: help stat ring echo <text>\n");
++        printf("RUBY CMD: help stat ring echo r32 w32 dump <text>\n");
++        return;
++    }
++    if (ruby_cmd_prefix(line, "r32 ")) {
++        const char *p = line + 4;
++        uint32_t pa;
++
++        if (ruby_parse_u32(&p, &pa) && *ruby_skip_spaces(p) == '\0')
++            ruby_cmd_r32(pa);
++        else
++            printf("RUBY CMD: err: r32 <addr>\n");
++        return;
++    }
++    if (ruby_cmd_prefix(line, "w32 ")) {
++        const char *p = line + 4;
++        uint32_t pa, val;
++
++        if (ruby_parse_u32(&p, &pa) && ruby_parse_u32(&p, &val) &&
++            *ruby_skip_spaces(p) == '\0')
++            ruby_cmd_w32(pa, val);
++        else
++            printf("RUBY CMD: err: w32 <addr> <val>\n");
++        return;
++    }
++    if (ruby_cmd_prefix(line, "dump ")) {
++        const char *p = line + 5;
++        uint32_t pa, count;
++
++        if (ruby_parse_u32(&p, &pa) && ruby_parse_u32(&p, &count) &&
++            *ruby_skip_spaces(p) == '\0')
++            ruby_cmd_dump(pa, count);
++        else
++            printf("RUBY CMD: err: dump <addr> <count>\n");
+         return;
+     }
+     if (ruby_cmd_streq(line, "stat")) {
+@@ -2252,6 +2524,7 @@
+ {
+     uint32_t csr, dc, v, count, i;
+ 
++    ruby_seq("REARM_IN", reason, ruby_cfg_seen);
+     /* Drop whatever the host left in the FIFO before the reset. */
+     count = ruby_rd32(mac, RXCOUNT0_OFF);
+     for (i = 0; i < count; i++)
+@@ -2297,6 +2570,7 @@
+         v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
+         ruby_wr32(mac, PM_CTRL - MTU3_PA, v | (1u << 6) | (1u << 0));
+     }
++    ruby_seq("REARM_OUT", reason, ruby_ep_ready | (ruby_rx_ready << 1));
+ }
+ 
+ /*
+@@ -2321,9 +2595,11 @@
+     if (!seen) {
+         /* Confirm on the next poll: a single sample may be a glitch. */
+         seen = 1;
++        ruby_seq("RST_SAMPLE", st, ruby_cfg_seen);
+         return;
+     }
+     seen = 0;
++    ruby_seq("RST_CONFIRM", st, ruby_cfg_seen);
+     ruby_wr32(mac, MAC2_INTR_STATUS_OFF, st & MAC2_INTR_RESET);
+ 
+     ruby_bus_resets++;
+@@ -2600,6 +2876,46 @@
+ }
+ 
+ /*
++ * Vendor IN 0xC0/0x2C: safe 32-bit MMIO read.
++ *   wValue = address bits 0-15, wIndex = bits 16-31, wLength = 4.
++ * Only the mapped/whitelisted regions are accepted.
++ */
++static void
++ruby_ep0_vendor_probe_read(vm_offset_t mac, uint32_t t, uint32_t value,
++    uint32_t index, uint32_t wlen)
++{
++    uint32_t pa = ((index & 0xffffu) << 16) | (value & 0xffffu);
++    uint32_t v;
++
++    if (wlen != 4 || !ruby_probe_read32(pa, &v)) {
++        ruby_ep0_stall(mac, t, 0xc02c, wlen);
++        return;
++    }
++    ruby_ep0_send(mac, t, 0xc02c, (const uint8_t *)&v, 4, wlen);
++}
++
++/*
++ * Vendor OUT 0x40/0x2D: safe 32-bit MMIO write.
++ *   wValue/wIndex = address, 4-byte data stage follows.
++ * The setup only latches the address; ruby_ep0_service() consumes the data
++ * stage, performs the write and ACKs.  Writes are locked unless rubyprobe=1.
++ */
++static void
++ruby_ep0_vendor_probe_write(vm_offset_t mac, uint32_t t, uint32_t value,
++    uint32_t index, uint32_t wlen)
++{
++    uint32_t pa = ((index & 0xffffu) << 16) | (value & 0xffffu);
++
++    if (!ruby_probe_enabled || wlen != 4 ||
++        !ruby_probe_lookup(pa, 4, NULL)) {
++        ruby_ep0_stall(mac, t, 0xc02d, wlen);
++        return;
++    }
++    ruby_probe_wr_pa = pa;
++    ruby_probe_wr_pending = 1;
++}
++
++/*
+  * Vendor IN 0xC0/0x2A: one slice of the console ring.
+  *   wValue = offset bits 0-15, wIndex = bits 16-31, wLength = 8..64.
+  *
+@@ -2924,11 +3240,14 @@
+ ruby_usb_probe(void)
+ {
+     int enable = 0;
++    int probe = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+ 
+     PE_parse_boot_argn("rubyusb", &enable, sizeof(enable));
++    PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
++    ruby_probe_enabled = (probe == 1);
+     if (enable != 1) {
+         printf("RUBY USB: disabled (rubyusb=%d)\n", enable);
+         return;
+@@ -2945,6 +3264,8 @@
+         printf("RUBY USB: mmio map failed\n");
+         return;
+     }
++    ruby_gpio_base = gpio;
++    ruby_ifrao_base = ifrao;
+ 
+     if (ruby_rd32(ifrao, 0xac) & (1u << 1)) {
+         printf("RUBY USB: SSUSB clock gated; skipped\n");
