@@ -1,0 +1,30 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2913,6 +2913,17 @@
+     }
+     ruby_probe_wr_pa = pa;
+     ruby_probe_wr_pending = 1;
++    /*
++     * 0131b: acknowledge the SETUP without DATAEND so the 4-byte OUT data
++     * stage can arrive.  Without this the host stalled the control transfer
++     * (EPIPE) before ruby_ep0_service() ever saw EP0_RXPKTRDY.
++     */
++    {
++        uint32_t csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++
++        csr |= EP0_SETUPPKTRDY;
++        ruby_wr32(mac, EP0CSR_OFF, csr);
++    }
+ }
+ 
+ /*
+@@ -3248,6 +3259,8 @@
+     PE_parse_boot_argn("rubyusb", &enable, sizeof(enable));
+     PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
+     ruby_probe_enabled = (probe == 1);
++    printf("RUBY USB: probe writes %s\n",
++        ruby_probe_enabled ? "enabled" : "locked");
+     if (enable != 1) {
+         printf("RUBY USB: disabled (rubyusb=%d)\n", enable);
+         return;
