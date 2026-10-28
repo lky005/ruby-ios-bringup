@@ -91,6 +91,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0127-ruby-ep2-halt-clear.patch" \
     "$ROOT/patches/0128-ruby-ep2-ring16.patch" \
     "$ROOT/patches/0129a-ruby-ep2-cmd.patch" \
+    "$ROOT/patches/0130-ruby-ep2-ring64.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

@@ -1,0 +1,252 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1032,7 +1032,7 @@
+ #define RUBY_RX_GPD_NUM 16
+ #define RUBY_RX_BUF     64
+ #define RUBY_CMD_MAX    64
+-#define RUBY_GPD_NUM    16
++#define RUBY_GPD_NUM    64
+ #define RUBY_GPD_DESC   16
+ #define RUBY_GPD_STRIDE 64
+ #define RUBY_GPD_RING_SZ (RUBY_GPD_NUM * RUBY_GPD_STRIDE)
+@@ -1437,26 +1437,26 @@
+     return (uint32_t)((cur_pa - ruby_ring_pa) / RUBY_GPD_STRIDE);
+ }
+ 
+-static uint32_t
++static uint64_t
+ ruby_ep2_hwo_bits(void)
+ {
+-    uint32_t hwo = 0, i;
++    uint64_t hwo = 0;
++    uint32_t i;
+ 
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+         if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
+-            hwo |= 1u << i;
++            hwo |= 1ull << i;
+     return hwo;
+ }
+ 
+ static uint32_t
+-ruby_popcount16(uint32_t v)
++ruby_popcount64(uint64_t v)
+ {
+     uint32_t n = 0;
+ 
+-    v &= 0xffffu;
+     while (v) {
+-        n += v & 1u;
++        n += (uint32_t)(v & 1u);
+         v >>= 1;
+     }
+     return n;
+@@ -1477,7 +1477,8 @@
+ static uint32_t
+ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+ {
+-    uint32_t cur, freed = 0, i, hwo;
++    uint32_t cur, freed = 0, i;
++    uint64_t hwo;
+ 
+     ruby_ep2_drain_calls++;
+     if (ruby_inflight == 0)
+@@ -1497,7 +1498,7 @@
+     hwo = ruby_ep2_hwo_bits();
+     while (ruby_inflight > 0 && ruby_gpd_deq != cur) {
+         i = ruby_gpd_deq;
+-        if (hwo & (1u << i)) {
++        if (hwo & (1ull << i)) {
+             ruby_ep2_hwo_gap++;
+             break;
+         }
+@@ -1523,7 +1524,8 @@
+ static void
+ ruby_ep2_push_log(vm_offset_t mac)
+ {
+-    uint32_t q0, q1, txq1, err, hwo = 0, enq, i, csr0;
++    uint32_t q0, q1, txq1, err, enq, i, csr0;
++    uint64_t hwo = 0;
+     uint64_t pos, np, log_pa;
+     uint8_t *g, *buf;
+     uint32_t *hdr;
+@@ -1560,10 +1562,10 @@
+                 (ruby_ep2_drain_freed0 & 0x3f) == 0) {
+                 cur = ruby_ep2_cur_slot(mac);
+                 printf("RUBY USB: EP2 drain0 q0=%08x cur=%02x "
+-                    "enq=%u deq=%u inflight=%u hwo=%x total=%llu "
++                    "enq=%u deq=%u inflight=%u hwo=%llx total=%llu "
+                     "pos=%llu seen=%u\n",
+                     q0, cur, ruby_gpd_enq, ruby_gpd_deq,
+-                    ruby_inflight, ruby_ep2_hwo_bits(),
++                    ruby_inflight, (unsigned long long)ruby_ep2_hwo_bits(),
+                     (unsigned long long)sweet_log_position(),
+                     (unsigned long long)ruby_log_pos,
+                     ruby_ep2_q0_seen);
+@@ -1572,10 +1574,10 @@
+             (ruby_ep2_q0_seen & 0x3f) == 0) {
+             cur = ruby_ep2_cur_slot(mac);
+             printf("RUBY USB: EP2 drain q0=%08x cur=%02x enq=%u "
+-                "deq=%u inflight=%u hwo=%x freed=%u total=%llu "
++                "deq=%u inflight=%u hwo=%llx freed=%u total=%llu "
+                 "pos=%llu seen=%u\n",
+                 q0, cur, ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+-                ruby_ep2_hwo_bits(), freed,
++                (unsigned long long)ruby_ep2_hwo_bits(), freed,
+                 (unsigned long long)sweet_log_position(),
+                 (unsigned long long)ruby_log_pos, ruby_ep2_q0_seen);
+         }
+@@ -1583,10 +1585,10 @@
+         if (ruby_ep2_drain_noq0 <= 3 ||
+             (ruby_ep2_drain_noq0 & 0xff) == 0)
+             printf("RUBY USB: EP2 drain_poll cur=%02x enq=%u deq=%u "
+-                "inflight=%u hwo=%x freed=%u calls=%u total=%llu "
++                "inflight=%u hwo=%llx freed=%u calls=%u total=%llu "
+                 "pos=%llu\n",
+                 ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
+-                ruby_inflight, ruby_ep2_hwo_bits(), freed,
++                ruby_inflight, (unsigned long long)ruby_ep2_hwo_bits(), freed,
+                 ruby_ep2_drain_calls,
+                 (unsigned long long)sweet_log_position(),
+                 (unsigned long long)ruby_log_pos);
+@@ -1601,10 +1603,10 @@
+             ruby_ep2_drain_bad_last = bad;
+             if (bad <= 3 || (bad & 0xff) == 0)
+                 printf("RUBY USB: EP2 drain_bad q0=%08x cur=%02x "
+-                    "enq=%u deq=%u inflight=%u hwo=%x freed=%u "
++                    "enq=%u deq=%u inflight=%u hwo=%llx freed=%u "
+                     "calls=%u bad=%u gap=%u inv=%u\n",
+                     q0, ruby_ep2_cur_slot(mac), ruby_gpd_enq,
+-                    ruby_gpd_deq, ruby_inflight, ruby_ep2_hwo_bits(),
++                    ruby_gpd_deq, ruby_inflight, (unsigned long long)ruby_ep2_hwo_bits(),
+                     freed, ruby_ep2_drain_calls, ruby_ep2_cur_bad,
+                     ruby_ep2_hwo_gap, ruby_ep2_drain_invariant);
+         }
+@@ -1630,9 +1632,9 @@
+             } else {
+                 ruby_ep2_inflight_stuck++;
+                 printf("RUBY USB: EP2 stuck q0=%08x cur=%02x enq=%u "
+-                    "deq=%u inflight=%u hwo=%x total=%llu pos=%llu\n",
++                    "deq=%u inflight=%u hwo=%llx total=%llu pos=%llu\n",
+                     q0, ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
+-                    ruby_inflight, ruby_ep2_hwo_bits(),
++                    ruby_inflight, (unsigned long long)ruby_ep2_hwo_bits(),
+                     (unsigned long long)sweet_log_position(),
+                     (unsigned long long)ruby_log_pos);
+                 printf("RUBY USB: EP2 stuck2 drain=%u noq0=%u bad=%u "
+@@ -1656,12 +1658,12 @@
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+         if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
+-            hwo |= 1u << i;
++            hwo |= 1ull << i;
+ 
+     while (ruby_inflight < RUBY_EP2_MAX_INFLIGHT) {
+         enq = ruby_gpd_enq;
+         g = ruby_gpd_ring + enq * RUBY_GPD_STRIDE;
+-        if (hwo & (1u << enq))
++        if (hwo & (1ull << enq))
+             break;              /* safety net: never rewrite an owned slot */
+ 
+         buf = ruby_log_buf[enq];
+@@ -1683,9 +1685,9 @@
+ 
+         np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
+         hdr = (uint32_t *)buf;
+-        hdr[0] = (ruby_push_seq & 0xffffu) | ((enq & 0xfu) << 16) |
+-            ((ruby_popcount16(hwo) & 0xfu) << 20) |
+-            ((ruby_stall_seen & 0xfu) << 24) | ((freed & 0xfu) << 28);
++        hdr[0] = (ruby_push_seq & 0xffffu) | ((enq & 0x3fu) << 16) |
++            ((ruby_popcount64(hwo) & 0x3fu) << 22) |
++            ((ruby_stall_seen & 0xfu) << 28);
+         hdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
+             ((ruby_rd32(mac, TQCSR2_OFF) & 0xffffu) << 16);
+         hdr[2] = err;
+@@ -1711,7 +1713,7 @@
+         ruby_log_pos = pos;
+         ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+         ruby_inflight++;
+-        hwo |= 1u << enq;
++        hwo |= 1ull << enq;
+         queued++;
+     }
+ 
+@@ -1755,13 +1757,13 @@
+         ruby_stall_seen++;
+         printf("RUBY USB: EP2 stall tx0=%08x q0=%08x q1=%08x "
+             "err=%08x tqcsr=%08x cur=%02x enq=%u deq=%u "
+-            "inflight=%u hwo=%x total=%llu pos=%llu\n",
++            "inflight=%u hwo=%llx total=%llu pos=%llu\n",
+             csr, ruby_rd32(mac, QISAR0_OFF),
+             ruby_rd32(mac, QISAR1_OFF),
+             ruby_rd32(mac, TQERRIR0_OFF),
+             ruby_rd32(mac, TQCSR2_OFF), ruby_ep2_cur_slot(mac),
+             ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+-            ruby_ep2_hwo_bits(),
++            (unsigned long long)ruby_ep2_hwo_bits(),
+             (unsigned long long)sweet_log_position(),
+             (unsigned long long)ruby_log_pos);
+         printf("RUBY USB: EP2 stall2 drain=%u noq0=%u bad=%u "
+@@ -1790,10 +1792,10 @@
+         freed = ruby_ep2_drain(mac, q0);
+     printf("RUBY USB: EP2 halt_clear q0=%08x q1=%08x err=%08x "
+         "tqcsr=%08x tx0=%08x cur=%02x enq=%u deq=%u "
+-        "inflight=%u hwo=%x total=%llu pos=%llu freed=%u\n",
++        "inflight=%u hwo=%llx total=%llu pos=%llu freed=%u\n",
+         q0, q1, err, tqcsr, tx0, ruby_ep2_cur_slot(mac),
+         ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+-        ruby_ep2_hwo_bits(),
++        (unsigned long long)ruby_ep2_hwo_bits(),
+         (unsigned long long)sweet_log_position(),
+         (unsigned long long)ruby_log_pos, freed);
+     printf("RUBY USB: EP2 halt_clear2 drain=%u noq0=%u bad=%u "
+@@ -1819,10 +1821,10 @@
+         resumed = 1;
+     }
+     printf("RUBY USB: EP2 halt_clear3 tqcsr=%08x cur=%02x enq=%u deq=%u "
+-        "inflight=%u hwo=%x resumed=%u clears=%u\n",
++        "inflight=%u hwo=%llx resumed=%u clears=%u\n",
+         ruby_rd32(mac, TQCSR2_OFF), ruby_ep2_cur_slot(mac),
+         ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+-        ruby_ep2_hwo_bits(), resumed, ruby_ep2_halt_clears);
++        (unsigned long long)ruby_ep2_hwo_bits(), resumed, ruby_ep2_halt_clears);
+ }
+ 
+ /* ---- EP2 bulk OUT (RX), 0112 Stage A ---- */
+@@ -2040,8 +2042,8 @@
+         if (ruby_rx_gpd_ring[i * 16] & 1u)
+             rx_hwo |= 1u << i;
+     printf("RUBY CMD: ring tx cur=%02x enq=%u deq=%u inflight=%u "
+-        "hwo=%x\n", ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
+-        ruby_inflight, ruby_ep2_hwo_bits());
++        "hwo=%llx\n", ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
++        ruby_inflight, (unsigned long long)ruby_ep2_hwo_bits());
+     printf("RUBY CMD: ring rx cur=%02x deq=%u hwo=%x\n",
+         ruby_ep2_rx_cur_slot(mac), ruby_rx_deq, rx_hwo);
+ }
+@@ -2408,19 +2410,20 @@
+ ruby_ep0_vendor_diag(vm_offset_t mac, uint32_t t, uint32_t wlen)
+ {
+     uint32_t v[8];
+-    uint32_t txcpr, txhiar, hwo = 0, i;
++    uint32_t txcpr, txhiar, i;
++    uint64_t hwo = 0;
+ 
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+         if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
+-            hwo |= 1u << i;
++            hwo |= 1ull << i;
+     txcpr = ruby_rd32(mac, TQCPR2_OFF);
+     txhiar = ruby_rd32(mac, TQHIAR2_OFF);
+ 
+     v[0] = 0x45503244u;         /* "EP2D" */
+     v[1] = txcpr;
+     v[2] = ((txhiar >> 8) & 0xfu) |
+-        ((ruby_popcount16(hwo) & 0xfu) << 8) |
++        ((ruby_popcount64(hwo) & 0xffu) << 8) |
+         ((ruby_inflight & 0xfu) << 16) | ((ruby_gpd_enq & 0xfu) << 20) |
+         ((ruby_gpd_deq & 0xfu) << 24);
+     v[3] = ruby_txdone_count;
