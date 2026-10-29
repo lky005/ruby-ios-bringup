@@ -1,35 +1,47 @@
-# Build provenance (0087 WIP)
+# Build provenance
 
-`.github/workflows/xnu.yml` builds the 0087 ruby USB P2b WIP kernel **without
-vendoring the upstream tree**. 0087 extends 0086 with
-`patches/0087-ruby-usb-p2.patch`: a 30 s polling EP0 enumeration window with
-minimal device/config/string descriptors and a register/setup trace. 0086 is
-the P0 power/PHY soft-connect driver; the USB probe is inert unless the boot
-arguments contain `rubyusb=1`.
+`.github/workflows/xnu.yml` builds the ruby kernel without vendoring the
+upstream tree. The baseline is a content-addressed 82-file set (sweet
+0001-0079); this project's patches are the delta.
+
+## Baseline source
+
+The workflow fetches the baseline from a private mirror. The repo, ref and a
+read-only deploy key are stored as Actions secrets (`BASELINE_REPO`,
+`BASELINE_REF`, `BASELINE_SSH_KEY`); the public pin is the manifest root
+`829d7598...` over the 82 LF-normalized files. Nothing in this repository
+contains the mirror URL.
+
+External users can run the same recipe against the public upstream:
+
+```sh
+ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh /tmp/base
+```
+
+That path fetches `MakrSas/ios-topaz` at `5095ac1`, removes the 24 topaz
+patches, and verifies the same manifest root.
 
 ## Recipe
 
-1. Fetch `MakrSas/ios-topaz` at the pinned commit `5095ac1`.
-2. Remove the 24 topaz-specific patches by name
-   (`ci/topaz-patches-to-remove.txt`).
-3. Add this project's patches: 0080 UFS, 0084 autoswipe, 0085 Goodix SPI
-   touch, 0086 USB P0, 0087 USB P2, and historical 0081-0083.
-4. Apply `ci/baseline-changes.patch`, the small 0010/0012 change needed for
-   the ruby framebuffer addresses.
-5. Normalize every `.patch`/`.sh` to LF.
-6. Compute the canonical patchset hash over the sorted per-file SHA256 values
-   and refuse to build unless it equals
-   `6f9d89e41da12d65647e39874d723c3290e968de4701debd39f50a781f4b7e13`
-   (90 files).
-7. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
+1. Take the 82 baseline files (`0001-0079`; 79 `.patch` + 3 `.sh`) from
+   `BASELINE_DIR` (or the public fallback), normalize to LF, and verify
+   `ci/baseline_manifest.py` against the manifest root and file count.
+2. Add this project's patches: 0080 UFS, 0084 autoswipe, 0085 Goodix SPI,
+   0086-0131b USB, 0140 ramdisk import, 0141 USB decouple, and the
+   historical 0081-0083.
+3. Apply `ci/baseline-changes.patch`, the small 0010/0012 change for the ruby
+   framebuffer addresses.
+4. Normalize every `.patch`/`.sh` to LF.
+5. Compute the canonical patchset hash over the sorted per-file SHA256 values
+   and refuse to build unless it equals `27894e7b...` (137 files).
+6. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
    build on `macos-14` with Xcode 15.0.1.
-8. Hash the built Mach-O with `ci/kernel_hash.py`. When
-   `KERNEL_EXPECT_EXEC_DATA` is set, the gate compares the **exec-data** hash
+7. Hash the built Mach-O with `ci/kernel_hash.py`. When
+   `KERNEL_EXPECT_EXEC_DATA` is set, the gate compares the exec-data hash
    (`__TEXT_EXEC` plus the data segments, excluding `__TEXT` cstrings and
-   `__LINKEDIT`). `config/0087.env` leaves it empty: this is a WIP trace build,
-   so the run records the hashes without gating. Full-file hashes may differ
-   between checkouts because of DWARF/path metadata; the patchset hash and,
-   once known, the exec-data hash are the reproducibility gates.
+   `__LINKEDIT`). Full-file hashes may differ between checkouts because of
+   DWARF/path metadata; the manifest root, patchset hash and exec-data hash
+   are the reproducibility gates.
 
 The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 
@@ -37,24 +49,33 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 
 | Item | Value |
 |---|---|
-| Baseline | `MakrSas/ios-topaz` @ `5095ac19dbdcf37b64b81fe443f4027ad51b84bf` |
-| Patchset | `6f9d89e41da12d65647e39874d723c3290e968de4701debd39f50a781f4b7e13` (90 files) |
+| Baseline manifest | `829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910` (82 files) |
+| Baseline upstream | `MakrSas/ios-topaz` @ `5095ac19dbdcf37b64b81fe443f4027ad51b84bf` (fallback/provenance) |
+| Apple xnu | `xnu-8796.141.3` (`f625db25f47631424dc62ac1c3414b6e530f7e8a`) |
+| Patchset | `27894e7b274ea57131b5ee57799eb13c1ca2ddd7a6d9e38c15468cdd0dd55ce9` (137 files) |
 | 0010/0012 change | `ci/baseline-changes.patch`, SHA256 `1edb6633...` |
 | XNU harness | `blacktop/darwin-xnu-build` @ `663906528d1cd5ea8fde7de6f16de73db9511549` |
 | Runner | `macos-14`, Xcode 15.0.1, macOS 13.5 xnu |
 | Config | `DEVELOPMENT`, `MACHINE_CONFIG=SWEET`, `-mcpu=cortex-a55` |
-| 0085 booted kernel | `9eb9acac...`; exec-data `e4823afb...` (historical reference) |
-| 0085 booted boot image | `ace60d16...` |
-| 0086 P0 kernel | build only; device result kept private |
-| 0087 P2 kernel | pending WIP test |
+| 0140 kernel | full `3acefe47...`, exec-data `721e5daf...` |
+| 0131b USB kernel | full `4e945ce6...`, exec-data `06db2bb3...` (control) |
 
-The reference SHAs are provenance, not a byte-for-byte guarantee for a future
-run. Record the actual artifact hash for each run in `config/0087.env`.
+The reference SHAs are provenance; record the actual artifact hash for each
+run in the branch's `config/*.env`.
+
+## Secrets
+
+- `BASELINE_REPO` - `owner/repo` of the private mirror
+- `BASELINE_REF` - commit SHA in the mirror
+- `BASELINE_SSH_KEY` - private half of a read-only deploy key
+
+Never print them in a workflow step; `PROVENANCE.txt` records only the
+manifest root and the upstream commit.
 
 ## Local check
 
 ```sh
-sh ci/prepare-baseline.sh /tmp/base
+BASELINE_DIR=/path/to/mirror sh ci/prepare-baseline.sh /tmp/base
 python3 ci/patchset_hash.py /tmp/base/xnu/patches
 python3 ci/kernel_hash.py /path/to/kernel.development.sweet
 ```
@@ -65,13 +86,12 @@ hash is the same on Windows and macOS. The target directory must not exist.
 ## Scope
 
 The workflow builds the **kernel** only. The shim, ADT and 128 MiB boot image
-packing are separate; see `src/bringup/` and `config/0087.env`. Apple firmware,
+packing are separate; see `src/bringup/` and `config/0140.env`. Apple firmware,
 the iOS root and device-side boot images are not included.
 
 ## History and licensing
 
 The public history must not contain `ci/ruby-baseline.diff` or any full
-upstream delta. `baseline-changes.patch` contains only this project's small
-0010/0012 change; the upstream tree is fetched, not redistributed. The upstream
+upstream delta. The baseline is fetched, not redistributed. The upstream
 projects had no license file at the pinned commits; obtain permission or keep
 the recipe private before public redistribution. See `LEGAL.md`.
