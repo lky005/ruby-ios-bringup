@@ -6,12 +6,19 @@
 拉取，不 vendor；不公开完整 delta，也不放 Apple/Android 二进制。保证是文档级、
 理论级的，不是已经独立复现的设备保证。
 
+**2026-10-29 基线来源：** 0001–0079 的 82 个文件由 CI 从私有内容寻址镜像拉取，
+公开 pin 是清单根 `829d7598…`（82 文件，LF 归一化），不是仓库地址；仓库/ref/只读
+deploy key 存在 Actions secrets（`BASELINE_REPO`/`BASELINE_REF`/`BASELINE_SSH_KEY`）。
+外部复现可用公开上游回退：`ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh`，
+同一条清单根校验。
+
 ## 公开什么
 
 - `patches/`：0080 UFS、0084 autoswipe、历史 0081-0083。
-- `ci/prepare-baseline.sh`：拉固定基线、删 topaz 补丁、加本项目补丁、应用
-  0010/0012 小改动。
-- `ci/patchset_hash.py`：patchset 规范哈希（0086：89 文件）。
+- `ci/prepare-baseline.sh`：从私有镜像（或显式公开回退）取固定基线、校验
+  清单根、加本项目补丁、应用 0010/0012 小改动。
+- `ci/baseline_manifest.py`：82 文件基线清单根校验（LF 归一化）。
+- `ci/patchset_hash.py`：patchset 规范哈希（0131b：135 文件）。
 - `ci/baseline-changes.patch`：只含 0010/0012 小改动。
 - `tools/image/`、`tools/twrp/`、`scripts/check-bundle.py`：离线检查。
 - `scripts/build-payload.sh`、`tools/image/pack_boot.py`、
@@ -31,8 +38,9 @@
 
 | 控制 | 防止什么 |
 |---|---|
-| 固定基线 `5095ac1` | 上游分支移动 |
-| 固定 topaz 删除清单 | 补丁残留 |
+| 基线清单根 `829d7598…` + 上游 `5095ac1` | 基线内容漂移或上游分支移动 |
+| 私有镜像 ref（Actions secret） | 镜像被改；清单根不匹配即停 |
+| 固定 topaz 删除清单 | 公开回退路径的补丁残留 |
 | recipe 失败即停 | 文件缺失或 0010/0012 上下文变化 |
 | LF 归一化 | Windows/macOS 换行漂移 |
 | `PATCHSET_SHA256=16b8ddea...` | patchset 内容变化 |
@@ -53,7 +61,7 @@ host 阶段已具备并用 0084 输入测过：payload `50701e81…`、确定性
 
 ## 仍可能坏的地方
 
-- 上游 commit 不可达；需要镜像。
+- 私有镜像不可达或 deploy key 失效；用本地 bundle/副本恢复，或显式走公开回退。
 - `macos-14` runner 或 Xcode 15.0.1 消失；workflow 会明确失败。
 - Homebrew 版本变化；记录但不固定。
 - root/boot 工件丢失或被替换。

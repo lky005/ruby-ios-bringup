@@ -1,12 +1,12 @@
 name: xnu-0087
 
-# Builds the 0087 ruby USB P2b WIP kernel without vendoring the upstream tree.
-# ci/prepare-baseline.sh fetches the pinned commit, removes the topaz patches,
-# adds this project's patches, applies the small 0010/0012 change, and verifies
-# the canonical patchset hash.  P2b adds polling EP0 enumeration with minimal
-# descriptors; the probe is still inert unless rubyusb=1.  ci/kernel_hash.py
-# records the built kernel's segments; it gates against a booted reference
-# only when config/0087.env provides one.
+# Builds the ruby kernel without vendoring the upstream tree.
+# ci/prepare-baseline.sh takes a content-pinned 82-file baseline (private
+# mirror; ALLOW_PUBLIC_UPSTREAM=1 is the external fallback), adds this
+# project's patches, applies the small 0010/0012 change, and verifies the
+# canonical patchset hash. ci/kernel_hash.py records the built kernel's
+# segments; it gates against a booted reference only when the branch's
+# config/*.env provides one.
 
 on:
   workflow_dispatch:
@@ -39,8 +39,11 @@ permissions:
   contents: read
 
 env:
-  BASE_REPO: https://github.com/MakrSas/ios-topaz.git
-  BASE_SHA: 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
+  # Content pin of the 82-file sweet 0001-0079 baseline (see ci/README.md).
+  # The repo/ref/key live in Actions secrets: BASELINE_REPO, BASELINE_REF,
+  # BASELINE_SSH_KEY. The public pin is the manifest root, not a URL.
+  BASELINE_MANIFEST_SHA256: 829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910
+  BASELINE_FILES: "82"
   PATCHSET_SHA256: 29449e32a638e8e44e1683fc711b4f0dbba89c273310e74baf802653caf1eda3
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
@@ -64,7 +67,18 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Fetch private baseline
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ secrets.BASELINE_REPO }}
+          ref: ${{ secrets.BASELINE_REF }}
+          ssh-key: ${{ secrets.BASELINE_SSH_KEY }}
+          path: baseline-src
+          persist-credentials: false
+
       - name: Prepare pinned baseline
+        env:
+          BASELINE_DIR: baseline-src
         run: |
           sh ci/prepare-baseline.sh base
 
@@ -206,8 +220,10 @@ jobs:
             patches=$(ls base/xnu/patches/*.patch 2>/dev/null | wc -l)
           fi
           {
-            echo "base_repo=$BASE_REPO"
-            echo "base_sha=$BASE_SHA"
+            echo "baseline_manifest=$BASELINE_MANIFEST_SHA256"
+            echo "baseline_files=$BASELINE_FILES"
+            echo "baseline_upstream=ios-topaz@5095ac19dbdcf37b64b81fe443f4027ad51b84bf"
+            echo "apple_xnu=xnu-8796.141.3"
             echo "patchset_sha256=$patchset"
             echo "dxb_repo=$DXB_REPO"
             echo "dxb_sha=$DXB_SHA"

@@ -282,8 +282,9 @@ def read_env(path):
     return values
 
 
-def check_ci_pins():
-    env_path = os.path.join(ROOT, "config", "0087.env")
+def check_ci_pins(config_path):
+    env_path = config_path if os.path.isabs(config_path) else os.path.join(ROOT, config_path)
+    rel_env = os.path.relpath(env_path, ROOT)
     wf_path = os.path.join(ROOT, ".github", "workflows", "xnu.yml")
     changes_path = os.path.join(ROOT, "ci", "baseline-changes.patch")
     recipe_path = os.path.join(ROOT, "ci", "prepare-baseline.sh")
@@ -292,7 +293,7 @@ def check_ci_pins():
 
     required = (env_path, wf_path, changes_path, recipe_path, remove_path)
     if not all(os.path.exists(p) for p in required):
-        fail("missing config/0087.env, workflow or recipe files")
+        fail(f"missing {rel_env}, workflow or recipe files")
         return
     if os.path.exists(delta_path):
         fail("ci/ruby-baseline.diff is present; option B requires the recipe only")
@@ -301,7 +302,7 @@ def check_ci_pins():
     pins = read_env(env_path)
     workflow = open(wf_path, "r", encoding="utf-8").read()
     missing = []
-    for key in ("BASE_REPO", "BASE_SHA", "PATCHSET_SHA256", "DXB_REPO",
+    for key in ("BASELINE_MANIFEST_SHA256", "PATCHSET_SHA256", "DXB_REPO",
                 "DXB_SHA", "MACOS_VERSION", "KERNEL_CONFIG", "MACHINE_CONFIG"):
         value = pins.get(key)
         if value and value not in workflow:
@@ -312,13 +313,14 @@ def check_ci_pins():
 
     # Artifact pins are required only once a booted reference exists.
     if pins.get("KERNEL_EXPECT_EXEC_DATA"):
-        for key in ("KERNEL_SHA256", "IMAGE_SHA256", "ROOT_SHA256",
-                    "ICL_ORIG_SHA256", "ICL_PATCHED_SHA256", "BOOT_CMDLINE",
-                    "SHIM_SHA256", "PAYLOAD_SHA256", "ADT_SHA256",
-                    "BASE_BOOT_SHA256"):
+        for key in ("CI_KERNEL_SHA256", "CI_KERNEL_EXEC_DATA_SHA256",
+                    "CI_IMAGE_SHA256", "BOOT_CMDLINE"):
             if not pins.get(key):
-                fail(f"config/0087.env is missing {key}")
+                fail(f"{rel_env} is missing {key}")
                 return
+        if pins["CI_KERNEL_EXEC_DATA_SHA256"] != pins["KERNEL_EXPECT_EXEC_DATA"]:
+            fail("KERNEL_EXPECT_EXEC_DATA and CI_KERNEL_EXEC_DATA_SHA256 differ")
+            return
 
     cmdline_ref = pins.get("BOOT_CMDLINE")
     if cmdline_ref:
@@ -333,7 +335,7 @@ def check_ci_pins():
         fail(f"baseline-changes sha256 {actual} != {expected}")
         return
     if not expected:
-        warn("BASELINE_CHANGES_SHA256 is not set in config/0087.env")
+        warn(f"BASELINE_CHANGES_SHA256 is not set in {rel_env}")
 
     if "prepare-baseline.sh" not in workflow:
         fail("workflow does not call ci/prepare-baseline.sh")
@@ -362,6 +364,8 @@ def main():
     ap.add_argument("--boot-image", help="boot image to inspect (read-only)")
     ap.add_argument("--icl-orig", help="original 4K ICL block (read-only)")
     ap.add_argument("--icl-patched", help="expected patched 4K block (read-only)")
+    ap.add_argument("--ci-config", default="config/0140.env",
+                    help="branch config with the CI pins (default: config/0140.env)")
     args = ap.parse_args()
 
     print(f"root: {ROOT}")
@@ -369,7 +373,7 @@ def main():
     check_shell()
     check_forbidden_files()
     check_pii()
-    check_ci_pins()
+    check_ci_pins(args.ci_config)
     check_markdown_links()
     check_synthetic_icl()
     if args.icl_orig and args.icl_patched:

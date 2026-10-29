@@ -1,19 +1,29 @@
 #!/bin/sh
 # Build the pinned baseline patchset without vendoring the upstream tree.
 #
-#   1. fetch MakrSas/ios-topaz at the pinned commit,
-#   2. remove the topaz-specific patches by name,
-#   3. add this project's patches,
-#   4. apply the small 0010/0012 change,
-#   5. normalize to LF and verify the canonical patchset hash.
+# Baseline source (one of):
+#   BASELINE_DIR=DIR       content-pinned 82-file sweet 0001-0079 set
+#                          (private mirror or a local bundle). The manifest
+#                          root is verified before anything is applied.
+#   ALLOW_PUBLIC_UPSTREAM=1
+#                          fetch MakrSas/ios-topaz at BASE_SHA and remove the
+#                          topaz-specific patches by name (external fallback,
+#                          same manifest verification).
 #
-# Usage: sh ci/prepare-baseline.sh [DEST]
+# Then: add this project's patches, apply the small 0010/0012 change, normalize
+# to LF and verify the canonical patchset hash.
+#
+# Usage: [BASELINE_DIR=dir] sh ci/prepare-baseline.sh [DEST]
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+BASELINE_DIR=${BASELINE_DIR:-}
+BASELINE_MANIFEST_SHA256=${BASELINE_MANIFEST_SHA256:-829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910}
+BASELINE_FILES=${BASELINE_FILES:-82}
+ALLOW_PUBLIC_UPSTREAM=${ALLOW_PUBLIC_UPSTREAM:-0}
 BASE_REPO=${BASE_REPO:-https://github.com/MakrSas/ios-topaz.git}
 BASE_SHA=${BASE_SHA:-5095ac19dbdcf37b64b81fe443f4027ad51b84bf}
-PATCHSET_SHA256=${PATCHSET_SHA256:-38cfe2ef771cf7bb42bb4c11d65e7fbfb501c13abbb1dea71eb39e1fde35211e}
+PATCHSET_SHA256=${PATCHSET_SHA256:-29449e32a638e8e44e1683fc711b4f0dbba89c273310e74baf802653caf1eda3}
 PYTHON=${PYTHON:-python3}
 DEST=${1:-baseline}
 
@@ -22,28 +32,50 @@ if [ -e "$DEST" ]; then
     exit 2
 fi
 
-git init -q "$DEST"
-git -C "$DEST" remote add origin "$BASE_REPO"
-git -C "$DEST" fetch -q --depth 1 origin "$BASE_SHA"
-git -C "$DEST" checkout -q FETCH_HEAD
-
-actual="$(git -C "$DEST" rev-parse HEAD)"
-if [ "$actual" != "$BASE_SHA" ]; then
-    echo "prepare-baseline: baseline mismatch: $actual" >&2
-    exit 3
-fi
-
-# Normalize the baseline patches before applying text changes.
-"$PYTHON" "$ROOT/ci/normalize_lf.py" "$DEST/xnu/patches"
-
-while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if [ ! -f "$DEST/xnu/patches/$name" ]; then
-        echo "prepare-baseline: missing topaz patch: $name" >&2
+if [ -n "$BASELINE_DIR" ]; then
+    BASELINE_SRC="$BASELINE_DIR/xnu/patches"
+    if [ ! -d "$BASELINE_SRC" ]; then
+        echo "prepare-baseline: missing $BASELINE_SRC" >&2
         exit 4
     fi
-    rm -f "$DEST/xnu/patches/$name"
-done < "$ROOT/ci/topaz-patches-to-remove.txt"
+    mkdir -p "$DEST/xnu/patches"
+    git init -q "$DEST"
+    cp "$BASELINE_SRC"/*.patch "$BASELINE_SRC"/*.sh "$DEST/xnu/patches/"
+elif [ "$ALLOW_PUBLIC_UPSTREAM" = "1" ]; then
+    git init -q "$DEST"
+    git -C "$DEST" remote add origin "$BASE_REPO"
+    git -C "$DEST" fetch -q --depth 1 origin "$BASE_SHA"
+    git -C "$DEST" checkout -q FETCH_HEAD
+    actual="$(git -C "$DEST" rev-parse HEAD)"
+    if [ "$actual" != "$BASE_SHA" ]; then
+        echo "prepare-baseline: baseline mismatch: $actual" >&2
+        exit 3
+    fi
+    # Normalize before removing the topaz-specific patches by name.
+    "$PYTHON" "$ROOT/ci/normalize_lf.py" "$DEST/xnu/patches"
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        if [ ! -f "$DEST/xnu/patches/$name" ]; then
+            echo "prepare-baseline: missing topaz patch: $name" >&2
+            exit 4
+        fi
+        rm -f "$DEST/xnu/patches/$name"
+    done < "$ROOT/ci/topaz-patches-to-remove.txt"
+else
+    echo "prepare-baseline: set BASELINE_DIR (private baseline) or ALLOW_PUBLIC_UPSTREAM=1" >&2
+    exit 4
+fi
+
+# Normalize and verify the 82-file baseline before this project's patches.
+"$PYTHON" "$ROOT/ci/normalize_lf.py" "$DEST/xnu/patches"
+if [ -n "$BASELINE_DIR" ] && [ -f "$BASELINE_DIR/MANIFEST.sha256" ]; then
+    "$PYTHON" "$ROOT/ci/baseline_manifest.py" --patches "$DEST/xnu/patches" \
+        --expect-root "$BASELINE_MANIFEST_SHA256" --expect-count "$BASELINE_FILES" \
+        --manifest "$BASELINE_DIR/MANIFEST.sha256"
+else
+    "$PYTHON" "$ROOT/ci/baseline_manifest.py" --patches "$DEST/xnu/patches" \
+        --expect-root "$BASELINE_MANIFEST_SHA256" --expect-count "$BASELINE_FILES"
+fi
 
 cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch" \
     "$ROOT/patches/0085-ruby-goodix-spi.patch" \

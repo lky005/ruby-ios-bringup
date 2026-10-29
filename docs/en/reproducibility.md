@@ -7,12 +7,22 @@ tools and documentation; the upstream tree is fetched by a recipe, not
 vendored; no full delta and no Apple/Android binaries. The guarantee is
 documented and theoretical, not an independently reproduced device guarantee.
 
+**Baseline source (2026-10-29):** CI fetches the 82 files of 0001-0079 from a
+private content-addressed mirror. The public pin is the manifest root
+`829d7598...` (82 files, LF-normalized), not a repository URL; the repo, ref
+and read-only deploy key live in Actions secrets (`BASELINE_REPO`,
+`BASELINE_REF`, `BASELINE_SSH_KEY`). External users can use the public
+fallback `ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh`, which verifies
+the same manifest root.
+
 ## What is published
 
 - `patches/` — 0080 UFS, 0084 autoswipe, historical 0081-0083.
-- `ci/prepare-baseline.sh` — fetch the pinned baseline, remove the topaz
-  patches, add this project's patches, apply the small 0010/0012 change.
-- `ci/patchset_hash.py` — canonical patchset hash (0086: 89 files).
+- `ci/prepare-baseline.sh` — take the pinned baseline from the private mirror
+  (or the explicit public fallback), verify the manifest root, add this
+  project's patches, apply the small 0010/0012 change.
+- `ci/baseline_manifest.py` — 82-file baseline manifest root check (LF).
+- `ci/patchset_hash.py` — canonical patchset hash (0131b: 135 files).
 - `ci/baseline-changes.patch` — the small 0010/0012 change only.
 - `tools/image/`, `tools/twrp/`, `scripts/check-bundle.py` — offline checks.
 - `scripts/build-payload.sh`, `tools/image/pack_boot.py`,
@@ -32,8 +42,9 @@ documented and theoretical, not an independently reproduced device guarantee.
 
 | Control | What it prevents |
 |---|---|
-| Pinned baseline commit `5095ac1` | upstream branch movement |
-| Fixed topaz deletion list | accidental patch leftovers |
+| Baseline manifest root `829d7598...` + upstream `5095ac1` | baseline content or upstream branch drift |
+| Private mirror ref (Actions secret) | mirror tampering; a different root stops the build |
+| Fixed topaz deletion list | patch leftovers on the public fallback |
 | Fail-closed recipe | missing files or changed 0010/0012 context |
 | LF normalization | Windows/macOS line-ending drift |
 | `PATCHSET_SHA256=16b8ddea...` | any patchset content change |
@@ -56,7 +67,8 @@ is not possible because its filler was random.
 
 ## What can still break
 
-- The upstream commit becomes unreachable; mirror it.
+- The private mirror or its deploy key becomes unreachable; restore it from
+  the local bundle, or use the explicit public fallback.
 - The `macos-14` runner image or Xcode 15.0.1 disappears; the workflow fails
   loudly by design.
 - Homebrew package versions change; they are recorded but not pinned.
