@@ -15,6 +15,11 @@ and read-only deploy key live in Actions secrets (`BASELINE_REPO`,
 fallback `ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh`, which verifies
 the same manifest root.
 
+The main line (`ramdisk-b1`) builds the ramdisk set (`27894e7b...`, 137
+files); the `usb-0131b-probe-write` branch builds `29449e32...` (135 files)
+and keeps `config/0131b.env`. Both use the same 82-file baseline and the same
+private-mirror credentials.
+
 ## What is published
 
 - `patches/` — 0080 UFS, 0084 autoswipe, historical 0081-0083.
@@ -22,7 +27,8 @@ the same manifest root.
   (or the explicit public fallback), verify the manifest root, add this
   project's patches, apply the small 0010/0012 change.
 - `ci/baseline_manifest.py` — 82-file baseline manifest root check (LF).
-- `ci/patchset_hash.py` — canonical patchset hash (0140: 137 files).
+- `ci/patchset_hash.py` — canonical patchset hash (main: 0140, 137 files;
+  USB branch: 0131b, 135 files).
 - `ci/baseline-changes.patch` — the small 0010/0012 change only.
 - `tools/image/`, `tools/twrp/`, `scripts/check-bundle.py` — offline checks.
 - `scripts/build-payload.sh`, `tools/image/pack_boot.py`,

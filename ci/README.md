@@ -45,6 +45,20 @@ patches, and verifies the same manifest root.
 
 The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 
+## Branches
+
+- `ramdisk-b1` (main line): patchset `27894e7b...` (137 files), config
+  `config/0140.env`. The patch list includes 0080/0084/0085, 0086-0131b,
+  0140 and 0141.
+- `usb-0131b-probe-write`: patchset `29449e32...` (135 files), config
+  `config/0131b.env`. It keeps its own branch workflow and patch list; the
+  same 82-file baseline and mirror credentials apply. The 0131b control
+  kernel is recorded in that config.
+
+The merged main line keeps `config/0131b.env` and `config/0131b-boot.cmdline`
+as the USB branch reference. The kernel built on main is the ramdisk set,
+which contains every USB patch through 0131b plus 0140/0141.
+
 ## Pins
 
 | Item | Value |
@@ -53,6 +67,7 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 | Baseline upstream | `MakrSas/ios-topaz` @ `5095ac19dbdcf37b64b81fe443f4027ad51b84bf` (fallback/provenance) |
 | Apple xnu | `xnu-8796.141.3` (`f625db25f47631424dc62ac1c3414b6e530f7e8a`) |
 | Patchset | `27894e7b274ea57131b5ee57799eb13c1ca2ddd7a6d9e38c15468cdd0dd55ce9` (137 files) |
+| USB branch patchset | `29449e32a638e8e44e1683fc711b4f0dbba89c273310e74baf802653caf1eda3` (135 files), `config/0131b.env` |
 | 0010/0012 change | `ci/baseline-changes.patch`, SHA256 `1edb6633...` |
 | XNU harness | `blacktop/darwin-xnu-build` @ `663906528d1cd5ea8fde7de6f16de73db9511549` |
 | Runner | `macos-14`, Xcode 15.0.1, macOS 13.5 xnu |

@@ -12,13 +12,18 @@ deploy key 存在 Actions secrets（`BASELINE_REPO`/`BASELINE_REF`/`BASELINE_SSH
 外部复现可用公开上游回退：`ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh`，
 同一条清单根校验。
 
+主线（`ramdisk-b1`）构建 ramdisk 集（`27894e7b…`，137 文件）；
+`usb-0131b-probe-write` 分支构建 `29449e32…`（135 文件），配置在
+`config/0131b.env`。两条线共用同一 82 文件基线与私有镜像凭据。
+
 ## 公开什么
 
 - `patches/`：0080 UFS、0084 autoswipe、历史 0081-0083。
 - `ci/prepare-baseline.sh`：从私有镜像（或显式公开回退）取固定基线、校验
   清单根、加本项目补丁、应用 0010/0012 小改动。
 - `ci/baseline_manifest.py`：82 文件基线清单根校验（LF 归一化）。
-- `ci/patchset_hash.py`：patchset 规范哈希（0140：137 文件）。
+- `ci/patchset_hash.py`：patchset 规范哈希（主线 0140：137 文件；
+  USB 分支 0131b：135 文件）。
 - `ci/baseline-changes.patch`：只含 0010/0012 小改动。
 - `tools/image/`、`tools/twrp/`、`scripts/check-bundle.py`：离线检查。
 - `scripts/build-payload.sh`、`tools/image/pack_boot.py`、
