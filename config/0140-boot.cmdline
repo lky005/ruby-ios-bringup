@@ -1,0 +1,1 @@
+debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=md0 rubyrdsz=4194304 sweethw=0 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1 wdt_test=no_user_checkin sweetfb_hz=30 sweetgt=1 rubyusb=1 rubyusb_window_ms=30000 rubyprobe=1

@@ -13,7 +13,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BASE_REPO=${BASE_REPO:-https://github.com/MakrSas/ios-topaz.git}
 BASE_SHA=${BASE_SHA:-5095ac19dbdcf37b64b81fe443f4027ad51b84bf}
-PATCHSET_SHA256=${PATCHSET_SHA256:-38cfe2ef771cf7bb42bb4c11d65e7fbfb501c13abbb1dea71eb39e1fde35211e}
+PATCHSET_SHA256=${PATCHSET_SHA256:-ae060435d012edc10bec8d36526f48b62fb86847f721bb6fe9d9906a773405e8}
 PYTHON=${PYTHON:-python3}
 DEST=${1:-baseline}
 
@@ -94,6 +94,8 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0130-ruby-ep2-ring64.patch" \
     "$ROOT/patches/0131-ruby-reset-probe.patch" \
     "$ROOT/patches/0131b-ruby-probe-write.patch" \
+    "$ROOT/patches/0140-ruby-ramdisk-import.patch" \
+    "$ROOT/patches/0141-ruby-usb-decouple.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

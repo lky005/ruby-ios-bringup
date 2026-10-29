@@ -1,0 +1,78 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -863,4 +863,58 @@
+ 	*dev = su.bdev;
+ 	return 0;
+ }
++
++/*
++ * Optional md0 root from the LK ramdisk slot: rubyrdsz=<bytes>.
++ * Copy the image into kernel-managed memory before mountroot so the VM
++ * never sees the low DRAM region and md0 has a stable backing store.
++ */
++extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
++extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++
++#define RUBY_RD_PA      0x51100000UL
++#define RUBY_RD_MAX     (6u << 20)
++
++int
++sweet_ramdisk_import(void)
++{
++	static int done;
++	uint32_t size = 0;
++	vm_offset_t src, dst;
++	dev_t dev;
++	uint32_t sum = 0;
++	unsigned int i;
++
++	if (done)
++		return 0;
++	if (!PE_parse_boot_argn("rubyrdsz", &size, sizeof(size)))
++		return 0;
++	if (size == 0 || size > RUBY_RD_MAX)
++		return EINVAL;
++	done = 1;
++
++	src = ml_io_map_wcomb(RUBY_RD_PA, size);
++	if (src == 0) {
++		printf("SWEET RD: map failed
++");
++		return ENOMEM;
++	}
++	if (kmem_alloc(kernel_map, &dst, round_page(size),
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT,
++	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		printf("SWEET RD: alloc failed
++");
++		return ENOMEM;
++	}
++	for (i = 0; i < (size >> 2); i++)
++		sum += ((const uint32_t *)src)[i];
++	memcpy((void *)dst, (const void *)src, size);
++	dev = mdevadd(-1, (uint64_t)(dst >> 12),
++	    (unsigned int)((size + 4095) >> 12), 0);
++	printf("SWEET RD: pa=%x sz=%x sum=%x dev=%d
++",
++	    (unsigned int)RUBY_RD_PA, size, sum, (int)dev);
++	return (dev < 0) ? ENXIO : 0;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -742,6 +742,12 @@
+ 		OSSafeReleaseNULL(regEntry);
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Optional md0 root from the LK ramdisk slot (rubyrdsz=). */
++	extern int sweet_ramdisk_import(void);
++	(void)sweet_ramdisk_import();
++#endif
++
+ //
+ //	See if we have a RAMDisk property in /chosen/memory-map.  If so, make it into a device.
+ //	It will become /dev/mdx, where x is 0-f.

@@ -1,0 +1,26 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -702,7 +702,6 @@
+ 		printf("SWEET UFS: keys/touch/USB skipped (ruby, sweethw=0)\n");
+ 	}
+ 	sweet_goodix_spi_init();
+-	ruby_usb_probe();
+ 	return 0;
+ }
+ 
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -900,6 +900,11 @@
+ 	}
+ 
+ 	IOSecureBSDRoot(rootdevice);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Single ruby USB probe call site: UFS and ramdisk roots both reach here. */
++	extern void ruby_usb_probe(void);
++	ruby_usb_probe();
++#endif
+ 
+ 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
+ 
