@@ -24,14 +24,16 @@ project's delta.
 
 | Line | Patchset | Files | Config | Kernel |
 |---|---|---|---|---|
-| main (`ramdisk-b1`) | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`, exec `721e5daf...` |
+| integration (`merge-ramdisk-usb-2026-10-29`) | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`, exec `721e5daf...` |
 | USB (`usb-0131b-probe-write`) | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`, exec `06db2bb3...` |
 
-- The main line includes 0080/0084/0085, 0086-0131b, 0140 and 0141.
-- The USB branch keeps its own workflow and patch list. The merged main line
+- The integration line includes 0080/0084/0085, 0086-0131b, 0140 and 0141.
+- The USB branch keeps its own workflow and patch list. The integration branch
   carries `config/0131b.env` and `config/0131b-boot.cmdline` as its reference.
-- CI runs `40822689195` (main line) and `40824668335` (USB) both succeeded and
+- CI runs `40822689195` (integration) and `40824668335` (USB) both succeeded and
   matched the reference exec-data hashes.
+- `main` stays at the 2026-10-22 state; the integration branch is the combined
+  line for review.
 - A rebuilt kernel's full SHA differs from the reference in `__TEXT` metadata
   and the compressed `__CTF` segment. Every code/data segment and `__LINKEDIT`
   is identical; the exec-data hash is the gate.

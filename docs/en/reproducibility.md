@@ -15,10 +15,10 @@ and read-only deploy key live in Actions secrets (`BASELINE_REPO`,
 fallback `ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh`, which verifies
 the same manifest root.
 
-The main line (`ramdisk-b1`) builds the ramdisk set (`27894e7b...`, 137
-files); the `usb-0131b-probe-write` branch builds `29449e32...` (135 files)
-and keeps `config/0131b.env`. Both use the same 82-file baseline and the same
-private-mirror credentials.
+The integration branch (`merge-ramdisk-usb-2026-10-29`) builds the ramdisk set
+(`27894e7b...`, 137 files); the `usb-0131b-probe-write` branch builds
+`29449e32...` (135 files) and keeps `config/0131b.env`. Both use the same
+82-file baseline and the same private-mirror credentials.
 
 ## What is published
 

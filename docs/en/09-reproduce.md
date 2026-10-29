@@ -31,15 +31,15 @@ the canonical patchset hash matches. See
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (no upstream tree vendored)
-patchset: 27894e7b... (main line, 137 files)
+patchset: 27894e7b... (integration, 137 files)
           USB branch: 29449e32... (135 files), config/0131b.env
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-The main line is the ramdisk/0140 set and includes the USB series through
-0131b. The 0086/0085 references below are historical.
+The integration branch builds the ramdisk/0140 set and includes the USB series
+through 0131b. The 0086/0085 references below are historical.
 
 Run it from **Actions → xnu → Run workflow**, or push a change under `ci/`,
 `patches/`, `config/` or the workflow. Artifacts: `xnu-kernel` and
@@ -47,7 +47,7 @@ Run it from **Actions → xnu → Run workflow**, or push a change under `ci/`,
 
 ## Rescue root (2026-10-29)
 
-`ramdisk-b1` adds a 4 MB HFS+ root in the LK ramdisk slot. The kernel imports
+The ramdisk line adds a 4 MB HFS+ root in the LK ramdisk slot. The kernel imports
 it with `rubyrdsz=` and mounts it as `md0`; PID 1 runs `/etc/rc` and the
 applets in-process, so the minimal root does not depend on launchd or
 fork/exec. The image (`6795d9e4...`) and the root are external. The full

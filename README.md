@@ -8,8 +8,9 @@ A research bring-up, packaged as an independent, sanitized delta.
 > **Status 2026-10-29:** the kernel CI now assembles from a content-pinned
 > 82-file baseline (manifest root `829d7598...`) fetched from a private
 > content-addressed mirror; the 0001-0079 baseline is no longer a live upstream
-> dependency. `ramdisk-b1` adds the LK-ramdisk rescue root (`md0`, PID 1
-> in-process, 8/8 PASS, USB `1209:0002` at ~35 s).
+> dependency. The ramdisk line adds the LK-ramdisk rescue root (`md0`, PID 1
+> in-process, 8/8 PASS, USB `1209:0002` at ~35 s); the ramdisk and USB lines
+> are combined on `merge-ramdisk-usb-2026-10-29` (not on `main`).
 > `usb-0131b-probe-write` keeps the vendor USB probe; EP2 host-side XACT
 > remains open. Real touch (0085) remains the last UI milestone; no new device
 > image was flashed for this CI change.
@@ -124,7 +125,7 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: 27894e7b... (main line, 137 files; USB branch 29449e32..., 135 files)
+patchset: 27894e7b... (integration, 137 files; USB branch 29449e32..., 135 files)
 runner:   macos-14 / Xcode 15.0.1 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```

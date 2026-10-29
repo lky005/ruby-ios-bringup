@@ -7,8 +7,10 @@
 
 > **状态 2026-10-29：** 内核 CI 改为从内容固定的 82 文件基线（清单根
 > `829d7598...`）拼装，基线由私有内容寻址镜像提供，0001-0079 不再是活的
-> 上游依赖。`ramdisk-b1` 增加 LK ramdisk 救援根（`md0`，PID 1 进程内运行，
-> 8/8 PASS，USB `1209:0002` 约 35 秒）。`usb-0131b-probe-write` 保留厂商
+> 上游依赖。ramdisk 线增加 LK ramdisk 救援根（`md0`，PID 1 进程内运行，
+> 8/8 PASS，USB `1209:0002` 约 35 秒）；ramdisk 与 USB 两条线合并在
+> `merge-ramdisk-usb-2026-10-29` 上（不在 `main`）。
+> `usb-0131b-probe-write` 保留厂商
 > USB 探针；EP2 主机侧 XACT 仍未闭环。真实触摸（0085）仍是最后一个 UI
 > 里程碑；本次 CI 改动没有刷入新的设备镜像。
 >
@@ -112,7 +114,7 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: 27894e7b...（主线，137 文件；USB 分支 29449e32...，135 文件）
+patchset: 27894e7b...（集成分支，137 文件；USB 分支 29449e32...，135 文件）
 runner:   macos-14 / Xcode 15.0.1 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```

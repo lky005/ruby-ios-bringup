@@ -40,7 +40,7 @@ after each verification pass.
 | Check | Result |
 |---|---|
 | Baseline manifest | 82 files, root `829d7598...`, manifest matches |
-| Patchset (main line) | `27894e7b...` (137 files) |
+| Patchset (integration) | `27894e7b...` (137 files) |
 | Patchset (USB branch) | `29449e32...` (135 files) |
 | Kernel exec-data (main) | `721e5daf...` (matches the booted 0140/B1 reference) |
 | Kernel exec-data (USB) | `06db2bb3...` (matches the 0131b control) |

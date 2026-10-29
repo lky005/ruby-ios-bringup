@@ -1,7 +1,7 @@
 # Config
 
 `0140.env` and `0131b.env` record the 2026-10-29 CI pins. `0140` is the ramdisk
-main line (patchset `27894e7b...`, 137 files); `0131b` is the USB branch
+line (patchset `27894e7b...`, 137 files); `0131b` is the USB branch
 (`29449e32...`, 135 files) and keeps its exact boot args in
 `0131b-boot.cmdline`. The kernel baseline is fetched from a private
 content-addressed mirror; the public pin is the manifest root recorded in each

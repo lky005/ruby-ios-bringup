@@ -28,22 +28,22 @@
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（不 vendor 上游树）
-patchset: 27894e7b...（主线，137 文件）
+patchset: 27894e7b...（集成分支，137 文件）
           USB 分支：29449e32...（135 文件），config/0131b.env
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-主线是 ramdisk/0140 集，包含到 0131b 的 USB 系列。下面的 0086/0085 引用是
-历史记录。
+集成分支构建 ramdisk/0140 集，包含到 0131b 的 USB 系列。下面的 0086/0085
+引用是历史记录。
 
 从 **Actions → xnu → Run workflow** 运行，或推送 `ci/`、`patches/`、
 `config/`、workflow 的改动。产物：`xnu-kernel`、`xnu-buildtree`。
 
 ## 救援根（2026-10-29）
 
-`ramdisk-b1` 在 LK ramdisk 槽放一个 4 MB HFS+ root。内核用 `rubyrdsz=` 导入
+ramdisk 线在 LK ramdisk 槽放一个 4 MB HFS+ root。内核用 `rubyrdsz=` 导入
 并挂成 `md0`；PID 1 进程内跑 `/etc/rc` 和 applet，不依赖 launchd 或
 fork/exec。镜像（`6795d9e4...`）和 root 是外部输入；完整 Unix/iOS 环境仍在
 UFS iOS root。

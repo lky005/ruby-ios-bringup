@@ -23,14 +23,15 @@
 
 | 线 | patchset | 文件数 | 配置 | 内核 |
 |---|---|---|---|---|
-| 主线（`ramdisk-b1`） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
+| 集成分支（`merge-ramdisk-usb-2026-10-29`） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
 | USB（`usb-0131b-probe-write`） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
 
-- 主线包含 0080/0084/0085、0086-0131b、0140 和 0141。
-- USB 分支保留自己的 workflow 和 patch 列表；合并后的主线保留
+- 集成分支包含 0080/0084/0085、0086-0131b、0140 和 0141。
+- USB 分支保留自己的 workflow 和 patch 列表；集成分支保留
   `config/0131b.env` 与 `config/0131b-boot.cmdline` 作为参照。
-- CI `40822689195`（主线）与 `40824668335`（USB）均成功，exec-data 与参考
-  内核一致。
+- CI `40822689195`（集成分支）与 `40824668335`（USB）均成功，exec-data 与
+  参考内核一致。
+- `main` 保持 2026-10-22 状态；集成分支是用于审阅的合并线。
 - 重新构建的内核 full SHA 会在 `__TEXT` 元数据和压缩的 `__CTF` 段上与参考
   不同；所有代码/数据段与 `__LINKEDIT` 一致。exec-data 才是门禁。
 

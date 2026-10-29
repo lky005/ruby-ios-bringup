@@ -47,17 +47,18 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 
 ## Branches
 
-- `ramdisk-b1` (main line): patchset `27894e7b...` (137 files), config
-  `config/0140.env`. The patch list includes 0080/0084/0085, 0086-0131b,
-  0140 and 0141.
+- `merge-ramdisk-usb-2026-10-29` (integration): patchset `27894e7b...`
+  (137 files), config `config/0140.env`. It combines the ramdisk line
+  (0080/0084/0085, 0140/0141) with the USB series through 0131b.
 - `usb-0131b-probe-write`: patchset `29449e32...` (135 files), config
   `config/0131b.env`. It keeps its own branch workflow and patch list; the
   same 82-file baseline and mirror credentials apply. The 0131b control
   kernel is recorded in that config.
 
-The merged main line keeps `config/0131b.env` and `config/0131b-boot.cmdline`
-as the USB branch reference. The kernel built on main is the ramdisk set,
-which contains every USB patch through 0131b plus 0140/0141.
+The integration branch keeps `config/0131b.env` and
+`config/0131b-boot.cmdline` as the USB branch reference. The kernel built on
+it is the ramdisk set, which contains every USB patch through 0131b plus
+0140/0141. `main` stays at the 2026-10-22 state.
 
 ## Pins
 
