@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -863,4 +863,58 @@
+@@ -863,4 +863,55 @@
  	*dev = su.bdev;
  	return 0;
  }
@@ -37,15 +37,13 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +
 +	src = ml_io_map_wcomb(RUBY_RD_PA, size);
 +	if (src == 0) {
-+		printf("SWEET RD: map failed
-+");
++		printf("SWEET RD: map failed\n");
 +		return ENOMEM;
 +	}
 +	if (kmem_alloc(kernel_map, &dst, round_page(size),
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT,
 +	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-+		printf("SWEET RD: alloc failed
-+");
++		printf("SWEET RD: alloc failed\n");
 +		return ENOMEM;
 +	}
 +	for (i = 0; i < (size >> 2); i++)
@@ -53,8 +51,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	memcpy((void *)dst, (const void *)src, size);
 +	dev = mdevadd(-1, (uint64_t)(dst >> 12),
 +	    (unsigned int)((size + 4095) >> 12), 0);
-+	printf("SWEET RD: pa=%x sz=%x sum=%x dev=%d
-+",
++	printf("SWEET RD: pa=%x sz=%x sum=%x dev=%d\n",
 +	    (unsigned int)RUBY_RD_PA, size, sum, (int)dev);
 +	return (dev < 0) ? ENXIO : 0;
 +}
