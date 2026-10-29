@@ -5,6 +5,15 @@
 **XNU 8796 + iPhone X iOS 16.7.16 userland on a MediaTek MT6877 phone.**
 A research bring-up, packaged as an independent, sanitized delta.
 
+> **Status 2026-10-29:** the kernel CI now assembles from a content-pinned
+> 82-file baseline (manifest root `829d7598...`) fetched from a private
+> content-addressed mirror; the 0001-0079 baseline is no longer a live upstream
+> dependency. `ramdisk-b1` adds the LK-ramdisk rescue root (`md0`, PID 1
+> in-process, 8/8 PASS, USB `1209:0002` at ~35 s).
+> `usb-0131b-probe-write` keeps the vendor USB probe; EP2 host-side XACT
+> remains open. Real touch (0085) remains the last UI milestone; no new device
+> image was flashed for this CI change.
+>
 > **Status 2026-10-22:** **real touch works.** The 0085 kernel drives the
 > Goodix GT9916R over bit-bang SPI3, unlocks the lock screen with a real
 > bottom-edge swipe, and dispatches two simultaneous contacts and edge events
@@ -31,22 +40,23 @@ kernel-side synthetic swipe → home screen. Captured on the 0084 build on
 [`media/README.md`](media/README.md).
 
 This repository contains **no Apple firmware, iOS root images, device dumps or
-diff data**. The kernel is built from a pinned upstream baseline plus this
-project's delta; the workflow verifies the applied tree before building.
+diff data**. The kernel is built from Apple's xnu tag, a content-pinned 82-file
+baseline and this project's delta; the workflow verifies the applied tree
+before building.
 
 ## At a glance
 
 | Area | State |
 |---|---|
-| Boot | stock LK → 128 MiB boot image → XNU 8796 → HFS+ root |
+| Boot | stock LK → 128 MiB boot image → XNU 8796 → HFS+ root (UFS, or `md0` rescue) |
 | CPU | 6× Cortex-A55, 16K pages, GICv3, timers |
 | Display | IOSurface/IOMFB → LK framebuffer, 1080×2400 |
 | Userland | launchd → lsd → backboardd → SpringBoard |
 | Input | **real Goodix GT9916R** over bit-bang SPI3; unlock, two-contact HID dispatch, edge; 0084 synthetic swipe still available |
-| Storage | UFS LUN 2, read/write HFS+ on `iosroot` |
-| Latest run | real-touch 0085 boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo); CI kernel boot |
-| Open | second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload |
-| Not yet | keys, USB, Wi-Fi, GPU, RTC |
+| Storage | UFS LUN 2, read/write HFS+ on `iosroot`; 4 MB HFS rescue root via the LK ramdisk slot |
+| Latest run | 2026-10-29 rescue root (8/8 PASS) and CI baseline A/B; real-touch 0085 boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
+| Open | second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
+| Not yet | keys, Wi-Fi, GPU, RTC; USB is a probe only |
 | Safety | AMFI/sandbox/code signing off; data may be lost |
 
 ## Why this milestone matters
@@ -65,10 +75,10 @@ evidence and the wrong turns.
 | `ACKNOWLEDGEMENTS.md`, `LEGAL.md` | credits and legal risk notice |
 | `docs/en/`, `docs/zh/` | English and Chinese chapters |
 | `touch/` | probe ladder, hardware contract and sanitized lab notes |
-| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch; historical 0081-0084 |
-| `ci/` | baseline recipe, canonical patchset hash, kernel segment hash and provenance |
-| `config/` | 0085 real-touch pins and boot cmdline; 0084 as the previous milestone |
-| `.github/workflows/xnu.yml` | reproduces the bootable 0085 kernel and gates its exec-data hash |
+| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0131b USB, 0140/0141 ramdisk; historical 0081-0084 |
+| `ci/` | baseline manifest/recipe, canonical patchset hash, kernel segment hash and provenance |
+| `config/` | 0140 ramdisk and 0131b USB pins; 0085 real-touch and 0084 as history |
+| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash |
 | `src/bringup/` | early boot payloads, shim, image packers |
 | `src/ufs-probe/` | read-only MT6877 UFS probe |
 | `tools/image/` | ICL patch, dyld scanner, boot verifier |
@@ -111,16 +121,17 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 The kernel workflow uses:
 
 ```text
-base:     MakrSas/ios-topaz @ 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
-recipe:   ci/prepare-baseline.sh (the upstream tree is not vendored)
-patchset: de1824c28b5e56f7c60988c33501cd5bbfd24a4159d9358223fd2af11392d360
+apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
+baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
+recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
+patchset: 27894e7b... (main line, 137 files; USB branch 29449e32..., 135 files)
 runner:   macos-14 / Xcode 15.0.1 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-The recipe removes the topaz patches, adds this project's patches, applies the
-small 0010/0012 change, normalizes line endings and refuses to build unless the
-canonical patchset hash matches. The boot image itself is **not** included;
+The recipe verifies the 82-file baseline, adds this project's patches, applies
+the small 0010/0012 change, normalizes line endings and refuses to build unless
+the canonical patchset hash matches. See `docs/en/11-ci-baseline.md`. The boot image itself is **not** included;
 `tools/image/` provides the offline verifier and patch tools.
 
 Host pipeline (no device, no root): `scripts/test-pipeline.sh` with a base boot

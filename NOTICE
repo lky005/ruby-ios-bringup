@@ -32,6 +32,8 @@ project. All trademarks belong to their respective owners.
 
 Redistribution note: ci/baseline-changes.patch contains a small modification to
 two upstream patch files (0010/0012); the upstream tree is fetched by the
-recipe, not vendored. The upstream projects had no license file at the pinned
-commits. Obtain permission before public redistribution or keep the repository
-private. See LEGAL.md.
+recipe, not vendored. CI fetches the 82-file baseline patch set from a private
+content-addressed mirror; only its manifest root is published. No baseline code
+is redistributed in this repository. The upstream projects had no license file
+at the pinned commits. Obtain permission before public redistribution or keep
+the repository private. See LEGAL.md.

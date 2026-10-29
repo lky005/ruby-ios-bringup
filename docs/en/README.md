@@ -29,6 +29,7 @@ personal paths, device identifiers or Apple binaries here.
 | [`08-recovery`](08-recovery.md) | Android restore, TWRP, raw I/O |
 | [`09-reproduce`](09-reproduce.md) | build, pack, flash, verify |
 | [`10-scripts`](10-scripts.md) | per-script purpose and boundaries |
+| [`11-ci-baseline`](11-ci-baseline.md) | content-pinned baseline, branch pins, exec-data gates |
 | [`appendix-dualboot`](appendix-dualboot.md) | optional layout; method note only |
 | [`glossary`](glossary.md) | codenames, acronyms and status tags |
 | [`device`](device.md) | device situation; no baseline hashes |

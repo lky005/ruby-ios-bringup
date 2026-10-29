@@ -27,6 +27,29 @@ repository. Only their hashes and conclusions are recorded. Pre-boot image
 hashes are fixed for the named files; post-boot root/ring/log hashes are
 volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 
+## 2026-10-29 state
+
+| Item | Result | Evidence |
+|---|---|---|
+| Rescue root | LK ramdisk slot -> `md0`; PID 1 runs `/etc/rc` in-process; 8/8 PASS; USB `1209:0002` ~35 s | boot image `6795d9e4...`; kernel exec `721e5daf...` |
+| Ramdisk line | 0140 import + 0141 USB decouple; B1 image verified | `ramdisk-b1` `76aaf9b`; CI `40822689195` |
+| USB line | 0131b probe write; EP2 host-side XACT remains open | `usb-0131b-probe-write` (merge `fb0577d`); kernel exec `06db2bb3...` |
+| CI baseline | 82-file baseline from a private content-addressed mirror; public pin is manifest root `829d7598...`; fallback `ALLOW_PUBLIC_UPSTREAM=1` | `ci/baseline_manifest.py`; `config/0140.env`, `config/0131b.env` |
+| Branch merge | ramdisk + USB combined on the main line | merge `b961333` |
+
+## Build provenance (2026-10-29)
+
+- Apple xnu: `xnu-8796.141.3` (`f625db25...`).
+- Baseline: 82 files, manifest root `829d7598...`; private mirror, public
+  fallback `ALLOW_PUBLIC_UPSTREAM=1`.
+- Main line: patchset `27894e7b...` (137 files); kernel full `3acefe47...`,
+  exec `721e5daf...`; CI `40822689195`.
+- USB branch: patchset `29449e32...` (135 files); kernel full `4e945ce6...`,
+  exec `06db2bb3...`; CI `40824668335`.
+- Rebuilds differ only in `__TEXT` metadata and the `__CTF` segment; every
+  code/data segment and `__LINKEDIT` matches. The exec-data hash is the gate.
+- No device flash for this change.
+
 ## Build provenance (0085)
 
 - Baseline: `MakrSas/ios-topaz` @ `5095ac19dbdcf37b64b81fe443f4027ad51b84bf`.

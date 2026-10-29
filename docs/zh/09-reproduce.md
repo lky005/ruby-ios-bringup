@@ -19,25 +19,34 @@
 
 ## 构建内核
 
-`.github/workflows/xnu.yml` 运行 `ci/prepare-baseline.sh`。recipe 拉固定基线、
-删除 topaz 补丁、加入本项目补丁、应用 0010/0012 小改动、统一换行；patchset
-哈希不匹配就停止。
+`.github/workflows/xnu.yml` 运行 `ci/prepare-baseline.sh`。recipe 取 82 文件
+基线（私有镜像；`ALLOW_PUBLIC_UPSTREAM=1` 是外部回退）、校验清单根、加入本
+项目补丁、应用 0010/0012 小改动、统一换行；patchset 哈希不匹配就停止。镜像/
+密钥边界见 [`11-ci-baseline.md`](11-ci-baseline.md)。
 
 ```text
-base:     MakrSas/ios-topaz @ 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
+apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
+baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（不 vendor 上游树）
-patchset: 16b8ddea008c4941a628f746e096f345eb9c2861d3a679339bd37ade78ec6abd
+patchset: 27894e7b...（主线，137 文件）
+          USB 分支：29449e32...（135 文件），config/0131b.env
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-这是 0086 USB P0 patchset（89 文件）。0085 真实触摸内核的 exec-data 参考
-`e4823afb...` 只作为历史记录；`config/0086.env` 在 0086 内核上机前不设置
-exec-data 门禁。
+主线是 ramdisk/0140 集，包含到 0131b 的 USB 系列。下面的 0086/0085 引用是
+历史记录。
 
-从 **Actions → xnu-0086 → Run workflow** 运行，或推送 `ci/`、`patches/`、
+从 **Actions → xnu → Run workflow** 运行，或推送 `ci/`、`patches/`、
 `config/`、workflow 的改动。产物：`xnu-kernel`、`xnu-buildtree`。
+
+## 救援根（2026-10-29）
+
+`ramdisk-b1` 在 LK ramdisk 槽放一个 4 MB HFS+ root。内核用 `rubyrdsz=` 导入
+并挂成 `md0`；PID 1 进程内跑 `/etc/rc` 和 applet，不依赖 launchd 或
+fork/exec。镜像（`6795d9e4...`）和 root 是外部输入；完整 Unix/iOS 环境仍在
+UFS iOS root。
 
 ## Host pipeline
 

@@ -1,5 +1,12 @@
 # Config
 
+`0140.env` and `0131b.env` record the 2026-10-29 CI pins. `0140` is the ramdisk
+main line (patchset `27894e7b...`, 137 files); `0131b` is the USB branch
+(`29449e32...`, 135 files) and keeps its exact boot args in
+`0131b-boot.cmdline`. The kernel baseline is fetched from a private
+content-addressed mirror; the public pin is the manifest root recorded in each
+file. `ALLOW_PUBLIC_UPSTREAM=1` is the external fallback.
+
 `0085.env` and `0085-boot.cmdline` record the state that first provided real
 Goodix touch on 2026-10-22. `0084.env` and `0084-boot.cmdline` are the previous
 milestone (synthetic autoswipe). They are provenance, not universal defaults:

@@ -35,6 +35,24 @@ after each verification pass.
 | Config-mode layout | pass without golden; 11 pinned checks |
 | Linux host CI | pass before the final docs/template-only amendment; see Actions |
 
+## CI-verified (2026-10-29)
+
+| Check | Result |
+|---|---|
+| Baseline manifest | 82 files, root `829d7598...`, manifest matches |
+| Patchset (main line) | `27894e7b...` (137 files) |
+| Patchset (USB branch) | `29449e32...` (135 files) |
+| Kernel exec-data (main) | `721e5daf...` (matches the booted 0140/B1 reference) |
+| Kernel exec-data (USB) | `06db2bb3...` (matches the 0131b control) |
+| Full-file A/B | differs only in `__TEXT` metadata and `__CTF`; all code/data segments and `__LINKEDIT` identical |
+| CI runs | `40822689195` (main), `40824668335` (USB) success |
+| Host checks | `scripts/verify-local.py --ci-config config/0140.env` and `config/0131b.env` pass |
+| Sanitization | private mirror URL/key absent from public docs; build logs scanned, 0 hits |
+| Device | no flash for this change |
+
+The baseline is fetched from a private content-addressed mirror; the public pin
+is the manifest root. See `docs/en/11-ci-baseline.md`.
+
 Boot image fields reported by `tools/image/boot_verify.py`:
 
 - image SHA256: `94c639d1f45197718c62bd09c32c72b39710ba23de60f4a04bba96014bce1cb6`

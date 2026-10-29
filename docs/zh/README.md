@@ -28,6 +28,7 @@
 | [`08-recovery`](08-recovery.md) | Android 恢复、TWRP、raw I/O |
 | [`09-reproduce`](09-reproduce.md) | 构建、打包、刷写、验证 |
 | [`10-scripts`](10-scripts.md) | 逐脚本用途与边界 |
+| [`11-ci-baseline`](11-ci-baseline.md) | 内容固定的基线、分支 pin、exec-data 门禁 |
 | [`appendix-dualboot`](appendix-dualboot.md) | 可选布局；仅方法说明 |
 | [`glossary`](glossary.md) | 代号、缩写与状态标签 |
 | [`device`](device.md) | 设备情况；不发布基线 hash |

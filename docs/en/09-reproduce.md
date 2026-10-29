@@ -20,27 +20,38 @@ states what you can reproduce from this repo and what you must supply.
 
 ## Build the kernel
 
-`.github/workflows/xnu.yml` runs `ci/prepare-baseline.sh`. The recipe fetches
-the pinned baseline, removes the topaz patches, adds this project's patches,
-applies the small 0010/0012 change, normalizes line endings, and refuses to
-build unless the canonical patchset hash matches.
+`.github/workflows/xnu.yml` runs `ci/prepare-baseline.sh`. The recipe takes the
+82-file baseline (private mirror; `ALLOW_PUBLIC_UPSTREAM=1` is the external
+fallback), verifies the manifest root, adds this project's patches, applies the
+small 0010/0012 change, normalizes line endings, and refuses to build unless
+the canonical patchset hash matches. See
+[`11-ci-baseline.md`](11-ci-baseline.md) for the mirror/secrets boundary.
 
 ```text
-base:     MakrSas/ios-topaz @ 5095ac19dbdcf37b64b81fe443f4027ad51b84bf
+apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
+baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (no upstream tree vendored)
-patchset: 16b8ddea008c4941a628f746e096f345eb9c2861d3a679339bd37ade78ec6abd
+patchset: 27894e7b... (main line, 137 files)
+          USB branch: 29449e32... (135 files), config/0131b.env
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-This is the 0086 USB P0 patchset (89 files). The 0085 real-touch kernel's
-exec-data reference `e4823afb...` remains historical; `config/0086.env` leaves
-the gate empty until a 0086 kernel boots.
+The main line is the ramdisk/0140 set and includes the USB series through
+0131b. The 0086/0085 references below are historical.
 
-Run it from **Actions → xnu-0086 → Run workflow**, or push a change under
-`ci/`, `patches/`, `config/` or the workflow. Artifacts: `xnu-kernel` and
+Run it from **Actions → xnu → Run workflow**, or push a change under `ci/`,
+`patches/`, `config/` or the workflow. Artifacts: `xnu-kernel` and
 `xnu-buildtree`.
+
+## Rescue root (2026-10-29)
+
+`ramdisk-b1` adds a 4 MB HFS+ root in the LK ramdisk slot. The kernel imports
+it with `rubyrdsz=` and mounts it as `md0`; PID 1 runs `/etc/rc` and the
+applets in-process, so the minimal root does not depend on launchd or
+fork/exec. The image (`6795d9e4...`) and the root are external. The full
+Unix/iOS environment stays on the UFS iOS root.
 
 ## Host pipeline
 

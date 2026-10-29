@@ -24,8 +24,10 @@ obtain any Apple material themselves and comply with Apple's terms.
 - `ios-sweet` and `ios-topaz` had **no license file** at the pinned commits.
   No upstream tree is vendored and no full delta is published. The recipe
   fetches the upstream tree and applies `ci/baseline-changes.patch` (a small
-  0010/0012 change) plus this project's patches. Before public redistribution,
-  obtain permission from the upstream authors or keep the repository private.
+  0010/0012 change) plus this project's patches. CI fetches the baseline patch
+  set from a private content-addressed mirror; only its manifest root is
+  published. Before public redistribution, obtain permission from the upstream
+  authors or keep the repository private.
 - TWRP and Magisk are GPL-licensed; their images are not included.
 
 ## Reverse engineering and circumvention
