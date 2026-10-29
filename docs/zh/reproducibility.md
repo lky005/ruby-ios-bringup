@@ -12,7 +12,7 @@ deploy key 存在 Actions secrets（`BASELINE_REPO`/`BASELINE_REF`/`BASELINE_SSH
 外部复现可用公开上游回退：`ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh`，
 同一条清单根校验。
 
-集成分支（`merge-ramdisk-usb-2026-10-29`）构建 ramdisk 集（`27894e7b…`，
+main（2026-10-29 集成，由 `merge-ramdisk-usb-2026-10-29` 压缩）构建 ramdisk 集（`27894e7b…`，
 137 文件）；`usb-0131b-probe-write` 分支构建 `29449e32…`（135 文件），
 配置在 `config/0131b.env`。两条线共用同一 82 文件基线与私有镜像凭据。
 

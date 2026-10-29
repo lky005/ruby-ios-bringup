@@ -24,18 +24,19 @@ project's delta.
 
 | Line | Patchset | Files | Config | Kernel reference |
 |---|---|---|---|---|
-| integration (`merge-ramdisk-usb-2026-10-29`) | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`, exec `721e5daf...` |
+| main (2026-10-29 integration) | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`, exec `721e5daf...` |
 | USB (`usb-0131b-probe-write`) | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`, exec `06db2bb3...` |
 
-- The integration line includes 0080/0084/0085, 0086-0131b, 0140 and 0141.
-- The USB branch keeps its own workflow and patch list. The integration branch
-  carries `config/0131b.env` and `config/0131b-boot.cmdline` as its reference.
+- Main includes 0080/0084/0085, 0086-0131b, 0140 and 0141.
+- The USB branch keeps its own workflow and patch list. Main carries
+  `config/0131b.env` and `config/0131b-boot.cmdline` as its reference.
 - Kernel run `40822689195` was executed on the ramdisk line before the merge
   and matched exec-data `721e5daf...`; `40824668335` did the same for the USB
-  line. The integration branch itself was checked by host-checks `40828162023`
-  (no kernel build).
-- The integration branch is the combined line; the pins are
-  `config/0140.env` and `config/0131b.env`.
+  line. The pre-merge branch was checked by host-checks `40828162023`; the
+  main squash uses the same patchset gate.
+- Main is the combined line (squashed from
+  `merge-ramdisk-usb-2026-10-29`); the pins are `config/0140.env` and
+  `config/0131b.env`.
 - A rebuilt kernel's full SHA differs from the reference in `__TEXT` metadata
   and the compressed `__CTF` segment. Every code/data segment and `__LINKEDIT`
   is identical; the exec-data hash is the gate.

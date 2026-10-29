@@ -136,7 +136,7 @@ repository and no full delta is published. The recipe takes the content-pinned
 82-file baseline (private mirror, or the `ALLOW_PUBLIC_UPSTREAM=1` fallback),
 verifies the manifest root, adds this project's patches, applies the small
 0010/0012 change, normalizes LF, and verifies the canonical patchset hash
-(137 files on the integration line; 135 on the USB branch) before building.
+(main: 137 files; USB branch: 135) before building.
 
 - **Does not:** flash, pack an image, follow a moving branch tip, or publish
   the full upstream delta.

@@ -32,17 +32,17 @@ volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 | Item | Result | Evidence |
 |---|---|---|
 | Rescue root | LK ramdisk slot -> `md0`; PID 1 runs `/etc/rc` in-process; 8/8 rescue `/etc/rc` checks; USB `1209:0002` enumeration only (~35 s); EP2 XACT remains open | boot image `6795d9e4...` (rescue; B1 is `49a10e49...`); kernel exec `721e5daf...` |
-| Integration line | 0140 import + 0141 USB decouple; B1 image verified | `merge-ramdisk-usb-2026-10-29`; kernel input gated by run `40822689195` on the ramdisk line; integration host-checks `40828162023` |
+| Main line (2026-10-29) | 0140 import + 0141 USB decouple; B1 image verified | squashed from `merge-ramdisk-usb-2026-10-29`; kernel input gated by run `40822689195` on the ramdisk line; pre-merge host-checks `40828162023` |
 | USB line | 0131b probe write; EP2 host-side XACT remains open | `usb-0131b-probe-write` (merge `fb0577d`); kernel exec `06db2bb3...` |
 | CI baseline | 82-file baseline from a private content-addressed mirror; public pin is manifest root `829d7598...`; fallback `ALLOW_PUBLIC_UPSTREAM=1` | `ci/baseline_manifest.py`; `config/0140.env`, `config/0131b.env` |
-| Integration branch | ramdisk + USB combined | see `docs/en/11-ci-baseline.md` |
+| Main | ramdisk + USB combined (squashed 2026-10-29) | see `docs/en/11-ci-baseline.md` |
 
 ## Build provenance (2026-10-29)
 
 - Apple xnu: `xnu-8796.141.3` (`f625db25...`).
 - Baseline: 82 files, manifest root `829d7598...`; private mirror, public
   fallback `ALLOW_PUBLIC_UPSTREAM=1`.
-- Integration line: patchset `27894e7b...` (137 files); kernel full `3acefe47...`,
+- Main line (2026-10-29): patchset `27894e7b...` (137 files); kernel full `3acefe47...`,
   exec `721e5daf...`; kernel input gated by run `40822689195` on the ramdisk
   line; integration host-checks `40828162023`.
 - USB branch: patchset `29449e32...` (135 files); kernel full `4e945ce6...`,

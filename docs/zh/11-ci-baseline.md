@@ -23,16 +23,17 @@
 
 | 线 | patchset | 文件数 | 配置 | 内核参考 |
 |---|---|---|---|---|
-| 集成分支（`merge-ramdisk-usb-2026-10-29`） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
+| main（2026-10-29 集成） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
 | USB（`usb-0131b-probe-write`） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
 
-- 集成分支包含 0080/0084/0085、0086-0131b、0140 和 0141。
-- USB 分支保留自己的 workflow 和 patch 列表；集成分支保留
+- main 包含 0080/0084/0085、0086-0131b、0140 和 0141。
+- USB 分支保留自己的 workflow 和 patch 列表；main 保留
   `config/0131b.env` 与 `config/0131b-boot.cmdline` 作为参照。
 - 内核 run `40822689195` 在合并前的 ramdisk 线执行，exec-data 与
-  `721e5daf...` 一致；`40824668335` 对应 USB 线。集成分支本身只跑了
-  host-checks `40828162023`（未构建内核）。
-- 集成分支是合并线；pin 在 `config/0140.env` 与 `config/0131b.env`。
+  `721e5daf...` 一致；`40824668335` 对应 USB 线。合并前分支只跑了
+  host-checks `40828162023`；main squash 使用同一 patchset 门禁。
+- main 是合并线（由 `merge-ramdisk-usb-2026-10-29` 压缩）；pin 在
+  `config/0140.env` 与 `config/0131b.env`。
 - 重新构建的内核 full SHA 会在 `__TEXT` 元数据和压缩的 `__CTF` 段上与参考
   不同；所有代码/数据段与 `__LINKEDIT` 一致。exec-data 才是门禁。
 

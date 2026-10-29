@@ -8,7 +8,7 @@ observed on the author's unit. This is not an independently reproduced
 second-unit or clean-room guarantee. Detailed test guarantees are deferred.
 
 **Scope note (2026-10-29):** this guarantee covers the historical 0085/0084
-success bundle only. The 2026-10-29 integration branch uses the pins in
+success bundle only. The 2026-10-29 main line uses the pins in
 `config/0140.env` and `config/0131b.env`; see `docs/en/11-ci-baseline.md`.
 
 ## Scope

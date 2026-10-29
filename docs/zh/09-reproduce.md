@@ -29,14 +29,14 @@
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（不复制上游树）
-patchset: 27894e7b...（集成分支，137 文件）
+patchset: 27894e7b...（main，137 文件）
           USB 分支：29449e32...（135 文件），config/0131b.env
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-集成分支构建 ramdisk/0140 集，包含到 0131b 的 USB 系列。下面的 0086/0085
+main 构建 ramdisk/0140 集，包含到 0131b 的 USB 系列。下面的 0086/0085
 引用是历史记录。
 
 从 **Actions → xnu → Run workflow** 运行，或推送 `ci/`、`patches/`、
