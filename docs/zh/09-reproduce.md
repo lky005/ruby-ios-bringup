@@ -22,12 +22,13 @@
 `.github/workflows/xnu.yml` 运行 `ci/prepare-baseline.sh`。recipe 取 82 文件
 基线（私有镜像；`ALLOW_PUBLIC_UPSTREAM=1` 是外部回退）、校验清单根、加入本
 项目补丁、应用 0010/0012 小改动、统一换行；patchset 哈希不匹配就停止。镜像/
-密钥边界见 [`11-ci-baseline.md`](11-ci-baseline.md)。
+密钥边界见 [`11-ci-baseline.md`](11-ci-baseline.md)。公开回退可用
+`ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>`。
 
 ```text
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
-recipe:   ci/prepare-baseline.sh（不 vendor 上游树）
+recipe:   ci/prepare-baseline.sh（不复制上游树）
 patchset: 27894e7b...（集成分支，137 文件）
           USB 分支：29449e32...（135 文件），config/0131b.env
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
@@ -45,8 +46,8 @@ config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 
 ramdisk 线在 LK ramdisk 槽放一个 4 MB HFS+ root。内核用 `rubyrdsz=` 导入
 并挂成 `md0`；PID 1 进程内跑 `/etc/rc` 和 applet，不依赖 launchd 或
-fork/exec。镜像（`6795d9e4...`）和 root 是外部输入；完整 Unix/iOS 环境仍在
-UFS iOS root。
+fork/exec。救援镜像（`6795d9e4...`；B1 为 `49a10e49...`）和 root 是外部
+输入；完整 Unix/iOS 环境仍在 UFS iOS root。
 
 ## Host pipeline
 
@@ -135,7 +136,7 @@ fastboot reboot
 - 真实底边上滑解锁到桌面（0085）；两个 contact 会分发到 HID，edge 正常；
   用户态 pinch 未单独加日志验证。0084 合成上滑也可解锁。
 - 可能有黑壁纸、`Waiting...` widget、Messages badge。
-- 0085 内核真实触摸已通（底边上滑解锁、双指 contact 分发、edge）；按键、USB、Wi-Fi、GPU、RTC 未通。
+- 0085 内核真实触摸已通（底边上滑解锁、双指 contact 分发、edge）；按键、Wi-Fi、GPU、RTC 未通；0131b 有 USB probe，但未形成可用接口。
 - 启动前镜像 hash 固定；启动后的 live-root/ring/日志 hash 和时序易变（见
   `GUARANTEE.zh.md` 的「hash 稳定性」）。
 

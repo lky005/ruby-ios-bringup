@@ -24,15 +24,15 @@
 | `scripts/fetch-base.sh` | 拉固定基线供检查 | 只读/网络 | 可选 |
 | `scripts/verify-local.py` | 主机检查 | 只读 | 本地通过 |
 | `scripts/check-bundle.py` | 刷前核对工件 hash | 只读 | 由 config 驱动 |
-| `.github/workflows/xnu.yml` | 构建 0086 内核 | CI 构建 | recipe + patchset 哈希 |
-| `ci/prepare-baseline.sh` | 拉基线、删/加补丁、校验哈希 | 网络 + 临时写 | 本地已测 |
-| `ci/patchset_hash.py` | patchset 规范哈希（0086：89 文件） | 只读 | 与 recipe 一致 |
+| `.github/workflows/xnu.yml` | 构建当前内核 | CI 构建 | recipe + patchset 哈希 |
+| `ci/prepare-baseline.sh` | 取基线、校验清单根、加补丁、校验哈希 | 网络 + 临时写 | 本地已测 |
+| `ci/patchset_hash.py` | patchset 规范哈希（集成：137 文件；USB：135） | 只读 | 与 recipe 一致 |
 | `ci/baseline-changes.patch` | 0010/0012 小改动 | 数据 | 哈希固定 |
 | `scripts/build-payload.sh` | 从 kernel+ADT+cmdline 生成 payload | 网络 + 离线写 | 已测 |
 | `tools/image/pack_boot.py` | 确定性 128 MiB boot 镜像 | 离线写 | 已测 |
 | `tools/image/boot_layout.py` | 重建镜像 vs golden 布局对比 | 只读 | 已测 |
 | `scripts/test-pipeline.sh` | payload → pack → layout（0084 里程碑） | 临时写 | 0084 通过；0085 用 `09-reproduce` 的三条命令 |
-| `config/0086.env`、`0086-boot.cmdline` | USB P0 构建/测试状态（`rubyusb=1`） | 数据 | run/pin 检查 |
+| `config/0140.env`、`config/0131b.env` | 当前分支 pin 与 boot cmdline；0086 文件为历史 | 数据 | run/pin 检查 |
 | `config/0085.env`、`0085-boot.cmdline` | 来源记录（真实触摸） | 数据 | run/pin 检查 |
 | `config/0084.env`、`0084-boot.cmdline` | 上一里程碑（合成上滑） | 数据 | 历史 |
 
@@ -126,14 +126,15 @@ python src/ufs-probe/build_ufs_full.py --base <stock.img> \
 
 ## `ci/prepare-baseline.sh` + `.github/workflows/xnu.yml`
 
-**初衷：** 上游没有 LICENSE，不能 vendor，也不公开完整 delta。recipe 拉固定
-commit、删 topaz 补丁、加本项目补丁、应用 0010/0012 小改动、统一 LF，并在
-构建前校验 89 文件 patchset 哈希（0086）。
+**初衷：** 上游没有 LICENSE，不能把上游树复制进仓库，也不公开完整 delta。
+recipe 取内容固定的 82 文件基线（私有镜像，或 `ALLOW_PUBLIC_UPSTREAM=1`
+回退）、校验清单根、加入本项目补丁、应用 0010/0012 小改动、统一 LF，并在
+构建前校验 patchset 哈希（主线 137 文件；USB 分支 135 文件）。
 
 - **不做：** 不刷机、不打包镜像、不跟随移动分支、不公开完整上游 delta。
-- **失败模式：** topaz 补丁缺失 → 停止；0010/0012 上下文不匹配 → `git apply`
-  失败；patchset 不匹配 → 编译前停止。
-- **pin：** 见 `config/0086.env` 和 `ci/README.md`。
+- **失败模式：** 基线清单根不匹配 → 停止；0010/0012 上下文不匹配 →
+  `git apply` 失败；patchset 不匹配 → 编译前停止。
+- **pin：** 见 `config/0140.env`、`config/0131b.env` 和 `ci/README.md`。
 
 ## `scripts/build-payload.sh`
 
@@ -215,6 +216,6 @@ sh tools/twrp/twrp-guard.sh ./blkdiff ...
 | ICL NOP | 继续加内核 stub | 内核送达已 `sent=1`，墙在消费者 |
 | 内核合成上滑 | 用户态注入 | 没有 shell/日志工具；要签名/entitlement |
 | `blkdiff`/`blkpatch` | `adb pull` 16 GiB | 长连接会卡；只搬 244 MiB diff 可行 |
-| 固定基线 + recipe | vendor 上游树 | 上游无 LICENSE；patchset 哈希保证一致 |
+| 固定基线 + recipe | 把上游树复制进仓库 | 上游无 LICENSE；patchset 哈希保证一致 |
 | `boot_verify` | 刷了再看 | 128 MiB 布局错了 LK 会静默失败 |
 | 重建用 `boot_layout` | 对比镜像 SHA | 原 filler 是随机的；布局才是可复现门禁 |

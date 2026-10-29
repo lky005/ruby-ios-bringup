@@ -10,7 +10,7 @@
 
 ## Fetch the baseline
 
-The upstream tree is not vendored. Choose the fork and commit you use:
+The upstream tree is not copied into this repository. Choose the fork and commit you use:
 
 ```sh
 BASE_REPO=https://github.com/<owner>/ios-topaz.git \

@@ -25,15 +25,15 @@ because a simpler path silently failed.
 | `scripts/fetch-base.sh` | clone a pinned baseline for inspection | read-only/network | optional |
 | `scripts/verify-local.py` | host-only checks | read-only | passes locally |
 | `scripts/check-bundle.py` | verify artifact hashes before flash | read-only | config-driven |
-| `.github/workflows/xnu.yml` | build the 0086 kernel | CI build | recipe + patchset hash |
-| `ci/prepare-baseline.sh` | fetch, remove/add patches, verify hash | network + temp write | tested locally |
-| `ci/patchset_hash.py` | canonical patchset hash (0086: 89 files) | read-only | matches recipe |
+| `.github/workflows/xnu.yml` | build the current kernel | CI build | recipe + patchset hash |
+| `ci/prepare-baseline.sh` | fetch baseline, verify manifest, add patches, verify hash | network + temp write | tested locally |
+| `ci/patchset_hash.py` | canonical patchset hash (integration: 137 files; USB: 135) | read-only | matches recipe |
 | `ci/baseline-changes.patch` | small 0010/0012 change | data | hash pinned |
 | `scripts/build-payload.sh` | payload from kernel+ADT+cmdline | network + offline write | tested |
 | `tools/image/pack_boot.py` | deterministic 128 MiB boot image | offline write | tested |
 | `tools/image/boot_layout.py` | compare rebuilt vs golden layout | read-only | tested |
 | `scripts/test-pipeline.sh` | payload → pack → layout (0084 milestone) | temp writes | passes for 0084; 0085 uses the commands in `09-reproduce` |
-| `config/0086.env`, `0086-boot.cmdline` | USB P0 build/test state (`rubyusb=1`) | data | run/pin checked |
+| `config/0140.env`, `config/0131b.env` | current branch pins and boot cmdlines; 0086 files are historical | data | run/pin checked |
 | `config/0085.env`, `0085-boot.cmdline` | provenance (real touch) | data | run/pin checked |
 | `config/0084.env`, `0084-boot.cmdline` | previous milestone (synthetic swipe) | data | historical |
 
@@ -131,16 +131,19 @@ python src/ufs-probe/build_ufs_full.py --base <stock.img> \
 
 ## `ci/prepare-baseline.sh` + `.github/workflows/xnu.yml`
 
-**Why:** Upstream has no license file, so the tree is not vendored and no full
-delta is published. The recipe fetches the pinned commit, removes the topaz
-patches, adds this project's patches, applies the small 0010/0012 change,
-normalizes LF, and verifies the canonical 89-file patchset hash (0086) before building.
+**Why:** Upstream has no license file, so the tree is not copied into this
+repository and no full delta is published. The recipe takes the content-pinned
+82-file baseline (private mirror, or the `ALLOW_PUBLIC_UPSTREAM=1` fallback),
+verifies the manifest root, adds this project's patches, applies the small
+0010/0012 change, normalizes LF, and verifies the canonical patchset hash
+(137 files on the integration line; 135 on the USB branch) before building.
 
 - **Does not:** flash, pack an image, follow a moving branch tip, or publish
   the full upstream delta.
-- **Failure modes:** missing topaz patch → stop; 0010/0012 context mismatch →
-  `git apply` fails; patchset mismatch → stop before the build.
-- **Pins:** see `config/0086.env` and `ci/README.md`.
+- **Failure modes:** baseline manifest mismatch → stop; 0010/0012 context
+  mismatch → `git apply` fails; patchset mismatch → stop before the build.
+- **Pins:** `config/0140.env`, `config/0131b.env` and `ci/README.md`.
+- **Pins:** see `config/0140.env`, `config/0131b.env` and `ci/README.md`.
 
 ## `scripts/build-payload.sh`
 
@@ -227,6 +230,6 @@ sh tools/twrp/twrp-guard.sh ./blkdiff ...
 | ICL NOP | more kernel stubs | kernel delivery already `sent=1`; consumer was the wall |
 | kernel autoswipe | userland injector | no shell/log tools; signing/entitlements needed |
 | `blkdiff`/`blkpatch` | `adb pull` the 16 GiB image | long pulls stalled; moving 244 MiB of diffs is tractable |
-| pinned baseline + recipe | vendor the upstream tree | no upstream license; patchset hash keeps it honest |
+| pinned baseline + recipe | copy the upstream tree into the repository | no upstream license; patchset hash keeps it honest |
 | `boot_verify` | flash and see | a wrong 128 MiB layout fails silently in LK |
 | `boot_layout` for rebuilds | compare image SHA | the original filler was random; layout is the reproducible gate |

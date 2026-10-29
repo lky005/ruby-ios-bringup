@@ -9,7 +9,7 @@ A research bring-up, packaged as an independent, sanitized delta.
 > 82-file baseline (manifest root `829d7598...`) fetched from a private
 > content-addressed mirror; the 0001-0079 baseline is no longer a live upstream
 > dependency. The ramdisk line adds the LK-ramdisk rescue root (`md0`, PID 1
-> in-process, 8/8 PASS, USB `1209:0002` at ~35 s); the ramdisk and USB lines
+> in-process, 8/8 rescue `/etc/rc` checks, USB `1209:0002` enumeration at ~35 s); the ramdisk and USB lines
 > are combined on `merge-ramdisk-usb-2026-10-29` (not on `main`).
 > `usb-0131b-probe-write` keeps the vendor USB probe; EP2 host-side XACT
 > remains open. Real touch (0085) remains the last UI milestone; no new device
@@ -55,7 +55,7 @@ before building.
 | Userland | launchd → lsd → backboardd → SpringBoard |
 | Input | **real Goodix GT9916R** over bit-bang SPI3; unlock, two-contact HID dispatch, edge; 0084 synthetic swipe still available |
 | Storage | UFS LUN 2, read/write HFS+ on `iosroot`; 4 MB HFS rescue root via the LK ramdisk slot |
-| Latest run | 2026-10-29 rescue root (8/8 PASS) and CI baseline A/B; real-touch 0085 boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
+| Latest runs (separate) | 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
 | Open | second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
 | Not yet | keys, Wi-Fi, GPU, RTC; USB is a probe only |
 | Safety | AMFI/sandbox/code signing off; data may be lost |
@@ -204,6 +204,7 @@ XNU and remain under APSL 2.0. Upstream projects and excluded material are
 listed in [`NOTICE`](NOTICE).
 
 **Upstream note:** `ios-sweet` and `ios-topaz` had no license file at the
-pinned commits. This repository does not vendor their trees; it publishes a
-recipe and only this project's patches. No upstream permission is claimed.
+pinned commits. This repository does not contain the complete upstream trees;
+it publishes a recipe, this project's patches, and the disclosed 0010/0012
+change in `ci/baseline-changes.patch`. No upstream permission is claimed.
 See [`LEGAL.md`](LEGAL.md).

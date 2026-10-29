@@ -8,8 +8,10 @@ lawyer before public redistribution or commercial use.
 ## What this repository is
 
 A research and interoperability record for running an open-source kernel and a
-user-supplied iOS userland on a device the user owns. It is not affiliated with
-Apple, Xiaomi, MediaTek, the upstream projects, or their affiliates.
+user-supplied iOS userland on a device the user owns. It is provided for
+academic research and interoperability study only, not as a product, and comes
+with no warranty. It is not affiliated with Apple, Xiaomi, MediaTek, the
+upstream projects, or their affiliates.
 
 ## No Apple binaries
 
@@ -22,12 +24,14 @@ obtain any Apple material themselves and comply with Apple's terms.
 
 - The patches in `patches/` modify Apple's XNU and remain under APSL 2.0.
 - `ios-sweet` and `ios-topaz` had **no license file** at the pinned commits.
-  No upstream tree is vendored and no full delta is published. The recipe
-  fetches the upstream tree and applies `ci/baseline-changes.patch` (a small
-  0010/0012 change) plus this project's patches. CI fetches the baseline patch
-  set from a private content-addressed mirror; only its manifest root is
-  published. Before public redistribution, obtain permission from the upstream
-  authors or keep the repository private.
+  No upstream tree is copied into this repository and no full delta is
+  published. The recipe fetches the upstream tree and applies
+  `ci/baseline-changes.patch` (a small 0010/0012 change) plus this project's
+  patches. CI fetches the baseline patch set from a private content-addressed
+  mirror; only its manifest root and the disclosed 0010/0012 change are
+  published. No complete upstream patch file is redistributed. Before public
+  redistribution, obtain permission from the upstream authors or keep the
+  repository private.
 - TWRP and Magisk are GPL-licensed; their images are not included.
 
 ## Reverse engineering and circumvention

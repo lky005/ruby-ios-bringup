@@ -21,7 +21,7 @@
 
 ## 分支与 pin [measured]
 
-| 线 | patchset | 文件数 | 配置 | 内核 |
+| 线 | patchset | 文件数 | 配置 | 内核参考 |
 |---|---|---|---|---|
 | 集成分支（`merge-ramdisk-usb-2026-10-29`） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
 | USB（`usb-0131b-probe-write`） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
@@ -29,16 +29,18 @@
 - 集成分支包含 0080/0084/0085、0086-0131b、0140 和 0141。
 - USB 分支保留自己的 workflow 和 patch 列表；集成分支保留
   `config/0131b.env` 与 `config/0131b-boot.cmdline` 作为参照。
-- CI `40822689195`（集成分支）与 `40824668335`（USB）均成功，exec-data 与
-  参考内核一致。
-- `main` 保持 2026-10-22 状态；集成分支是用于审阅的合并线。
+- 内核 run `40822689195` 在合并前的 ramdisk 线执行，exec-data 与
+  `721e5daf...` 一致；`40824668335` 对应 USB 线。集成分支本身只跑了
+  host-checks `40828162023`（未构建内核）。
+- 集成分支是合并线；pin 在 `config/0140.env` 与 `config/0131b.env`。
 - 重新构建的内核 full SHA 会在 `__TEXT` 元数据和压缩的 `__CTF` 段上与参考
   不同；所有代码/数据段与 `__LINKEDIT` 一致。exec-data 才是门禁。
 
 ## Recipe
 
-1. 取 82 文件基线（私有镜像，或公开回退 `ALLOW_PUBLIC_UPSTREAM=1`），做
-   LF 归一化并校验清单根。
+1. 取 82 文件基线（私有镜像，或公开回退
+   `ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>`），做 LF
+   归一化并校验清单根。
 2. 加入本分支补丁，应用 0010/0012 改动，归一化并校验 patchset 哈希。
 3. 用 `blacktop/darwin-xnu-build` 在 `macos-14` + Xcode 15.0.1 上构建。
 4. 校验内核 exec-data 哈希。
@@ -47,6 +49,8 @@
 
 ```sh
 BASELINE_DIR=<baseline> sh ci/prepare-baseline.sh <dest>
+# 公开回退
+ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
@@ -59,6 +63,6 @@ USB 分支使用 `--ci-config config/0131b.env`。
 
 - 私有镜像 URL、deploy key 和基线代码不公开。
 - Apple 固件、iOS root、共享缓存和 boot 镜像不公开。
-- 上游项目在 pin 上没有 LICENSE；镜像保持私有，本仓库只作为 recipe，不做
-  再分发。
+- 上游项目在 pin 上没有 LICENSE；镜像保持私有。完整基线不再分发；只发布
+  清单根与已披露的 `ci/baseline-changes.patch`（0010/0012 改动）。
 - 外部用户可以使用公开上游回退；清单根校验的是同一份内容。

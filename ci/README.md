@@ -1,7 +1,7 @@
 # Build provenance
 
-`.github/workflows/xnu.yml` builds the ruby kernel without vendoring the
-upstream tree. The baseline is a content-addressed 82-file set (sweet
+`.github/workflows/xnu.yml` builds the ruby kernel without copying the
+upstream tree into this repository. The baseline is a content-addressed 82-file set (sweet
 0001-0079); this project's patches are the delta.
 
 ## Baseline source
@@ -108,6 +108,8 @@ the iOS root and device-side boot images are not included.
 ## History and licensing
 
 The public history must not contain `ci/ruby-baseline.diff` or any full
-upstream delta. The baseline is fetched, not redistributed. The upstream
-projects had no license file at the pinned commits; obtain permission or keep
-the recipe private before public redistribution. See `LEGAL.md`.
+upstream delta. The full baseline is not redistributed; only the manifest root
+and the disclosed 0010/0012 change (`ci/baseline-changes.patch`) are published.
+The upstream projects had no license file at the pinned commits; obtain
+permission or keep the recipe private before public redistribution. See
+`LEGAL.md`.

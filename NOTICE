@@ -8,12 +8,13 @@ XNU
 
 ios-sweet (dipa-studio)
   The original iOS-on-Sweet project. No license file was present at the
-  referenced commit; upstream code is not vendored in this repository.
-  Patches 0001-0079 are not included.
+  referenced commit; upstream code is not copied into this repository.
+  The complete 0001-0079 patch files are not included; the 0010/0012 change is
+  published separately in ci/baseline-changes.patch.
 
 ios-topaz (MakrSas)
   A fork of ios-sweet targeting the Redmi Note 12 4G. No license file was
-  present at the referenced commit; upstream code is not vendored here.
+  present at the referenced commit; upstream code is not copied into this repository.
 
 blacktop/darwin-xnu-build
   MIT-licensed XNU build harness used by the upstream CI.
@@ -32,8 +33,9 @@ project. All trademarks belong to their respective owners.
 
 Redistribution note: ci/baseline-changes.patch contains a small modification to
 two upstream patch files (0010/0012); the upstream tree is fetched by the
-recipe, not vendored. CI fetches the 82-file baseline patch set from a private
-content-addressed mirror; only its manifest root is published. No baseline code
-is redistributed in this repository. The upstream projects had no license file
+recipe, not copied into this repository. CI fetches the 82-file baseline patch
+set from a private content-addressed mirror; only its manifest root and the
+disclosed 0010/0012 change are published. No complete upstream patch file is
+redistributed in this repository. The upstream projects had no license file
 at the pinned commits. Obtain permission before public redistribution or keep
 the repository private. See LEGAL.md.

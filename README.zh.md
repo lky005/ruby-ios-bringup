@@ -8,7 +8,7 @@
 > **状态 2026-10-29：** 内核 CI 改为从内容固定的 82 文件基线（清单根
 > `829d7598...`）拼装，基线由私有内容寻址镜像提供，0001-0079 不再是活的
 > 上游依赖。ramdisk 线增加 LK ramdisk 救援根（`md0`，PID 1 进程内运行，
-> 8/8 PASS，USB `1209:0002` 约 35 秒）；ramdisk 与 USB 两条线合并在
+> 8/8 救援 `/etc/rc` 自检，USB `1209:0002` 枚举约 35 秒）；ramdisk 与 USB 两条线合并在
 > `merge-ramdisk-usb-2026-10-29` 上（不在 `main`）。
 > `usb-0131b-probe-write` 保留厂商
 > USB 探针；EP2 主机侧 XACT 仍未闭环。真实触摸（0085）仍是最后一个 UI
@@ -47,7 +47,7 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | 用户态 | launchd → lsd → backboardd → SpringBoard |
 | 输入 | **真实 Goodix GT9916R**，bit-bang SPI3；解锁、双指 contact 上报、edge；0084 合成上滑仍保留 |
 | 存储 | UFS LUN 2，`iosroot` 上读写 HFS+；4 MB HFS 救援根走 LK ramdisk 槽 |
-| 最新 run | 2026-10-29 救援根（8/8 PASS）与 CI 基线 A/B；真实触摸 0085 启动（harness 与 main-CI 重建）；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
+| 最新 runs（分开记录） | 2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动（harness 与 main-CI 重建）；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
 | 未闭环 | 第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
 | 未通 | 按键、Wi-Fi、GPU、RTC；USB 仅探针 |
 | 安全 | AMFI/sandbox/签名关闭；可能丢数据 |
@@ -186,5 +186,6 @@ hash 对命名文件是固定的；启动后的 live-root/ring/日志 hash 易�
 [`NOTICE`](NOTICE)。
 
 **上游声明：** `ios-sweet` 和 `ios-topaz` 在固定 commit 上**没有 LICENSE
-文件**。本仓库不 vendor 上游树，只发布 recipe 和本项目补丁；不声称已获得
-上游许可。见 [`LEGAL.zh.md`](LEGAL.zh.md)。
+文件**。本仓库不包含完整上游树；发布 recipe、本项目补丁，以及已披露的
+`ci/baseline-changes.patch`（0010/0012 改动）；不声称已获得上游许可。
+见 [`LEGAL.zh.md`](LEGAL.zh.md)。

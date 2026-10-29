@@ -2,9 +2,10 @@
 
 **English** · [中文](../zh/04-display.md)
 
-Display is solved for this bring-up: the iOS surface reaches the panel and the
-UI refreshes. The remaining black wallpaper is a PosterBoard problem, not a
-display problem.
+The CPU-copy display path is proven for this bring-up: the iOS surface reaches
+the panel and the UI refreshes. There is no GPU driver; this is a measured
+framebuffer copy, not a general display stack. The remaining black wallpaper is
+attributed to PosterBoard `[inferred]`, not to the display path.
 
 ## Path
 

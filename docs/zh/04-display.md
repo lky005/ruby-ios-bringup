@@ -2,8 +2,9 @@
 
 [English](../en/04-display.md) · **中文**
 
-对这个 bring-up 来说显示已通：iOS surface 能上屏，UI 会刷新。剩下的黑壁纸
-是 PosterBoard 的问题，不是显示链路。
+对这个 bring-up 来说，CPU 拷贝显示链路已验证：iOS surface 能上屏，UI 会
+刷新。没有 GPU 驱动；这是实测的 framebuffer 拷贝，不是通用显示栈。剩下的
+黑壁纸归因于 PosterBoard `[推断]`，不是显示链路。
 
 ## 链路
 

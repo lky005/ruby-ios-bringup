@@ -1,7 +1,7 @@
 # Synthetic touch autoswipe
 
 The authoritative implementation is `patches/0084-ruby-autoswipe.patch`. It is
-a diff against the upstream `SweetHID.cpp`, not a vendored copy of that file.
+a diff against the upstream `SweetHID.cpp`, not a copied source file.
 
 It adds a boot-arg-gated `IOTimerEventSource` to the existing
 `SweetHIDTouch` service. When armed, the timer calls the same

@@ -3,8 +3,8 @@
 **English** · [中文](../zh/reproducibility.md)
 
 This repository publishes the success path under **Tier B**: own patches,
-tools and documentation; the upstream tree is fetched by a recipe, not
-vendored; no full delta and no Apple/Android binaries. The guarantee is
+tools and documentation; the upstream tree is fetched by a recipe, not copied
+into this repository; no full delta and no Apple/Android binaries. The guarantee is
 documented and theoretical, not an independently reproduced device guarantee.
 
 **Baseline source (2026-10-29):** CI fetches the 82 files of 0001-0079 from a
@@ -53,7 +53,7 @@ The integration branch (`merge-ramdisk-usb-2026-10-29`) builds the ramdisk set
 | Fixed topaz deletion list | patch leftovers on the public fallback |
 | Fail-closed recipe | missing files or changed 0010/0012 context |
 | LF normalization | Windows/macOS line-ending drift |
-| `PATCHSET_SHA256=16b8ddea...` | any patchset content change |
+| `PATCHSET_SHA256` (per branch) | any patchset content change; integration `27894e7b...`, USB `29449e32...` |
 | `ci/baseline-changes.patch` SHA | baseline change drift |
 | `check-bundle.py` | wrong kernel/boot/root/ICL/cmdline |
 | Pinned Actions by SHA | CI supply-chain drift |

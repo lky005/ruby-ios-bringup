@@ -22,7 +22,7 @@ project's delta.
 
 ## Branches and pins [measured]
 
-| Line | Patchset | Files | Config | Kernel |
+| Line | Patchset | Files | Config | Kernel reference |
 |---|---|---|---|---|
 | integration (`merge-ramdisk-usb-2026-10-29`) | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`, exec `721e5daf...` |
 | USB (`usb-0131b-probe-write`) | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`, exec `06db2bb3...` |
@@ -30,10 +30,12 @@ project's delta.
 - The integration line includes 0080/0084/0085, 0086-0131b, 0140 and 0141.
 - The USB branch keeps its own workflow and patch list. The integration branch
   carries `config/0131b.env` and `config/0131b-boot.cmdline` as its reference.
-- CI runs `40822689195` (integration) and `40824668335` (USB) both succeeded and
-  matched the reference exec-data hashes.
-- `main` stays at the 2026-10-22 state; the integration branch is the combined
-  line for review.
+- Kernel run `40822689195` was executed on the ramdisk line before the merge
+  and matched exec-data `721e5daf...`; `40824668335` did the same for the USB
+  line. The integration branch itself was checked by host-checks `40828162023`
+  (no kernel build).
+- The integration branch is the combined line; the pins are
+  `config/0140.env` and `config/0131b.env`.
 - A rebuilt kernel's full SHA differs from the reference in `__TEXT` metadata
   and the compressed `__CTF` segment. Every code/data segment and `__LINKEDIT`
   is identical; the exec-data hash is the gate.
@@ -41,7 +43,8 @@ project's delta.
 ## Recipe
 
 1. Fetch the 82-file baseline (private mirror, or the public fallback
-   `ALLOW_PUBLIC_UPSTREAM=1`), normalize to LF and verify the manifest root.
+   `ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>`), normalize to LF
+   and verify the manifest root.
 2. Add the branch's project patches, apply the 0010/0012 change, normalize and
    verify the canonical patchset hash.
 3. Build with `blacktop/darwin-xnu-build` on `macos-14` with Xcode 15.0.1.
@@ -51,6 +54,8 @@ project's delta.
 
 ```sh
 BASELINE_DIR=<baseline> sh ci/prepare-baseline.sh <dest>
+# public fallback
+ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
@@ -65,6 +70,8 @@ The USB branch passes `--ci-config config/0131b.env`.
 - Apple firmware, the iOS root, shared caches and boot images are not
   published.
 - The upstream projects had no license file at the pinned commits; keep the
-  mirror private and treat this repository as a recipe, not a redistribution.
+  mirror private. The full baseline is not redistributed; only the manifest
+  root and the disclosed 0010/0012 change in `ci/baseline-changes.patch` are
+  published.
 - External users can use the public upstream fallback; the manifest root
   verifies the same content.

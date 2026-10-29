@@ -3,7 +3,7 @@
 [English](../en/reproducibility.md) · **中文**
 
 仓库按 **Tier B** 发布成功路径：只放自己的补丁、工具和文档；上游树由 recipe
-拉取，不 vendor；不公开完整 delta，也不放 Apple/Android 二进制。保证是文档级、
+拉取，不复制进仓库；不公开完整 delta，也不放 Apple/Android 二进制。保证是文档级、
 理论级的，不是已经独立复现的设备保证。
 
 **2026-10-29 基线来源：** 0001–0079 的 82 个文件由 CI 从私有内容寻址镜像拉取，
@@ -48,7 +48,7 @@ deploy key 存在 Actions secrets（`BASELINE_REPO`/`BASELINE_REF`/`BASELINE_SSH
 | 固定 topaz 删除清单 | 公开回退路径的补丁残留 |
 | recipe 失败即停 | 文件缺失或 0010/0012 上下文变化 |
 | LF 归一化 | Windows/macOS 换行漂移 |
-| `PATCHSET_SHA256=16b8ddea...` | patchset 内容变化 |
+| `PATCHSET_SHA256`（按分支） | patchset 内容变化；集成 `27894e7b…`，USB `29449e32…` |
 | `ci/baseline-changes.patch` SHA | 基线改动漂移 |
 | `check-bundle.py` | kernel/boot/root/ICL/cmdline 不对 |
 | Actions 按 SHA 固定 | CI 供应链漂移 |

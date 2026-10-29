@@ -3,7 +3,7 @@
 **English** · [中文](ACKNOWLEDGEMENTS.zh.md)
 
 This project builds on open-source and community work. No upstream tree is
-vendored; the pinned baseline is fetched at build time.
+copied into this repository; the pinned baseline is fetched at build time.
 
 ## Upstream projects
 

@@ -42,10 +42,10 @@ after each verification pass.
 | Baseline manifest | 82 files, root `829d7598...`, manifest matches |
 | Patchset (integration) | `27894e7b...` (137 files) |
 | Patchset (USB branch) | `29449e32...` (135 files) |
-| Kernel exec-data (main) | `721e5daf...` (matches the booted 0140/B1 reference) |
+| Kernel exec-data (integration/ramdisk line) | `721e5daf...` (matches the booted 0140/B1 reference) |
 | Kernel exec-data (USB) | `06db2bb3...` (matches the 0131b control) |
 | Full-file A/B | differs only in `__TEXT` metadata and `__CTF`; all code/data segments and `__LINKEDIT` identical |
-| CI runs | `40822689195` (main), `40824668335` (USB) success |
+| CI runs | `40822689195` (ramdisk line), `40824668335` (USB line) success; integration host-checks `40828162023` |
 | Host checks | `scripts/verify-local.py --ci-config config/0140.env` and `config/0131b.env` pass |
 | Sanitization | private mirror URL/key absent from public docs; build logs scanned, 0 hits |
 | Device | no flash for this change |

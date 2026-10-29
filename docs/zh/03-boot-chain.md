@@ -62,7 +62,7 @@ stock 偏移。
 4. 保持 DTB/ramdisk/footer 位置。
 
 早期打包器在 `src/bringup/`；0085/0084 镜像用了上游 loader + ADT 构建器，
-仓库没有 vendor 这部分。
+仓库没有把这一部分复制进来。
 
 ## FEXTRA 细节
 

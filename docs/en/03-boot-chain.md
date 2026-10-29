@@ -64,7 +64,7 @@ Success: the panel turns red; LK expdb shows `jump to K64`.
 4. Keep DTB/ramdisk/footer positions.
 
 The early packers are in `src/bringup/`; the 0085/0084 images used the upstream
-loader + ADT builder, which is not vendored here.
+loader + ADT builder, which is not included as source here.
 
 ## FEXTRA detail
 
