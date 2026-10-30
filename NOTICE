@@ -18,6 +18,10 @@ ios-topaz (MakrSas)
 
 blacktop/darwin-xnu-build
   MIT-licensed XNU build harness used by the upstream CI.
+  The workflow structure of .github/workflows/xnu.yml (macOS runner, Xcode
+  pin, harness invocation and kernel artifact handling) is adapted from this
+  project under the MIT license; the file also contains project-specific
+  additions.
 
 TWRP (Team Win Recovery Project)
   GPLv2. No TWRP image is included.
