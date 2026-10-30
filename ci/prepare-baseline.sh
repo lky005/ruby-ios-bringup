@@ -130,6 +130,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0141-ruby-usb-decouple.patch" \
     "$ROOT/patches/0142-ruby-ep2-mps512.patch" \
     "$ROOT/patches/0143-ruby-ep2-frame511-rearm-drain.patch" \
+    "$ROOT/patches/0150-ruby-phy-dump.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

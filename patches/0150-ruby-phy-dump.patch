@@ -1,0 +1,63 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index d64cb47..9eeff61 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -67,6 +67,10 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define PHY_U2_ACR4  0x0320
+ #define PHY_U2_ACR5  0x0314
+ #define PHY_U2_ACR6  0x0318
++#define PHY_U2_ACR1  0x0304
++#define PHY_U2_ACR2  0x0308
++#define PHY_U2_DCR0  0x0360
++#define PHY_U2_DCR1  0x0364
+ #define PHY_U2_DTM0  0x0368
+ #define PHY_U2_DTM1  0x036c
+ #define PHY_U2_DMON1 0x0374
+@@ -3202,6 +3206,10 @@ ruby_dump_regs(uint32_t stage, vm_offset_t ippc, vm_offset_t mac,
+             ruby_rd32(phy, PHY_U2_DTM1), ruby_rd32(phy, PHY_U2_ACR3),
+             ruby_rd32(phy, PHY_U2_ACR4), ruby_rd32(phy, PHY_U2_ACR5),
+             ruby_rd32(phy, PHY_U2_ACR6));
++        printf("RUBY DUMP stage=%u PHY acr0=%08x acr1=%08x acr2=%08x dcr0=%08x dcr1=%08x\n",
++            stage, ruby_rd32(phy, PHY_U2_ACR0),
++            ruby_rd32(phy, PHY_U2_ACR1), ruby_rd32(phy, PHY_U2_ACR2),
++            ruby_rd32(phy, PHY_U2_DCR0), ruby_rd32(phy, PHY_U2_DCR1));
+         printf("RUBY DUMP stage=%u U3 phya1=%08x chipd=%08x dmon1=%08x\n",
+             stage, ruby_rd32(phy, PHY_U3_PHYA),
+             ruby_rd32(phy, PHY_U3_CHIP), ruby_rd32(phy, PHY_U2_DMON1));
+@@ -3279,6 +3287,7 @@ ruby_usb_probe(void)
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
++    int sts;
+ 
+     PE_parse_boot_argn("rubyusb", &enable, sizeof(enable));
+     PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
+@@ -3338,11 +3347,16 @@ ruby_usb_probe(void)
+     delay(200);
+     ruby_wr32(ippc, 0x98, rst & ~DEV_SW_RST);
+ 
+-    if (ruby_usb_wait_sts(ippc, &s1, &s2) != 0)
++    sts = ruby_usb_wait_sts(ippc, &s1, &s2);
++    if (sts != 0)
+         printf("RUBY USB: IPPC sts timeout (s1=0x%08x s2=0x%08x)\n", s1, s2);
+     else
+         printf("RUBY USB: IPPC ready (s1=0x%08x s2=0x%08x)\n", s1, s2);
+ 
++    /* 0150 diagnostics: LK PHY state after IPPC ready, before our writes. */
++    if (sts == 0 && ruby_dump_on())
++        ruby_dump_regs(1, ippc, mac, phy);
++
+     ruby_usb_u3_phy_on(phy);
+     ruby_usb_u2_phy_on(phy);
+     delay(1000);
+@@ -3356,6 +3370,10 @@ ruby_usb_probe(void)
+     v = (v | ACR3_PUPD_BIST_EN) & ~ACR3_EN_PU_DP;
+     ruby_wr32(phy, PHY_U2_ACR3, v);
+ 
++    /* 0150 diagnostics: post-init PHY state. */
++    if (ruby_dump_on())
++        ruby_dump_regs(2, ippc, mac, phy);
++
+     /* PS5169 enable on GPIO121. */
+     v = ruby_rd32(gpio, GPIO_PINMUX_121);
+     v &= ~(0xfu << 4);
