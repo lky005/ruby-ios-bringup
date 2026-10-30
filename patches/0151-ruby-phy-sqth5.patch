@@ -1,0 +1,14 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 9eeff61..ea3f3f1 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -415,7 +415,8 @@ ruby_usb_u2_phy_on(vm_offset_t phy)
+ 
+     v = ruby_rd32(phy, PHY_U2_ACR6);
+     v &= ~(ACR6_BC11_SW_EN | 0xfu);
+-    v |= 2u;                                     /* SQTH = 2 */
++    v |= 5u;                                     /* SQTH = 5 (board HQA) */
++    v |= (1u << 28);                             /* board HQA: ACR6 bit28 */
+     ruby_wr32(phy, PHY_U2_ACR6, v);
+ 
+     /* u2_phy_instance_power_on. */

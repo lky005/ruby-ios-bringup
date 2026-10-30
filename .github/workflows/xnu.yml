@@ -44,7 +44,7 @@ env:
   # BASELINE_SSH_KEY. The public pin is the manifest root, not a URL.
   BASELINE_MANIFEST_SHA256: 829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910
   BASELINE_FILES: "82"
-  PATCHSET_SHA256: 29f4bfaae968c05af2cc560a13cf283eadaea277603a7d273aadf78d53d4cc19
+  PATCHSET_SHA256: 1b9e1634bb82f6b05259f7fb1c723bdf4a01c347515383901e94ef08e6b46a3c
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
