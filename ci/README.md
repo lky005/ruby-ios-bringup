@@ -33,7 +33,7 @@ patches, and verifies the same manifest root.
    framebuffer addresses.
 4. Normalize every `.patch`/`.sh` to LF.
 5. Compute the canonical patchset hash over the sorted per-file SHA256 values
-   and refuse to build unless it equals `d0c5ab5e...` (138 files).
+   and refuse to build unless it equals `f47f4c19...` (139 files).
 6. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
    build on `macos-14` with Xcode 15.0.1.
 7. Hash the built Mach-O with `ci/kernel_hash.py`. When
