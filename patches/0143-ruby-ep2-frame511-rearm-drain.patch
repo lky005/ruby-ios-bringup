@@ -1,0 +1,39 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1146,9 +1146,16 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define RUBY_GPD_STRIDE 64
+ #define RUBY_GPD_RING_SZ (RUBY_GPD_NUM * RUBY_GPD_STRIDE)
+ #define RUBY_EP2_MAX_INFLIGHT (RUBY_GPD_NUM - 1u)
+-#define RUBY_LOG_CHUNK  64
++#define RUBY_LOG_CHUNK  512
+ #define RUBY_HDR_LEN    16
+-#define RUBY_EP2_FRAME  63
++/*
++ * 0143: one log frame per GPD, sized for the 0142 512-byte MPS.  The
++ * frame is 16 B header + up to 495 B text = 511 bytes, one below
++ * wMaxPacketSize so every GPD still ends on a short packet (the QMU TX
++ * done requirement, 0108).  Slots are 512 B apart so no slot crosses a
++ * 16 KB page (the mapping check) or a cache-line boundary.
++ */
++#define RUBY_EP2_FRAME  511
+ #define RUBY_LOG_TEXT   (RUBY_EP2_FRAME - RUBY_HDR_LEN)
+ 
+ static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+@@ -2564,6 +2571,16 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+     ruby_ep2_host_seen = 0;
+     ruby_wr32(mac, TQCSR2_OFF, QMU_Q_STOP);   /* stop the TX QMU */
+ 
++    /*
++     * 0143: the ring may still hold GPDs the QMU owns (HWO=1) from
++     * before the reset.  Zeroing enq/deq/inflight without clearing the
++     * hardware ring desyncs the bookkeeping and re-delivers stale
++     * frames after the next start (measured on 0142: inflight=15 vs
++     * hwo=63).  Reset the ring while the QMU is stopped so the counters
++     * match the hardware.
++     */
++    ruby_ep2_ring_reset(mac);
++
+     ruby_rx_ready = 0;
+     ruby_rx_deq = 0;
+     ruby_wr32(mac, RQCSR2_OFF, QMU_Q_STOP);   /* stop the RX QMU */

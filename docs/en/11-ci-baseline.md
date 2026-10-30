@@ -24,19 +24,24 @@ project's delta.
 
 | Line | Patchset | Files | Config | Kernel reference |
 |---|---|---|---|---|
+| main (2026-10-30 integration) | `f47f4c19...` | 139 | `config/0143.env` | full `d2eae74d...`, exec `6fa65088...` (CI `41022192026`) |
 | main (2026-10-29 integration) | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`, exec `721e5daf...` |
-| USB (`usb-0131b-probe-write`) | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`, exec `06db2bb3...` |
+| USB 0142 / 0143 branches | `d0c5ab5e...` / `f47f4c19...` | 138 / 139 | `config/0142.env`, `config/0143.env` | CI `41015790742` / `41022192026` |
+| USB (`usb-0131b-probe-write`, historical) | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`, exec `06db2bb3...` |
 
-- Main includes 0080/0084/0085, 0086-0131b, 0140 and 0141.
-- The USB branch keeps its own workflow and patch list. Main carries
-  `config/0131b.env` and `config/0131b-boot.cmdline` as its reference.
-- Kernel run `40822689195` was executed on the ramdisk line before the merge
-  and matched exec-data `721e5daf...`; `40824668335` did the same for the USB
-  line. The pre-merge branch was checked by host-checks `40828162023`; the
-  main squash uses the same patchset gate.
-- Main is the combined line (squashed from
-  `merge-ramdisk-usb-2026-10-29`); the pins are `config/0140.env` and
-  `config/0131b.env`.
+- Main includes 0080/0084/0085, 0086-0131b, 0140/0141, 0142 and 0143.
+- 0142 widens the EP2 IN bulk MPS to 512; 0143 grows each log frame to
+  511 bytes (16 B header + up to 495 B text) and resets the TX ring on
+  rearm after stopping the QMU. The host-side first-session XACT remains
+  open in 0143.
+- The 0131b branch keeps its own workflow and patch list; main carries
+  `config/0131b.env` and `config/0131b-boot.cmdline` as history.
+- Kernel run `41022192026` built 0143 and matched exec-data `6fa65088...`;
+  `41015790742` did the same for 0142 (`99d98d80...`). The 2026-10-29
+  runs `40822689195` / `40824668335` remain the historical main/USB
+  references.
+- The 2026-10-30 row is the 0143 merge candidate; `main` still points at the
+  2026-10-29 row until the squashed commit is merged.
 - A rebuilt kernel's full SHA differs from the reference in `__TEXT` metadata
   and the compressed `__CTF` segment. Every code/data segment and `__LINKEDIT`
   is identical; the exec-data hash is the gate.

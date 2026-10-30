@@ -27,13 +27,13 @@ patches, and verifies the same manifest root.
    `BASELINE_DIR` (or the public fallback), normalize to LF, and verify
    `ci/baseline_manifest.py` against the manifest root and file count.
 2. Add this project's patches: 0080 UFS, 0084 autoswipe, 0085 Goodix SPI,
-   0086-0131b USB, 0140 ramdisk import, 0141 USB decouple, and the
-   historical 0081-0083.
+   0086-0131b USB, 0140 ramdisk import, 0141 USB decouple, 0142 EP2 MPS 512,
+   and the historical 0081-0083.
 3. Apply `ci/baseline-changes.patch`, the small 0010/0012 change for the ruby
    framebuffer addresses.
 4. Normalize every `.patch`/`.sh` to LF.
 5. Compute the canonical patchset hash over the sorted per-file SHA256 values
-   and refuse to build unless it equals `27894e7b...` (137 files).
+   and refuse to build unless it equals `f47f4c19...` (139 files).
 6. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
    build on `macos-14` with Xcode 15.0.1.
 7. Hash the built Mach-O with `ci/kernel_hash.py`. When
@@ -55,6 +55,17 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
   `config/0131b.env`. It keeps its own branch workflow and patch list; the
   same 82-file baseline and mirror credentials apply. The 0131b control
   kernel is recorded in that config.
+- `usb-0142-mps512`: patchset `d0c5ab5e...` (138 files), config
+  `config/0142.env`. EP2 IN bulk MPS 64 -> 512 (descriptor bytes 4/5 `0, 2`
+  and `TX2CSR0` MAXPKTSZ; the 512 B FIFO segment already covers it), frames
+  stay 63 bytes, the OUT endpoint stays 64. Built with the 0142 cmdline
+  (`rubyusb=1 rubyusb_window_ms=30000 rubyprobe=1`).
+- `usb-0143-frame511`: patchset `f47f4c19...` (139 files), config
+  `config/0143.env`. Builds on 0142: one log frame per GPD, 16 B header +
+  up to 495 B text = 511 bytes (one byte below the 512 B MPS, so each GPD
+  ends on a short packet); the reset/rearm path resets the TX ring after
+  stopping the QMU. CI `41022192026`; kernel full `d2eae74d...`, exec-data
+  `6fa65088...`. The host-side first-session XACT remains open.
 
 Main keeps `config/0131b.env` and `config/0131b-boot.cmdline` as the USB
 branch reference. The kernel built on it is the ramdisk set, which contains

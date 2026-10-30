@@ -27,13 +27,14 @@ because a simpler path silently failed.
 | `scripts/check-bundle.py` | verify artifact hashes before flash | read-only | config-driven |
 | `.github/workflows/xnu.yml` | build the current kernel | CI build | recipe + patchset hash |
 | `ci/prepare-baseline.sh` | fetch baseline, verify manifest, add patches, verify hash | network + temp write | tested locally |
-| `ci/patchset_hash.py` | canonical patchset hash (integration: 137 files; USB: 135) | read-only | matches recipe |
+| `ci/patchset_hash.py` | canonical patchset hash (current line: 139 files; historical 137/135) | read-only | matches recipe |
 | `ci/baseline-changes.patch` | small 0010/0012 change | data | hash pinned |
 | `scripts/build-payload.sh` | payload from kernel+ADT+cmdline | network + offline write | tested |
 | `tools/image/pack_boot.py` | deterministic 128 MiB boot image | offline write | tested |
 | `tools/image/boot_layout.py` | compare rebuilt vs golden layout | read-only | tested |
 | `scripts/test-pipeline.sh` | payload → pack → layout (0084 milestone) | temp writes | passes for 0084; 0085 uses the commands in `09-reproduce` |
-| `config/0140.env`, `config/0131b.env` | current branch pins and boot cmdlines; 0086 files are historical | data | run/pin checked |
+| `tools/host/ruby_usb_host.py` | USB host session manager (`status`/`cmd`/`watch`); EP0 read-only, one EP2 OUT command line, optional one-shot `pnputil` restart | host-only; a wedged device can drop | 0143/0150/0151 runs; see [`12-usb-host`](12-usb-host.md) |
+| `config/0140.env`, `config/0131b.env`, `config/0142.env`, `config/0143.env` | branch pins and boot cmdlines; 0086 files are historical | data | run/pin checked |
 | `config/0085.env`, `0085-boot.cmdline` | provenance (real touch) | data | run/pin checked |
 | `config/0084.env`, `0084-boot.cmdline` | previous milestone (synthetic swipe) | data | historical |
 
@@ -221,6 +222,27 @@ host; refuse raw-block tools outside TWRP.
 ```sh
 python scripts/verify-local.py
 sh tools/twrp/twrp-guard.sh ./blkdiff ...
+```
+
+## `tools/host/ruby_usb_host.py`
+
+**Why:** the kernel log/command channel needs a host reader that survives
+EP0 EPIPE and does not reset the pipe. It keeps paced reads, a one-shot
+health snapshot and an abort snapshot; EP0 is read-only.
+
+- **Inputs:** `1209:0002` over WinUSB/libusb; `status`, `cmd`, `watch`.
+- **Output:** session log; frame sequence summary; 0x27/0x23/0x2B and key
+  queue registers.
+- **Does not:** call clear_halt, write MMIO (0x2D), or retry in a tight
+  loop.
+- **Risk:** the optional `--pcycle` one-shot pnputil restart can drop a
+  wedged device; run one instance at a time.
+- **Example:**
+
+```sh
+python tools/host/ruby_usb_host.py status
+python tools/host/ruby_usb_host.py cmd "help" --drain-secs 3
+python tools/host/ruby_usb_host.py watch --pace-ms 5 --log session.log
 ```
 
 ## Why not the alternatives

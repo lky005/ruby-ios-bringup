@@ -48,7 +48,7 @@ jobs:
         run: python3 ci/baseline_manifest.py --self-test
 
       - name: Host verification
-        run: python3 scripts/verify-local.py --ci-config config/0140.env
+        run: python3 scripts/verify-local.py --ci-config config/0143.env
 
       - name: Build TWRP tools
         run: |

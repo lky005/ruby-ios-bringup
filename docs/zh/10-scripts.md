@@ -26,13 +26,14 @@
 | `scripts/check-bundle.py` | 刷前核对工件 hash | 只读 | 由 config 驱动 |
 | `.github/workflows/xnu.yml` | 构建当前内核 | CI 构建 | recipe + patchset 哈希 |
 | `ci/prepare-baseline.sh` | 取基线、校验清单根、加补丁、校验哈希 | 网络 + 临时写 | 本地已测 |
-| `ci/patchset_hash.py` | patchset 规范哈希（集成：137 文件；USB：135） | 只读 | 与 recipe 一致 |
+| `ci/patchset_hash.py` | patchset 规范哈希（当前线：139 文件；历史 137/135） | 只读 | 与 recipe 一致 |
 | `ci/baseline-changes.patch` | 0010/0012 小改动 | 数据 | 哈希固定 |
 | `scripts/build-payload.sh` | 从 kernel+ADT+cmdline 生成 payload | 网络 + 离线写 | 已测 |
 | `tools/image/pack_boot.py` | 确定性 128 MiB boot 镜像 | 离线写 | 已测 |
 | `tools/image/boot_layout.py` | 重建镜像 vs golden 布局对比 | 只读 | 已测 |
 | `scripts/test-pipeline.sh` | payload → pack → layout（0084 里程碑） | 临时写 | 0084 通过；0085 用 `09-reproduce` 的三条命令 |
-| `config/0140.env`、`config/0131b.env` | 当前分支 pin 与 boot cmdline；0086 文件为历史 | 数据 | run/pin 检查 |
+| `tools/host/ruby_usb_host.py` | USB 上位机会话管理（`status`/`cmd`/`watch`）；EP0 只读，一条 EP2 OUT 命令，可选单次 `pnputil` 重启 | 仅主机；僵死设备可能掉链 | 0143/0150/0151 实测；见 [`12-usb-host`](12-usb-host.md) |
+| `config/0140.env`、`config/0131b.env`、`config/0142.env`、`config/0143.env` | 分支 pin 与 boot cmdline；0086 文件为历史 | 数据 | run/pin 检查 |
 | `config/0085.env`、`0085-boot.cmdline` | 来源记录（真实触摸） | 数据 | run/pin 检查 |
 | `config/0084.env`、`0084-boot.cmdline` | 上一里程碑（合成上滑） | 数据 | 历史 |
 
@@ -207,6 +208,24 @@ python scripts/check-bundle.py --kernel <kernel> --boot <boot.img> \
 ```sh
 python scripts/verify-local.py
 sh tools/twrp/twrp-guard.sh ./blkdiff ...
+```
+
+## `tools/host/ruby_usb_host.py`
+
+**初衷：** 内核日志/命令通道需要一个能扛 EP0 EPIPE、又不会去 reset 管道的
+上位机读取器。它保留 paced 读、一次性健康快照和 abort 快照；EP0 只读。
+
+- **输入：** `1209:0002`（WinUSB/libusb）；`status`、`cmd`、`watch`。
+- **输出：** 会话日志；帧序号汇总；0x27/0x23/0x2B 与关键队列寄存器。
+- **不做：** 不 clear_halt、不写 MMIO（0x2D）、不紧循环重试。
+- **风险：** 可选的 `--pcycle` 单次 pnputil 重启可能把僵死设备弄掉；
+  同一时间只跑一个实例。
+- **示例：**
+
+```sh
+python tools/host/ruby_usb_host.py status
+python tools/host/ruby_usb_host.py cmd "help" --drain-secs 3
+python tools/host/ruby_usb_host.py watch --pace-ms 5 --log session.log
 ```
 
 ## 为什么不是别的方案

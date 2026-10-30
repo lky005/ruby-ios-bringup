@@ -30,6 +30,7 @@ personal paths, device identifiers or Apple binaries here.
 | [`09-reproduce`](09-reproduce.md) | build, pack, flash, verify |
 | [`10-scripts`](10-scripts.md) | per-script purpose and boundaries |
 | [`11-ci-baseline`](11-ci-baseline.md) | content-pinned baseline, branch pins, exec-data gates |
+| [`12-usb-host`](12-usb-host.md) | USB host channel: test conditions (AMD USB4 / CC / A-C), driver binding, safe debugging, pinned host tool |
 | [`appendix-dualboot`](appendix-dualboot.md) | optional layout; method note only |
 | [`glossary`](glossary.md) | codenames, acronyms and status tags |
 | [`device`](device.md) | device situation; no baseline hashes |

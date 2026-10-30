@@ -1,0 +1,37 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -204,7 +204,8 @@ static const uint8_t ruby_cfg_desc[32] = {
+     9, 2, 32, 0, 1, 1, 0, 0x80, 50,
+     9, 4, 0, 0, 2, 0xFF, 0x00, 0x00, 0,
+     7, 5, 0x02, 0x02, 64, 0, 0,
+-    7, 5, 0x82, 0x02, 64, 0, 0,
++    /* 0142: EP2 IN bulk MPS 512 (0x0200, little endian: 0, 2). */
++    7, 5, 0x82, 0x02, 0, 2, 0,
+ };
+ 
+ static const uint8_t ruby_str_lang[4] = { 4, 3, 0x09, 0x04 };
+@@ -1380,7 +1381,12 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+         return -1;
+     }
+ 
+-    ruby_wr32(mac, TX2CSR0_OFF, 64u | (1u << 29));
++    /*
++     * 0142: EP2 IN MPS 64 -> 512.  The FIFO segment already covers it:
++     * TX2CSR2 SEGSIZE 9 = ilog2(512) in vendor ep_fifo_alloc semantics,
++     * and a 512 B segment serves both 64 and 512 maxpacket.
++     */
++    ruby_wr32(mac, TX2CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
+ 
+@@ -1500,7 +1506,8 @@ ruby_ep2_config(vm_offset_t mac)
+     ruby_seq("EPRST_TX", ruby_rd32(mac, TX2CSR0_OFF),
+         ruby_rd32(mac, TX2CSR2_OFF));
+ 
+-    ruby_wr32(mac, TX2CSR0_OFF, 64u | (1u << 29));
++    /* 0142: same 512 MPS on the reset/rearm path. */
++    ruby_wr32(mac, TX2CSR0_OFF, 512u | (1u << 29));
+     /*
+      * P9 runs the same bulk endpoint with TX_SLOT(2); 0102 changed this to
+      * slot 0 and never restored it.  Bulk type is 0, so only the slot field

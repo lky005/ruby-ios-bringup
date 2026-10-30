@@ -35,6 +35,19 @@ after each verification pass.
 | Config-mode layout | pass without golden; 11 pinned checks |
 | Linux host CI | pass before the final docs/template-only amendment; see Actions |
 
+## CI-verified (2026-10-30)
+
+| Check | Result |
+|---|---|
+| Baseline manifest | 82 files, root `829d7598...`, manifest matches |
+| Patchset (0143) | `f47f4c19...` (139 files) |
+| Kernel exec-data (0143) | `6fa65088...`; full `d2eae74d...`, core `c91060ab...`; CI `41022192026` |
+| Image (0143) | `5b6b8411...`; payload `85aa15c1...`; cmdline has `rubyusb=1 rubyprobe=1` |
+| Enumeration/config/HS | green (512-byte bulk IN MPS accepted; HS confirmed by the device-side DEVICE_CONF probe) |
+| First-session XACT | remains open (0-54 frames; EP0 can also XACT; the device may drop); not fixed by 0143 |
+| Host tool | `tools/host/ruby_usb_host.py` status/cmd/watch; EP0 read-only, EP2 OUT command only; no 0x2D write path in the published copy |
+| Device runs | 2026-10-30, author's host; A-port/A-C cable stability 13/7/23 frames, one drop; CC/Type-C runs showed the same abort |
+
 ## CI-verified (2026-10-29)
 
 | Check | Result |

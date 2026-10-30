@@ -5,6 +5,14 @@
 **在 MediaTek MT6877 手机上运行 XNU 8796 + iPhone X iOS 16.7.16 用户态。**
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
+> **状态 2026-10-30：** USB 线更新到 0143：EP2 IN bulk MPS 512、511 B
+> 日志帧（16 B 头 + 最多 495 B 文本）、64 GPD TX 环（最多 63 个在飞）、
+> rearm 时重置 TX 环。CI `41022192026` 与 patchset `f47f4c19...`
+> （139 文件）、exec-data `6fa65088...` 一致。枚举/配置/HS 全绿；
+> host 侧首会话 XACT **仍未闭环**（0–54 帧可变；EP0 也可能 XACT，
+> 设备可能掉链）。参考上位机工具与实测条件（AMD USB4 CC 与 A-C 线、
+> WinUSB 绑定、安全调试）见 `docs/zh/12-usb-host.md`。
+>
 > **状态 2026-10-29：** 内核 CI 改为从内容固定的 82 文件基线（清单根
 > `829d7598...`）拼装，基线由私有内容寻址镜像提供，0001-0079 不再是活的
 > 上游依赖。ramdisk 线增加 LK ramdisk 救援根（`md0`，PID 1 进程内运行，
@@ -47,9 +55,9 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | 用户态 | launchd → lsd → backboardd → SpringBoard |
 | 输入 | **真实 Goodix GT9916R**，bit-bang SPI3；解锁、双指 contact 上报、edge；0084 合成上滑仍保留 |
 | 存储 | UFS LUN 2，`iosroot` 上读写 HFS+；4 MB HFS 救援根走 LK ramdisk 槽 |
-| 最新 runs（分开记录） | 2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动（harness 与 main-CI 重建）；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
+| 最新 runs（分开记录） | 2026-10-30 USB 0143（512 MPS/511 B；稳定性 13/7/23 帧，一次掉链）；2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动（harness 与 main-CI 重建）；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
 | 未闭环 | 第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
-| 未通 | 按键、Wi-Fi、GPU、RTC；USB 仅探针 |
+| 未通 | 按键、Wi-Fi、GPU、RTC；USB 仍是探针/日志通道 |
 | 安全 | AMFI/sandbox/签名关闭；可能丢数据 |
 
 ## 这个里程碑的意义
@@ -67,9 +75,9 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | `ACKNOWLEDGEMENTS.zh.md`、`LEGAL.zh.md` | 致谢与法律风险声明 |
 | `docs/en/`、`docs/zh/` | 英文与中文章节 |
 | `touch/` | probe 阶梯、硬件契约与脱敏实验记录 |
-| `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0131b USB、0140/0141 ramdisk；历史 0081-0084 |
+| `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0143 USB、0140/0141 ramdisk；历史 0081-0084 |
 | `ci/` | 基线清单/recipe、固定 patchset 哈希、内核分段哈希与来源 |
-| `config/` | 0140 ramdisk 与 0131b USB pin；0085 真实触摸和 0084 为历史 |
+| `config/` | 0143 USB pin（0140/0131b/0142 为历史）；0085 真实触摸和 0084 为历史 |
 | `.github/workflows/xnu.yml` | 复现当前内核并校验 patchset/exec-data 哈希 |
 | `src/bringup/` | 早期启动 payload、shim、镜像打包 |
 | `src/ufs-probe/` | MT6877 UFS 只读探针 |
@@ -114,7 +122,7 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: 27894e7b...（main，137 文件；USB 分支 29449e32...，135 文件）
+patchset: f47f4c19...（main，139 文件；历史 27894e7b... 137、29449e32... 135）
 runner:   macos-14 / Xcode 15.0.1 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```

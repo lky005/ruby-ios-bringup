@@ -5,6 +5,16 @@
 **XNU 8796 + iPhone X iOS 16.7.16 userland on a MediaTek MT6877 phone.**
 A research bring-up, packaged as an independent, sanitized delta.
 
+> **Status 2026-10-30:** the USB line is now 0143: EP2 IN bulk MPS 512 and
+> 511-byte log frames (16 B header + up to 495 B text), a 64-GPD TX ring with
+> at most 63 in flight, and a TX-ring reset on rearm. CI `41022192026`
+> matched patchset `f47f4c19...` (139 files) and exec-data `6fa65088...`.
+> Enumeration/config/HS are green; the host-side first-session XACT is
+> **still open** (variable 0-54 frames; EP0 can also XACT and the device may
+> drop). The reference host tool and the tested conditions (AMD USB4 CC and
+> A-to-C cables, WinUSB binding, safe debugging) are in
+> `docs/en/12-usb-host.md` (Chinese: `docs/zh/12-usb-host.md`).
+>
 > **Status 2026-10-29:** the kernel CI now assembles from a content-pinned
 > 82-file baseline (manifest root `829d7598...`) fetched from a private
 > content-addressed mirror; the 0001-0079 baseline is no longer a live upstream
@@ -55,9 +65,9 @@ before building.
 | Userland | launchd → lsd → backboardd → SpringBoard |
 | Input | **real Goodix GT9916R** over bit-bang SPI3; unlock, two-contact HID dispatch, edge; 0084 synthetic swipe still available |
 | Storage | UFS LUN 2, read/write HFS+ on `iosroot`; 4 MB HFS rescue root via the LK ramdisk slot |
-| Latest runs (separate) | 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
+| Latest runs (separate) | 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
 | Open | second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
-| Not yet | keys, Wi-Fi, GPU, RTC; USB is a probe only |
+| Not yet | keys, Wi-Fi, GPU, RTC; USB remains a probe/log channel |
 | Safety | AMFI/sandbox/code signing off; data may be lost |
 
 ## Why this milestone matters
@@ -76,9 +86,9 @@ evidence and the wrong turns.
 | `ACKNOWLEDGEMENTS.md`, `LEGAL.md` | credits and legal risk notice |
 | `docs/en/`, `docs/zh/` | English and Chinese chapters |
 | `touch/` | probe ladder, hardware contract and sanitized lab notes |
-| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0131b USB, 0140/0141 ramdisk; historical 0081-0084 |
+| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0143 USB, 0140/0141 ramdisk; historical 0081-0084 |
 | `ci/` | baseline manifest/recipe, canonical patchset hash, kernel segment hash and provenance |
-| `config/` | 0140 ramdisk and 0131b USB pins; 0085 real-touch and 0084 as history |
+| `config/` | 0143 USB pin (0140/0131b/0142 history); 0085 real-touch and 0084 as history |
 | `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash |
 | `src/bringup/` | early boot payloads, shim, image packers |
 | `src/ufs-probe/` | read-only MT6877 UFS probe |
@@ -125,7 +135,7 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: 27894e7b... (main, 137 files; USB branch 29449e32..., 135 files)
+patchset: f47f4c19... (main, 139 files; historical 27894e7b... 137, 29449e32... 135)
 runner:   macos-14 / Xcode 15.0.1 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```

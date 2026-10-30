@@ -1,6 +1,6 @@
 # Status
 
-As of **2026-10-22**. This is a snapshot of verified results, not a live device
+As of **2026-10-30**. This is a snapshot of verified results, not a live device
 status. No phone is attached to this repository or to its CI.
 
 ## Verified
@@ -27,6 +27,16 @@ repository. Only their hashes and conclusions are recorded. Pre-boot image
 hashes are fixed for the named files; post-boot root/ring/log hashes are
 volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 
+## 2026-10-30 state
+
+| Item | Result | Evidence |
+|---|---|---|
+| USB line (0143) | EP2 IN bulk MPS 512; 511-byte log frames; 64 GPD TX ring with at most 63 in flight; TX-ring reset on rearm; enumeration/config/HS green; host-side first-session XACT remains open (0-54 frames; EP0 may XACT; the device may drop) | patchset `f47f4c19...` (139 files); CI `41022192026`; kernel full `d2eae74d...`, exec `6fa65088...`; image `5b6b8411...`; `config/0143.env` |
+| Host tooling | `tools/host/ruby_usb_host.py` (`status`/`cmd`/`watch`; EP0 read-only; one EP2 OUT command line; optional one-shot pnputil restart) | used for the 0143/0150/0151 runs; `docs/en/12-usb-host.md`, `docs/zh/12-usb-host.md` |
+| Test conditions | Windows 11 NT 10.0.26300, AMD USB4 host, USB2 path on `1022:15b9`; tested with a USB4 Type-C/CC cable and a USB-A/A-C cable; the phone is bus-powered (no external AC adapter) | measured 2026-10-30; small samples; the XACT persists on both |
+| Stability (0143) | A-port/A-C cable: 13/7/23 frames over three fresh boots, one device drop; ACR6 reads back `0x00100442` | author's host, 2026-10-30; numbers only |
+| 0151 experiment | ACR6 SQTH=5 + bit28 (board HQA) rejected: enumeration failed with `setups=0` and three re-attach rounds | branch `usb-0151-sqth5`; not merged |
+
 ## 2026-10-29 state
 
 | Item | Result | Evidence |
@@ -36,6 +46,19 @@ volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 | USB line | 0131b probe write; EP2 host-side XACT remains open | `usb-0131b-probe-write` (merge `fb0577d`); kernel exec `06db2bb3...` |
 | CI baseline | 82-file baseline from a private content-addressed mirror; public pin is manifest root `829d7598...`; fallback `ALLOW_PUBLIC_UPSTREAM=1` | `ci/baseline_manifest.py`; `config/0140.env`, `config/0131b.env` |
 | Main | ramdisk + USB combined (squashed 2026-10-29) | see `docs/en/11-ci-baseline.md` |
+
+## Build provenance (2026-10-30)
+
+- Apple xnu: `xnu-8796.141.3` (`f625db25...`).
+- Baseline: 82 files, manifest root `829d7598...`; private mirror, public
+  fallback `ALLOW_PUBLIC_UPSTREAM=1`.
+- USB 0143: patchset `f47f4c19...` (139 files); kernel full `d2eae74d...`,
+  core `c91060ab...`, exec `6fa65088...`; CI `41022192026`; image
+  `5b6b8411...` (`config/0143.env`).
+- USB 0142 (historical): patchset `d0c5ab5e...` (138 files); exec
+  `99d98d80...`; CI `41015790742`; image `a31ee6dc...`.
+- The host-side first-session XACT is not fixed by 0143; the exec-data hash
+  is the build gate.
 
 ## Build provenance (2026-10-29)
 
