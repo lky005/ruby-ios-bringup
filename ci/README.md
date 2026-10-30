@@ -33,7 +33,7 @@ patches, and verifies the same manifest root.
    framebuffer addresses.
 4. Normalize every `.patch`/`.sh` to LF.
 5. Compute the canonical patchset hash over the sorted per-file SHA256 values
-   and refuse to build unless it equals `1e08d6f8...` (138 files).
+   and refuse to build unless it equals `d0c5ab5e...` (138 files).
 6. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
    build on `macos-14` with Xcode 15.0.1.
 7. Hash the built Mach-O with `ci/kernel_hash.py`. When
@@ -55,7 +55,7 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
   `config/0131b.env`. It keeps its own branch workflow and patch list; the
   same 82-file baseline and mirror credentials apply. The 0131b control
   kernel is recorded in that config.
-- `usb-0142-mps512`: patchset `1e08d6f8...` (138 files), config
+- `usb-0142-mps512`: patchset `d0c5ab5e...` (138 files), config
   `config/0142.env`. EP2 IN bulk MPS 64 -> 512 (descriptor bytes 4/5 `0, 2`
   and `TX2CSR0` MAXPKTSZ; the 512 B FIFO segment already covers it), frames
   stay 63 bytes, the OUT endpoint stays 64. Built with the 0142 cmdline

@@ -1,4 +1,5 @@
 diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
 @@ -204,7 +204,8 @@ static const uint8_t ruby_cfg_desc[32] = {
      9, 2, 32, 0, 1, 1, 0, 0x80, 50,
