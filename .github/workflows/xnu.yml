@@ -14,6 +14,15 @@ on:
       macos_version:
         description: macOS release whose xnu to build (13.5 = xnu-8796, iOS 16 era)
         default: "13.5"
+      runner:
+        description: hosted macOS image (macos-15 = arm64; macos-14 is retired)
+        default: "macos-15"
+      xcode_version:
+        description: Xcode to use; must exist in the image (16.0 = oldest on macos-15)
+        default: "16.0"
+      hash_config:
+        description: config carrying the expected kernel hash (empty expectation = record only)
+        default: "config/0087.env"
       kernel_config:
         description: RELEASE / DEVELOPMENT / DEBUG
         default: DEVELOPMENT
@@ -48,6 +57,9 @@ env:
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
+  RUNNER_IMAGE: ${{ inputs.runner || 'macos-15' }}
+  XCODE_VERSION: ${{ inputs.xcode_version || '16.0' }}
+  HASH_CONFIG: ${{ inputs.hash_config || 'config/0087.env' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
   # ccache: xnu is ~2000 compiles; a patch usually changes a few of them
@@ -60,10 +72,15 @@ env:
 
 jobs:
   build:
-    # macos-14 still ships Xcode 15.x: its iig matches the xnu-8796 IORPC ABI
-    # (Xcode 16's iig emits IORPC.kernelContent, which this xnu lacks)
-    runs-on: macos-14
-    timeout-minutes: 120
+    # The image and the Xcode are separate pins: GitHub ships one Xcode major
+    # version per macOS image, and macos-14 (the last image with Xcode 15.x) is
+    # retired on 2026-11-02. macos-15 carries Xcode 16.x and 26.x only, so the
+    # Xcode is selected explicitly and the build fails instead of drifting.
+    #
+    # xnu-8796 predates the IORPC "kernelContent" member that Xcode 16's iig
+    # emits; an iig/header mismatch is a source-level break, not a runner one.
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -108,15 +125,20 @@ jobs:
           sudo chmod +x /usr/local/bin/xcodes
           sw_vers
           ls -d /Applications/Xcode*.app
-          XC="/Applications/Xcode_15.0.1.app"
-          if [ ! -d "$XC" ]; then
-            echo "Xcode 15.0.1 not found; refusing to drift to another Xcode"
+          XC=""
+          for cand in "/Applications/Xcode_${XCODE_VERSION}.app" "/Applications/Xcode_${XCODE_VERSION%%.*}.app"; do
+            if [ -d "$cand" ]; then XC="$cand"; break; fi
+          done
+          if [ -z "$XC" ]; then
+            echo "Xcode ${XCODE_VERSION} not found in ${RUNNER_IMAGE}; refusing to drift"
             exit 1
           fi
           echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XC"
           xcodebuild -version
           xcrun --find iig
+          xcrun --sdk macosx --show-sdk-version
+          xcrun clang --version | head -1
           mkdir -p "$CCACHE_WRAP"
           for t in clang clang++; do
             printf '#!/bin/sh\nexec ccache %s "$@"\n' "$(xcrun -find $t)" > "$CCACHE_WRAP/$t"
@@ -128,9 +150,9 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0087.env', '.github/workflows/xnu.yml') }}
+          key: ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0087.env', '.github/workflows/xnu.yml') }}
           restore-keys: |
-            ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
+            ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
 
       - name: Build
         working-directory: dxb
@@ -201,7 +223,7 @@ jobs:
             echo "kernel missing; hash gate skipped"
             exit 0
           fi
-          . config/0087.env
+          . "$HASH_CONFIG"
           if [ -n "${KERNEL_EXPECT_EXEC_DATA:-}" ]; then
             python3 ci/kernel_hash.py --expect-exec-data "$KERNEL_EXPECT_EXEC_DATA" \
               out/kernel.development.sweet | tee out/kernel-hashes.txt
@@ -228,6 +250,11 @@ jobs:
             echo "dxb_repo=$DXB_REPO"
             echo "dxb_sha=$DXB_SHA"
             echo "macos_version=$MACOS_VERSION"
+            echo "runner_image=$RUNNER_IMAGE"
+            echo "xcode_version=$XCODE_VERSION"
+            echo "xcode_path=$(xcode-select -p)"
+            echo "sdk=$(xcrun --sdk macosx --show-sdk-version)"
+            echo "clang=$(xcrun clang --version | head -1)"
             echo "kernel_config=$KERNEL_CONFIG"
             echo "machine_config=$MACHINE_CONFIG"
             echo "patches=$patches"
