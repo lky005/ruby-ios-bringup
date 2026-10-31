@@ -29,7 +29,9 @@ inert.
 patchset, a 30 s polling EP0 enumeration window, and `ufslogsecs=1` so the
 trace is flushed quickly. It is WIP; no booted reference is pinned.
 
-`0144.env` and `0144-boot.cmdline` are the P0 read-only board probe/REPL:
+`0144.env` and `0144-boot.cmdline` are the P0 read-only board probe/REPL
+(current line, patchset `9f7b41cf...`, 141 files, built on `macos-15` with
+Xcode 16.0; CI `41229568807`, kernel exec-data `62a17d48...`):
 `rubyprobe=1` for the I2C pin takeover/WDT emergency writes, `sweetgt=0` so
 the probe owns I2C5, and no `rubypmic` (pwrap/rail writes stay locked). No
 booted reference is pinned yet.

@@ -8,8 +8,8 @@
 
 ## 已验证（2026-10-30）[measured]
 
-- 内核 0143（patchset `f47f4c19...`，139 文件；CI `41022192026`；
-  exec-data `6fa65088...`）以 USB 2.0 设备模式运行：vendor-specific
+- 内核 0144+0145（patchset `9f7b41cf...`，141 文件；CI `41229568807`；
+  exec-data `62a17d48...`）以 USB 2.0 设备模式运行：vendor-specific
   设备 `1209:0002`，一个 bulk OUT（`0x02`，64 B MPS）和一个 bulk IN
   （`0x82`，512 B MPS）。
 - 枚举、SET_CONFIGURATION、High-Speed 全绿；内核每个 GPD 发一帧日志：
@@ -134,6 +134,18 @@ python tools/host/ruby_usb_host.py watch --pace-ms 5 --log session.log
 - `--pcycle`：仅对“仍枚举但僵死”的设备做最多一次
   `pnputil /restart-device`。需要提权；只作最后手段。
 
+## 会话限制 [measured]
+
+- 一个 EP2 OUT 会话大约能承受二十次命令写，之后写超时，直到设备重新枚举。
+  把整组命令放进一次写：内核按行解析缓冲区，所以一次写可以带全部命令。
+- 设备 STALL 只会挂起**该 handle 的** EP0 IN 端点：同一 handle 上后续控制读
+  全部 pipe error，重新打开 handle 就正常。要重开，不要原地重试。
+- `0x2A` 必须读在写位置之前：请求到达或越过写位置会让内核 STALL EP0 IN，
+  而且 console 的 flush 滞后于写位置。用小片读并留余量。
+- EP0 `0x2C`/`0x2D` 寄存器访问可用；同值写回已验证。写不同值后报 pipe error
+  意味着写已经生效。
+- 没有热插拔恢复：端点一旦 halt，只能物理断电重启让设备回来。
+
 ## 协议细节 [measured]
 
 ### EP0 vendor 请求
@@ -192,7 +204,7 @@ python tools/host/ruby_usb_host.py watch --pace-ms 5 --log session.log
 
 ## 证据与边界
 
-- 构建：CI `41022192026`；patchset `f47f4c19...`（139 文件）；
+- 构建：CI `41229568807`；patchset `9f7b41cf...`（141 文件）；
   kernel full `d2eae74d...`、exec-data `6fa65088...`；镜像
   `5b6b8411...`（`config/0143.env`）。
 - 设备运行：2026-10-30，作者的上位机，CC 和 AC 两种连接；样本量小。

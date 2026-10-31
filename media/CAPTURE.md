@@ -24,6 +24,9 @@ future captures; `lock-screen.jpg` and `boot.mp4` are still open.
   information.
 - Crop or blur anything you do not want public.
 - Do not show a device serial, box label, or purchase record.
+- The host check scans the public tree, the staged diff and recent commit
+  messages against a private list of device identifiers and fails on a hit. The
+  list itself never enters the repository.
 
 ## Naming and provenance
 

@@ -5,6 +5,18 @@
 **XNU 8796 + iPhone X iOS 16.7.16 userland on a MediaTek MT6877 phone.**
 A research bring-up, packaged as an independent, sanitized delta.
 
+> **Status 2026-11-01:** the build moved to a hosted `macos-15` image with
+> Xcode 16.0; the kernel source is unchanged and the interface-compiler step
+> still generates cleanly. The line adds a read-only board probe (pwrap,
+> bounded I2C scan, GPIO/clock/KPD/WDT status, segmented snapshots) behind the
+> USB console, plus an enumeration-window fix that gives the host enough time
+> to finish configuration - the host now configures the device on the first
+> try. CI `41229568807` matched patchset `9f7b41cf...` (141 files) and
+> exec-data `62a17d48...`. The probe returned board data on one device run
+> (watchdog not armed, four I2C5 acknowledgements, the MT6360 readable over
+> I2C5) and a ten-minute read-only idle check found no panic; the two pwrap
+> reads stay empty until the pwrap initialisation lands.
+>
 > **Status 2026-10-30:** the USB line is now 0143: EP2 IN bulk MPS 512 and
 > 511-byte log frames (16 B header + up to 495 B text), a 64-GPD TX ring with
 > at most 63 in flight, and a TX-ring reset on rearm. CI `41022192026`

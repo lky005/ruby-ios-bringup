@@ -13,7 +13,10 @@ after each verification pass.
 
 ## Host-verified (2026-10-21, updated 2026-10-22)
 
-`python scripts/verify-local.py` with the optional external inputs:
+`python scripts/verify-local.py` with the optional external inputs. The check
+also covers the toolchain pins, the English/Chinese document sets, recent
+commit messages and - when a list is passed with `--denylist` - strings that
+must not appear in the public tree:
 
 | Check | Result |
 |---|---|
@@ -34,6 +37,20 @@ after each verification pass.
 | Strict host bundle | pass: kernel/boot/shim/payload/base/cmdline (root/ICL optional) |
 | Config-mode layout | pass without golden; 11 pinned checks |
 | Linux host CI | pass before the final docs/template-only amendment; see Actions |
+
+## CI-verified (2026-11-01)
+
+| Check | Result |
+|---|---|
+| Baseline manifest | 82 files, root `829d7598...`, manifest matches |
+| Patchset (current line) | `9f7b41cf...` (141 files) |
+| Kernel exec-data (current line) | `62a17d48...`; full `9c82ea75...`, core `34c8a93f...`; CI `41229568807`; reproduced exactly by a second run |
+| Image (current line) | `66352038...`; payload `063a98e2...`; cmdline `config/0144-boot.cmdline` |
+| Toolchain | `macos-15` arm64, Xcode 16.0, SDK 15.0, clang 16.0.0; the runner image and the Xcode version are workflow inputs |
+| Enumeration/config | green on the first attempt: the device configured the host at 589 ms with no device-sent stall, after the attach window was widened from 4 s to 12 s |
+| Board probe (read-only) | 19 commands, 17 returned board data: watchdog not armed, I2C5 scan 4 acknowledgements (0x1a/0x34/0x4e/0x64), I2C5/6 idle high, MT6360 readable over I2C5, clock gates not gated, GPIO 116/14/110/132 readable, six snapshots dumped, the volume-up key on GPIO 42; the two pwrap reads stay empty until the pwrap initialisation lands |
+| Idle check | ten-minute read-only idle: 15 samples, no panic, the console kept growing, the node stayed enumerated, repeated snapshots kept working |
+| Host checks | `scripts/verify-local.py --ci-config config/0144.env` passes, including the toolchain-pin, document-parity, commit-message and denied-identifier scans |
 
 ## CI-verified (2026-10-30)
 
@@ -59,7 +76,7 @@ after each verification pass.
 | Kernel exec-data (USB) | `06db2bb3...` (matches the 0131b control) |
 | Full-file A/B | differs only in `__TEXT` metadata and `__CTF`; all code/data segments and `__LINKEDIT` identical |
 | Pre-merge CI | `40822689195` (ramdisk line), `40824668335` (USB line) success; pre-merge host-checks `40828162023`; main squash uses the same patchset gate |
-| Host checks | `scripts/verify-local.py --ci-config config/0140.env` and `config/0131b.env` pass |
+| Host checks | `scripts/verify-local.py --ci-config config/0140.env` and `config/0131b.env` pass (historical line) |
 | Sanitization | private mirror URL/key absent from public docs; build logs scanned, 0 hits |
 | Device | no flash for this change |
 
@@ -276,6 +293,7 @@ With external inputs (paths are yours; they are not committed):
 
 ```sh
 python scripts/verify-local.py \
+    --denylist <private-list> \
     --icl-orig <original-4k-block> \
     --icl-patched <patched-4k-block> \
     --xnu-tree <patched-xnu-tree> \

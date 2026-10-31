@@ -7,9 +7,11 @@ B+NOP first boot -> A', a CI kernel boot, and a real-touch 0085 boot were
 observed on the author's unit. This is not an independently reproduced
 second-unit or clean-room guarantee. Detailed test guarantees are deferred.
 
-**Scope note (2026-10-29):** this guarantee covers the historical 0085/0084
-success bundle only. The 2026-10-29 main line uses the pins in
-`config/0140.env` and `config/0131b.env`; see `docs/en/11-ci-baseline.md`.
+**Scope note (2026-11-01):** this guarantee covers the historical 0085/0084
+success bundle only. The current main line uses the pins in `config/0144.env`
+(patchset `9f7b41cf...`, 141 files, exec-data `62a17d48...`); the earlier
+lines used `config/0140.env` and `config/0131b.env`; see
+`docs/en/11-ci-baseline.md`.
 
 ## Scope
 
@@ -46,6 +48,10 @@ configuration.
 | Item | Value | Note |
 |---|---|---|
 | Baseline | `MakrSas/ios-topaz@5095ac1` | upstream commit |
+| Patchset (current line) | `9f7b41cf...` | 141 files; recipe output; the workflow refuses to build on anything else |
+| Current kernel | `9c82ea75...` | exec-data `62a17d48...`; CI `41229568807` |
+| Current image | `66352038...` | external; not in the repo |
+| Current boot args | `config/0144-boot.cmdline` | read-only probe cmdline (`sweetgt=0`, `rubyprobe=1`) |
 | Patchset (0085) | `cf4008e3...` | 88 files; recipe output; same as the harness build |
 | Patchset (0084) | `de1824c2...` | 87 files; previous milestone |
 | 0010/0012 change | `1edb6633...` | small baseline patch |
@@ -108,12 +114,14 @@ they can fingerprint the unit. The device situation is described in
 
 ## Hash stability
 
-Fixed / pre-boot (identity): the 0085 patchset `cf4008e3...` and 0084 patchset
-`de1824c2...`, boot args, ICL blocks, the named root snapshots (A/B/C/A') and
+Fixed / pre-boot (identity): the current patchset `9f7b41cf...` (141 files)
+with its exec-data hash `62a17d48...`, the 0085 patchset `cf4008e3...` and 0084
+patchset `de1824c2...`, boot args, ICL blocks, the named root snapshots (A/B/C/A') and
 the named kernel/payload/image artifacts for a specific run. Kernel CI builds
 are not bit-identical; the patchset hash is the source gate and the Mach-O
 exec-data hash is the artifact-level gate; record the actual full artifact hash
-for each run. The 0085 exec-data reference is `e4823afb...`. A' is one first-boot
+for each run. The current exec-data reference is `62a17d48...`; the 0085
+reference is `e4823afb...`. A' is one first-boot
 snapshot; a new first boot is a new state.
 
 Volatile / post-boot (do not require these to match): the live root after any
@@ -125,8 +133,12 @@ whole-disk hash.
 ## Guaranteed
 
 - The patchset and recipe: the workflow refuses to build unless the recipe
-  reproduces `cf4008e3...` (88 files). The first 0085 CI run `39694456200`
-  succeeded; its exec-data hash matched the booted kernel.
+  reproduces `9f7b41cf...` (141 files). The current CI run `41229568807`
+  succeeded and its exec-data hash matched the recorded baseline
+  `62a17d48...`.
+- The earlier milestones keep their own identity: the 0085 patchset
+  `cf4008e3...` (88 files) with run `39694456200`, whose exec-data hash
+  matched the booted kernel.
 - The offline tools: host checks, synthetic and real ICL block round-trips.
 - The documented success-path procedure and its scope.
 - The 2026-10-22 one-unit device evidence (B+NOP first boot -> A', CI kernel
