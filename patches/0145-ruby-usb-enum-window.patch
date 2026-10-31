@@ -1,0 +1,30 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 0d70cd3..297889b 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -3062,7 +3062,15 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+     uint32_t t = 0, si = 0, sub = 0, cfg_t = 0;
+     int cfg_armed = 0;
+     uint32_t last_otg = 0, last_op = 0;
+-    uint32_t attach_left = 3, retry_at = 4000;
++    /*
++     * 0145: a first enumeration that gets interrupted by a re-attach
++     * needs more than 4 s to reach SET_CONFIGURATION, and running the
++     * budget out inside the 30 s window leaves the device detached so
++     * the host never sees it again.  Give each attempt 12 s and keep
++     * enough attempts left for the whole window; only the attach
++     * timing changes, the command path is untouched.
++     */
++    uint32_t attach_left = 6, retry_at = 12000;
+     uint32_t evt_seen = 0, last_evt = 0;
+     uint32_t v;
+ 
+@@ -3107,7 +3115,7 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+                 "re-attach (%u left)\n",
+                 t, ruby_ep0_setups, ruby_bus_resets, attach_left);
+             ruby_usb_reattach(mac, ruby_phy_base);
+-            retry_at = t + 4000;
++            retry_at = t + 12000;
+         }
+         if (ruby_cfg_seen) {
+             if (!cfg_armed) {

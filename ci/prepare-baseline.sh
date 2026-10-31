@@ -23,7 +23,7 @@ BASELINE_FILES=${BASELINE_FILES:-82}
 ALLOW_PUBLIC_UPSTREAM=${ALLOW_PUBLIC_UPSTREAM:-0}
 BASE_REPO=${BASE_REPO:-https://github.com/MakrSas/ios-topaz.git}
 BASE_SHA=${BASE_SHA:-5095ac19dbdcf37b64b81fe443f4027ad51b84bf}
-PATCHSET_SHA256=${PATCHSET_SHA256:-7e3bd2b9b293199b12dfb98670ecaf67e6cc60d7fcf36b396f6f549d1bcdd6a1}
+PATCHSET_SHA256=${PATCHSET_SHA256:-9f7b41cf26cc495ce1c0fcfacabcd27bf607b13718218c90809d200d53f1e011}
 SKIP_PATCHES=${SKIP_PATCHES:-}
 PYTHON=${PYTHON:-python3}
 DEST=${1:-baseline}
@@ -132,6 +132,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0142-ruby-ep2-mps512.patch" \
     "$ROOT/patches/0143-ruby-ep2-frame511-rearm-drain.patch" \
     "$ROOT/patches/0144-ruby-probe-repl.patch" \
+    "$ROOT/patches/0145-ruby-usb-enum-window.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
