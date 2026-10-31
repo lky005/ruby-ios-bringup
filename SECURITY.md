@@ -16,8 +16,8 @@ boot logs in an issue.
 
 - GitHub Actions are pinned by commit SHA; the workflow has
   `permissions: contents: read`.
-- Xcode is pinned to 15.0.1; runner/Xcode and brew versions are recorded in
-  the run provenance.
+- The Xcode version is a workflow input (default 16.0); runner, Xcode, SDK and
+  brew versions are recorded in the run provenance.
 - Enable 2FA on the hosting account. A private repository is not a backup.
 - Do not add secrets, tokens, device dumps, root images or full logs.
 - Media must be sanitized per `media/CAPTURE.md` before it is committed.

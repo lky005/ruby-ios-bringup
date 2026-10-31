@@ -28,15 +28,15 @@ patches, and verifies the same manifest root.
    `ci/baseline_manifest.py` against the manifest root and file count.
 2. Add this project's patches: 0080 UFS, 0084 autoswipe, 0085 Goodix SPI,
    0086-0131b USB, 0140 ramdisk import, 0141 USB decouple, 0142 EP2 MPS 512,
-   0143 EP2 frames/rearm, 0144 read-only board probe/REPL, and the historical
-   0081-0083.
+   0143 EP2 frames/rearm, 0144 read-only board probe/REPL, 0145 enumeration
+   window, and the historical 0081-0083.
 3. Apply `ci/baseline-changes.patch`, the small 0010/0012 change for the ruby
    framebuffer addresses.
 4. Normalize every `.patch`/`.sh` to LF.
 5. Compute the canonical patchset hash over the sorted per-file SHA256 values
-   and refuse to build unless it equals `7e3bd2b9...` (140 files).
+   and refuse to build unless it equals `9f7b41cf...` (141 files).
 6. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
-   build on `macos-14` with Xcode 15.0.1.
+   build on `macos-15` with Xcode 16.0.
 7. Hash the built Mach-O with `ci/kernel_hash.py`. When
    `KERNEL_EXPECT_EXEC_DATA` is set, the gate compares the exec-data hash
    (`__TEXT_EXEC` plus the data segments, excluding `__TEXT` cstrings and
@@ -48,10 +48,10 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 
 ## Branches
 
-- `main` (2026-10-29 integration, squashed from
-  `merge-ramdisk-usb-2026-10-29`): patchset `27894e7b...` (137 files), config
-  `config/0140.env`. It combines the ramdisk line (0080/0084/0085, 0140/0141)
-  with the USB series through 0131b.
+- `main` (2026-11-01 integration): patchset `9f7b41cf...` (141 files), config
+  `config/0144.env`. It combines the ramdisk line (0080/0084/0085, 0140/0141),
+  the USB series through 0143, the read-only board probe (0144) and the
+  enumeration window (0145).
 - `usb-0131b-probe-write`: patchset `29449e32...` (135 files), config
   `config/0131b.env`. It keeps its own branch workflow and patch list; the
   same 82-file baseline and mirror credentials apply. The 0131b control
@@ -67,14 +67,15 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
   ends on a short packet); the reset/rearm path resets the TX ring after
   stopping the QMU. CI `41022192026`; kernel full `d2eae74d...`, exec-data
   `6fa65088...`. The host-side first-session XACT remains open.
-- `p0-probe`: patchset `7e3bd2b9...` (140 files), config `config/0144.env`.
+- `p0-probe`: patchset `9f7b41cf...` (141 files), config `config/0144.env`.
   Adds `bsd/dev/ruby_probe.c` and the read-only pwrap/I2C/GPIO/clock/KPD/WDT
   command set to the USB console; the test cmdline uses `sweetgt=0` so the
-  probe owns I2C5. No CI run or device run yet.
+  probe owns I2C5, and 0145 widens the enumeration window. CI `41222632828`;
+  kernel full `9c82ea75...`, exec-data `62a17d48...`; image `66352038...`.
 
-Main keeps `config/0131b.env` and `config/0131b-boot.cmdline` as the USB
-branch reference. The kernel built on it is the ramdisk set, which contains
-every USB patch through 0131b plus 0140/0141.
+The current line is `config/0144.env` / `config/0144-boot.cmdline`.
+`config/0143.env` keeps the previous USB-line reference; the earlier entries
+above are historical branches.
 
 ## Pins
 
@@ -83,12 +84,13 @@ every USB patch through 0131b plus 0140/0141.
 | Baseline manifest | `829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910` (82 files) |
 | Baseline upstream | `MakrSas/ios-topaz` @ `5095ac19dbdcf37b64b81fe443f4027ad51b84bf` (fallback/provenance) |
 | Apple xnu | `xnu-8796.141.3` (`f625db25f47631424dc62ac1c3414b6e530f7e8a`) |
-| Patchset | `27894e7b274ea57131b5ee57799eb13c1ca2ddd7a6d9e38c15468cdd0dd55ce9` (137 files) |
-| USB branch patchset | `29449e32a638e8e44e1683fc711b4f0dbba89c273310e74baf802653caf1eda3` (135 files), `config/0131b.env` |
+| Patchset | `9f7b41cf26cc495ce1c0fcfacabcd27bf607b13718218c90809d200d53f1e011` (141 files), `config/0144.env` |
+| USB line patchset | `f47f4c19c138d0f2e4bf6b0d6ac53dc895bc216c1084c0f4dd41c09b332edb4c` (139 files), `config/0143.env` |
 | 0010/0012 change | `ci/baseline-changes.patch`, SHA256 `1edb6633...` |
 | XNU harness | `blacktop/darwin-xnu-build` @ `663906528d1cd5ea8fde7de6f16de73db9511549` |
-| Runner | `macos-14`, Xcode 15.0.1, macOS 13.5 xnu |
+| Runner | `macos-15`, Xcode 16.0, macOS 13.5 xnu |
 | Config | `DEVELOPMENT`, `MACHINE_CONFIG=SWEET`, `-mcpu=cortex-a55` |
+| 0144 kernel | full `9c82ea75...`, exec-data `62a17d48...` |
 | 0140 kernel | full `3acefe47...`, exec-data `721e5daf...` |
 | 0131b USB kernel | full `4e945ce6...`, exec-data `06db2bb3...` (control) |
 

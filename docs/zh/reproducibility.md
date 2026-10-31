@@ -48,12 +48,12 @@ main（2026-10-29 集成，由 `merge-ramdisk-usb-2026-10-29` 压缩）构建 ra
 | 固定 topaz 删除清单 | 公开回退路径的补丁残留 |
 | recipe 失败即停 | 文件缺失或 0010/0012 上下文变化 |
 | LF 归一化 | Windows/macOS 换行漂移 |
-| `PATCHSET_SHA256`（按分支） | patchset 内容变化；集成 `27894e7b…`，USB `29449e32…` |
+| `PATCHSET_SHA256`（按分支） | patchset 内容变化；当前 `9f7b41cf…`（141 文件），USB `f47f4c19…`（139） |
 | `ci/baseline-changes.patch` SHA | 基线改动漂移 |
 | `check-bundle.py` | kernel/boot/root/ICL/cmdline 不对 |
 | Actions 按 SHA 固定 | CI 供应链漂移 |
 | `permissions: contents: read` | CI token 权限过大 |
-| Xcode 15.0.1 固定 | 工具链漂移 |
+| Xcode 版本输入（默认 16.0） | 工具链漂移 |
 | 干净 git 历史 | 旧 delta 被带进公开历史 |
 
 ## Host 管线状态
@@ -67,7 +67,7 @@ host 阶段已具备并用 0084 输入测过：payload `50701e81…`、确定性
 ## 仍可能坏的地方
 
 - 私有镜像不可达或 deploy key 失效；用本地 bundle/副本恢复，或显式走公开回退。
-- `macos-14` runner 或 Xcode 15.0.1 消失；workflow 会明确失败。
+- `macos-15` runner 或所选 Xcode 版本消失；workflow 会明确失败。
 - Homebrew 版本变化；记录但不固定。
 - root/boot 工件丢失或被替换。
 - 设备固件/GPT/面板与 `device.md` 不一致。

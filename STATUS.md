@@ -1,6 +1,6 @@
 # Status
 
-As of **2026-10-30**. This is a snapshot of verified results, not a live device
+As of **2026-11-01**. This is a snapshot of verified results, not a live device
 status. No phone is attached to this repository or to its CI.
 
 ## Verified
@@ -21,11 +21,22 @@ status. No phone is attached to this repository or to its CI.
 | Root state audit | A `e698339d...` (post-boot22), B `985c30...` (pre-boot22), C `34c2882d...` (clean base), A' `55e2ab2c...` (first-boot snapshot) | read-only audit, 2026-10-22 |
 | First boot from B+NOP | B+NOP -> A'; observed 22 s to lock screen, 30 s autoswipe (from the Apple logo); 3 autoswipe attempts; driverkitd only | device run, 2026-10-22 |
 | CI kernel boot | run `39648068844`, kernel `8a80855d...`, payload `2749bf1c...`, image `87dd4910...`; lock screen -> desktop; driverkitd + PosterBoard; no lsd/SpringBoard/backboardd | device run, 2026-10-22 |
+| Board probe (P0, read-only) | 19 read-only commands over the USB console: watchdog not armed; I2C5 scan 4 ACKs (0x1a/0x34/0x4e/0x64); I2C5/6 idle high; MT6360 readable over I2C5 (LDO2/LDO3, device info, TCPC); clock gates not gated; GPIO 116/14/110/132 readable; six snapshots dumped; the volume-up key appears on GPIO 42; the two pwrap reads are blocked by the pwrap init gap | patchset `9f7b41cf...` (141 files); CI `41222632828`; kernel full `9c82ea75...`, exec `62a17d48...`; image `66352038...`; `config/0144.env` |
 
 The ICL blocks, boot images, root images and logs are **not** in this
 repository. Only their hashes and conclusions are recorded. Pre-boot image
 hashes are fixed for the named files; post-boot root/ring/log hashes are
 volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
+
+## 2026-11-01 state
+
+| Item | Result | Evidence |
+|---|---|---|
+| Toolchain | The hosted image moved to `macos-15` and the Xcode version is a workflow input (default 16.0). xnu-8796 builds unchanged with it; the interface-compiler break the old recipe warned about did not reproduce | CI `41213328070` (140 files) and `41222632828` (141 files), both green; the 17 DriverKit interface files generated normally |
+| P0 board probe (0144) | 19 read-only commands over the USB console; 17 returned board data, the two pwrap reads are blocked by the pwrap init gap | patchset `9f7b41cf...`; kernel full `9c82ea75...`, exec `62a17d48...`; image `66352038...`; `config/0144.env` |
+| Enumeration (0145) | The attach budget gave the host 4 s per attempt and only three attempts, after which the device stopped attaching; widening the window to 12 s makes the host configure on the first try | patch `0145`; configured at 589 ms, 23 setups, no device-sent stall; device run 2026-11-01 |
+| Stability | Ten-minute read-only idle: 15 samples, no panic, the console kept growing, the node stayed enumerated and repeated snapshots kept working | device run 2026-11-01; `config/0144.env` |
+| Not scheduled | P1 pwrap minimal init, so the two pwrap reads stay empty; the endpoint-IN log spam and the per-session command budget are left for a later line | - |
 
 ## 2026-10-30 state
 
@@ -46,6 +57,20 @@ volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 | USB line | 0131b probe write; EP2 host-side XACT remains open | `usb-0131b-probe-write` (merge `fb0577d`); kernel exec `06db2bb3...` |
 | CI baseline | 82-file baseline from a private content-addressed mirror; public pin is manifest root `829d7598...`; fallback `ALLOW_PUBLIC_UPSTREAM=1` | `ci/baseline_manifest.py`; `config/0140.env`, `config/0131b.env` |
 | Main | ramdisk + USB combined (squashed 2026-10-29) | see `docs/en/11-ci-baseline.md` |
+
+## Build provenance (2026-11-01)
+
+- Apple xnu: `xnu-8796.141.3` (`f625db25...`).
+- Baseline: 82 files, manifest root `829d7598...`; private mirror, public
+  fallback `ALLOW_PUBLIC_UPSTREAM=1`.
+- Current line (0144 + 0145): patchset `9f7b41cf...` (141 files); kernel full
+  `9c82ea75...`, core `34c8a93f...`, exec `62a17d48...`; CI `41222632828`;
+  image `66352038...` (`config/0144.env`).
+- Build harness: `blacktop/darwin-xnu-build` @ `6639065`; macOS 13.5 xnu
+  built on a `macos-15` runner with Xcode 16.0; `DEVELOPMENT` +
+  `MACHINE_CONFIG=SWEET`, `-mcpu=cortex-a55`.
+- The exec-data hash is the build gate; the earlier lines keep their hashes
+  in the dated sections below.
 
 ## Build provenance (2026-10-30)
 

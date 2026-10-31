@@ -135,8 +135,8 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: f47f4c19... (main, 139 files; historical 27894e7b... 137, 29449e32... 135)
-runner:   macos-14 / Xcode 15.0.1 / macOS 13.5 xnu
+patchset: 9f7b41cf... (main, 141 files; historical f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
+runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 

@@ -122,8 +122,8 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: f47f4c19...（main，139 文件；历史 27894e7b... 137、29449e32... 135）
-runner:   macos-14 / Xcode 15.0.1 / macOS 13.5 xnu
+patchset: 9f7b41cf...（main，141 文件；历史 f47f4c19... 139、27894e7b... 137、29449e32... 135）
+runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 

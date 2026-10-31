@@ -48,7 +48,7 @@
    `ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>`），做 LF
    归一化并校验清单根。
 2. 加入本分支补丁，应用 0010/0012 改动，归一化并校验 patchset 哈希。
-3. 用 `blacktop/darwin-xnu-build` 在 `macos-14` + Xcode 15.0.1 上构建。
+3. 用 `blacktop/darwin-xnu-build` 在 `macos-15` + Xcode 16.0 上构建。
 4. 校验内核 exec-data 哈希。
 
 ## 本地检查

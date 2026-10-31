@@ -29,10 +29,10 @@
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（不复制上游树）
-patchset: 27894e7b...（main，137 文件）
-          USB 分支：29449e32...（135 文件），config/0131b.env
+patchset: 9f7b41cf...（main，141 文件）
+          历史：f47f4c19...（139 文件），config/0143.env
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
-runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
+runner:   macos-15, Xcode 16.0, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
