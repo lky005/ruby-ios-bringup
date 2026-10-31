@@ -5,6 +5,15 @@
 **在 MediaTek MT6877 手机上运行 XNU 8796 + iPhone X iOS 16.7.16 用户态。**
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
+> **状态 2026-11-01：** 构建迁移到托管的 `macos-15` 镜像 + Xcode 16.0；
+> 内核源码未变，接口编译步骤仍正常生成。这条线新增一个只读板级探针
+> （pwrap、受限的 I2C 扫描、GPIO/时钟/KPD/WDT 状态、分段快照）走 USB
+> 控制台，并修掉枚举窗口：主机现在第一次尝试就能完成配置。
+> CI `41229568807` 与 patchset `9f7b41cf...`（141 文件）、exec-data
+> `62a17d48...` 一致。探针在一次真机运行里拿到板级数据（看门狗未使能、
+> I2C5 四个 ACK、MT6360 可经 I2C5 读取），10 分钟只读空转检查无 panic；
+> 两条 pwrap 读数要等 pwrap 初始化落地才会有。
+>
 > **状态 2026-10-30：** USB 线更新到 0143：EP2 IN bulk MPS 512、511 B
 > 日志帧（16 B 头 + 最多 495 B 文本）、64 GPD TX 环（最多 63 个在飞）、
 > rearm 时重置 TX 环。CI `41022192026` 与 patchset `f47f4c19...`
@@ -122,8 +131,8 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: f47f4c19...（main，139 文件；历史 27894e7b... 137、29449e32... 135）
-runner:   macos-14 / Xcode 15.0.1 / macOS 13.5 xnu
+patchset: 9f7b41cf...（main，141 文件；历史 f47f4c19... 139、27894e7b... 137、29449e32... 135）
+runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 

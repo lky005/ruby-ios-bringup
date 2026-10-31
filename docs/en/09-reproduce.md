@@ -33,10 +33,10 @@ For the public fallback, run
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (no upstream tree copied here)
-patchset: 27894e7b... (main, 137 files)
-          USB branch: 29449e32... (135 files), config/0131b.env
+patchset: 9f7b41cf... (main, 141 files)
+          historical: f47f4c19... (139 files), config/0143.env
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
-runner:   macos-14, Xcode 15.0.1, macOS 13.5 xnu
+runner:   macos-15, Xcode 16.0, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 

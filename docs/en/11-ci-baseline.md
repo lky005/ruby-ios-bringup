@@ -53,7 +53,7 @@ project's delta.
    and verify the manifest root.
 2. Add the branch's project patches, apply the 0010/0012 change, normalize and
    verify the canonical patchset hash.
-3. Build with `blacktop/darwin-xnu-build` on `macos-14` with Xcode 15.0.1.
+3. Build with `blacktop/darwin-xnu-build` on `macos-15` with Xcode 16.0.
 4. Gate the kernel's exec-data hash.
 
 ## Local check

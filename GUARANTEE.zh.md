@@ -43,6 +43,10 @@ stock LK -> XNU 8796 -> iOS 16.7.16 用户态
 | 项 | 值 | 说明 |
 |---|---|---|
 | 基线 | `MakrSas/ios-topaz@5095ac1` | 上游 commit |
+| Patchset（当前线） | `9f7b41cf...` | 141 个文件；recipe 输出；workflow 只认这个哈希 |
+| 当前内核 | `9c82ea75...` | exec-data `62a17d48...`；CI `41229568807` |
+| 当前镜像 | `66352038...` | 外部文件，不在仓库里 |
+| 当前启动参数 | `config/0144-boot.cmdline` | 只读探针命令行（`sweetgt=0`、`rubyprobe=1`） |
 | Patchset（0085） | `cf4008e3...` | 88 个文件；与 harness 构建一致 |
 | Patchset（0084） | `de1824c2...` | 87 个文件；上一里程碑 |
 | 0010/0012 改动 | `1edb6633...` | 小的基线补丁 |
@@ -103,10 +107,12 @@ root 和 boot 镜像**不在仓库**：它们含不可分发的 Apple/Android �
 
 ## hash 稳定性
 
-固定 / 启动前（身份）：0085 patchset `cf4008e3...`、0084 patchset
+固定 / 启动前（身份）：当前 patchset `9f7b41cf...`（141 个文件）及其 exec-data
+`62a17d48...`、0085 patchset `cf4008e3...`、0084 patchset
 `de1824c2...`、启动参数、ICL 块、命名的 root 快照（A/B/C/A'），以及某次
 run 的 kernel/payload/image 工件。CI 构建不是位级一致；patchset hash 是
-源码门禁，Mach-O exec-data hash 是工件门禁（0085 参考 `e4823afb...`）；
+源码门禁，Mach-O exec-data hash 是工件门禁（当前参考 `62a17d48...`，0085 参考
+`e4823afb...`）；
 记录该 run 的实际完整 artifact hash。A' 是一次首启快照；新的首启会是一个
 新状态。
 
@@ -117,9 +123,11 @@ hash。
 
 ## 保证
 
-- Patchset 和 recipe：workflow 只有在 recipe 还原出 `cf4008e3...`（88 个
-  文件）时才编译；0085 首次 CI run `39694456200` 已成功，exec-data 与实机
-  内核一致。
+- Patchset 和 recipe：workflow 只有在 recipe 还原出 `9f7b41cf...`（141 个
+  文件）时才编译；当前 CI run `41229568807` 已成功，exec-data 与记录的
+  基线 `62a17d48...` 一致。
+- 早期里程碑保留各自的身份：0085 patchset `cf4008e3...`（88 个文件）与 run
+  `39694456200`，其 exec-data 与实机内核一致。
 - 离线工具：host 检查、合成与真实 ICL 块往返。
 - 成功路径的文档化步骤和范围。
 - 2026-10-22 的单台设备证据（B+NOP 首启 -> A'、CI kernel 启动），作为

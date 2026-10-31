@@ -22,18 +22,18 @@
 | `src/bringup/repack_stock.py` | 用 payload 重打 stock 镜像 | 离线写 | 早期 bring-up |
 | `src/ufs-probe/build_ufs_full.py` | 打包 UFS 探针 | 离线写 | UFS 探针镜像 |
 | `scripts/fetch-base.sh` | 拉固定基线供检查 | 只读/网络 | 可选 |
-| `scripts/verify-local.py` | 主机检查 | 只读 | 本地通过 |
+| `scripts/verify-local.py` | 主机检查：语法、禁媒体、个人路径与密钥、CI pin、工具链 pin、EN/ZH 文档集一致、提交信息中性、可选的敏感词清单、markdown 链接、ICL 往返 | 只读 | 本地通过 |
 | `scripts/check-bundle.py` | 刷前核对工件 hash | 只读 | 由 config 驱动 |
 | `.github/workflows/xnu.yml` | 构建当前内核 | CI 构建 | recipe + patchset 哈希 |
 | `ci/prepare-baseline.sh` | 取基线、校验清单根、加补丁、校验哈希 | 网络 + 临时写 | 本地已测 |
-| `ci/patchset_hash.py` | patchset 规范哈希（当前线：139 文件；历史 137/135） | 只读 | 与 recipe 一致 |
+| `ci/patchset_hash.py` | patchset 规范哈希（当前线：141 文件；历史 139/137/135） | 只读 | 与 recipe 一致 |
 | `ci/baseline-changes.patch` | 0010/0012 小改动 | 数据 | 哈希固定 |
 | `scripts/build-payload.sh` | 从 kernel+ADT+cmdline 生成 payload | 网络 + 离线写 | 已测 |
 | `tools/image/pack_boot.py` | 确定性 128 MiB boot 镜像 | 离线写 | 已测 |
 | `tools/image/boot_layout.py` | 重建镜像 vs golden 布局对比 | 只读 | 已测 |
 | `scripts/test-pipeline.sh` | payload → pack → layout（0084 里程碑） | 临时写 | 0084 通过；0085 用 `09-reproduce` 的三条命令 |
 | `tools/host/ruby_usb_host.py` | USB 上位机会话管理（`status`/`cmd`/`watch`）；EP0 只读，一条 EP2 OUT 命令，可选单次 `pnputil` 重启 | 仅主机；僵死设备可能掉链 | 0143/0150/0151 实测；见 [`12-usb-host`](12-usb-host.md) |
-| `config/0140.env`、`config/0131b.env`、`config/0142.env`、`config/0143.env` | 分支 pin 与 boot cmdline；0086 文件为历史 | 数据 | run/pin 检查 |
+| `config/0140.env`、`config/0131b.env`、`config/0142.env`、`config/0143.env`、`config/0144.env` | 分支 pin 与 boot cmdline；0086 文件为历史 | 数据 | run/pin 检查 |
 | `config/0085.env`、`0085-boot.cmdline` | 来源记录（真实触摸） | 数据 | run/pin 检查 |
 | `config/0084.env`、`0084-boot.cmdline` | 上一里程碑（合成上滑） | 数据 | 历史 |
 

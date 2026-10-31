@@ -48,7 +48,19 @@ jobs:
         run: python3 ci/baseline_manifest.py --self-test
 
       - name: Host verification
-        run: python3 scripts/verify-local.py --ci-config config/0143.env
+        env:
+          # Base64 of the private denylist (device identifiers and private
+          # directory names).  It stays out of the repository; the scan only
+          # reports pattern indices, never the pattern itself.
+          PUBLIC_DENYLIST: ${{ secrets.PUBLIC_DENYLIST }}
+        run: |
+          if [ -n "$PUBLIC_DENYLIST" ]; then
+            printf '%s' "$PUBLIC_DENYLIST" | base64 -d > "$RUNNER_TEMP/denylist.txt"
+            python3 scripts/verify-local.py --ci-config config/0144.env --denylist "$RUNNER_TEMP/denylist.txt"
+            rm -f "$RUNNER_TEMP/denylist.txt"
+          else
+            python3 scripts/verify-local.py --ci-config config/0144.env
+          fi
 
       - name: Build TWRP tools
         run: |

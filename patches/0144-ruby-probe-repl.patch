@@ -1,0 +1,1553 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 3f70dec..db6ac24 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -110,6 +110,7 @@ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
+ bsd/dev/ruby_usb.c			standard
++bsd/dev/ruby_probe.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/ruby_probe.c b/bsd/dev/ruby_probe.c
+new file mode 100644
+index 0000000..1abd8b7
+--- /dev/null
++++ b/bsd/dev/ruby_probe.c
+@@ -0,0 +1,1488 @@
++/*
++ * Ruby (MT6877) P0 read-only board probe.
++ *
++ * The USB command channel in ruby_usb.c calls ruby_probe_cmd() for the
++ * commands implemented here.  The probe maps the board blocks it needs and
++ * provides bounded pwrap/bit-bang I2C/GPIO/clock/KPD/WDT access.  It writes
++ * only the I2C pin takeover/restore fields and the WDT pet/off registers;
++ * PMIC, rails and clock gates stay read-only.
++ *
++ * Boot args: rubyprobe=1 enables the GPIO/pin writes; rubypmic=1 additionally
++ * enables pwrap/I2C writes (not used by P0).  The default is read-only.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++
++#include "ruby_probe.h"
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++
++#define PR_GPIO_PA       0x10005000u
++#define PR_PWRAP_PA      0x10026000u
++#define PR_KPD_PA        0x10010000u
++#define PR_EINT_PA       0x1000b000u
++#define PR_WDT_PA        0x10007000u
++#define PR_IFRAO_PA      0x10001000u
++#define PR_IMP_S_PA      0x11d04000u
++#define PR_IMP_N_PA      0x11f01000u
++
++#define PR_GPIO_SIZE     0x1000u
++#define PR_REG_SIZE      0x1000u
++
++#define PR_PWRAP_EN      0x090u
++#define PR_PWRAP_INIT    0x094u
++#define PR_PWRAP_CMD     0xc20u
++#define PR_PWRAP_RDATA   0xc24u
++#define PR_PWRAP_VLDCLR  0xc28u
++
++#define PR_WDT_MODE      0x00u
++#define PR_WDT_LENGTH    0x04u
++#define PR_WDT_RST       0x08u
++#define PR_WDT_LATCH     0x48u
++#define PR_WDT_MODE_OFF  0x22000000u
++#define PR_WDT_RST_ALT   0x1971u
++
++#define PR_I2C_BUDGET    4000u   /* 5 us phases: about 20 ms per transaction */
++
++struct pr_i2c_bus {
++	uint8_t  bus;
++	uint32_t dir_off, do_off, di_off;
++	uint32_t mode_off;
++	uint32_t mode_scl_shift, mode_sda_shift;
++	uint32_t iocfg_idx;
++	uint32_t ies_off, ies_scl_shift, ies_sda_shift;
++	uint32_t pu_off, pu_scl_shift, pu_sda_shift;
++	uint32_t pd_off, pd_scl_shift, pd_sda_shift;
++	uint32_t smt_off, smt_scl_shift, smt_sda_shift;
++	uint32_t drv_scl_off, drv_scl_shift;
++	uint32_t drv_sda_off, drv_sda_shift;
++	bool     taken;
++	uint32_t s_mode_scl, s_mode_sda;
++	uint32_t s_dir_scl, s_dir_sda;
++	uint32_t s_do_scl, s_do_sda;
++	uint32_t s_ies_scl, s_ies_sda;
++	uint32_t s_pu_scl, s_pu_sda;
++	uint32_t s_pd_scl, s_pd_sda;
++	uint32_t s_smt_scl, s_smt_sda;
++	uint32_t s_drv_scl, s_drv_sda;
++};
++
++struct pr_gate {
++	const char *name;
++	int which;              /* 0 = IFRAO, 1 = imp_iic_s, 2 = imp_iic_n */
++	uint32_t set_off, clr_off, sta_off;
++};
++
++struct pr_state {
++	vm_offset_t gpio, pwrap, kpd, eint, wdt;
++	vm_offset_t ifrao, imp_s, imp_n;
++	vm_offset_t iocfg[8];
++	struct pr_i2c_bus i2c[2];
++	bool ready;
++	bool probe_writes;
++	bool pmic_writes;
++};
++
++static struct pr_state pr;
++
++static const uint32_t pr_iocfg_pa[8] = {
++	0x11c20000u, 0x11c30000u, 0x11d10000u, 0x11d30000u,
++	0x11d40000u, 0x11e20000u, 0x11ea0000u, 0x11f30000u
++};
++
++static const struct pr_gate pr_gates[] = {
++	{ "ifrao_0",   0, 0x080u, 0x084u, 0x090u },
++	{ "ifrao_1",   0, 0x088u, 0x08cu, 0x094u },
++	{ "ifrao_2",   0, 0x0a4u, 0x0a8u, 0x0acu },
++	{ "ifrao_3",   0, 0x0c0u, 0x0c4u, 0x0c8u },
++	{ "ifrao_4",   0, 0x0e0u, 0x0e4u, 0x0e8u },
++	{ "imp_iic_s", 1, 0xe08u, 0xe04u, 0xe00u },
++	{ "imp_iic_n", 2, 0xe08u, 0xe04u, 0xe00u },
++};
++
++static uint32_t pr_i2c_budget;
++static uint32_t pr_snap_lines;
++static bool pr_snap_trunc;
++
++#define PR_LINE(...) do { \
++	if (pr_snap_lines < 80) { \
++		printf(__VA_ARGS__); \
++		pr_snap_lines++; \
++	} else { \
++		pr_snap_trunc = true; \
++	} \
++} while (0)
++
++static uint32_t
++pr_rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++pr_wr32(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static uint16_t
++pr_rd16(vm_offset_t base, uint32_t off)
++{
++	uint16_t v = *(volatile uint16_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static uint32_t
++pr_mask(uint32_t width)
++{
++	return (1u << width) - 1u;
++}
++
++static uint32_t
++pr_field_get(vm_offset_t base, uint32_t off, uint32_t shift, uint32_t width)
++{
++	return (pr_rd32(base, off) >> shift) & pr_mask(width);
++}
++
++static void
++pr_field_set(vm_offset_t base, uint32_t off, uint32_t shift, uint32_t width,
++    uint32_t val)
++{
++	uint32_t mask = pr_mask(width) << shift;
++	uint32_t v = pr_rd32(base, off);
++
++	v = (v & ~mask) | ((val & pr_mask(width)) << shift);
++	pr_wr32(base, off, v);
++}
++
++static const char *
++pr_skip(const char *s)
++{
++	while (*s == ' ' || *s == '\t')
++		s++;
++	return s;
++}
++
++/* Returns 1 and advances *sp on success, 0 on malformed input. */
++static int
++pr_parse_u32(const char **sp, uint32_t *out)
++{
++	const char *s = pr_skip(*sp);
++	uint64_t v = 0;
++	uint32_t base = 10, digits = 0;
++
++	if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
++		base = 16;
++		s += 2;
++	}
++	for (;;) {
++		uint32_t d;
++
++		if (*s >= '0' && *s <= '9')
++			d = (uint32_t)(*s - '0');
++		else if (base == 16 && *s >= 'a' && *s <= 'f')
++			d = (uint32_t)(*s - 'a' + 10);
++		else if (base == 16 && *s >= 'A' && *s <= 'F')
++			d = (uint32_t)(*s - 'A' + 10);
++		else
++			break;
++		if (v > 0xffffffffull / base)
++			return 0;
++		v = v * base + d;
++		if (v > 0xffffffffull)
++			return 0;
++		digits++;
++		s++;
++	}
++	if (!digits)
++		return 0;
++	*sp = s;
++	*out = (uint32_t)v;
++	return 1;
++}
++
++/* Exact word match; returns the char after the word, or NULL. */
++static const char *
++pr_word(const char *s, const char *word)
++{
++	size_t n = strlen(word);
++
++	if (strncmp(s, word, n) != 0)
++		return NULL;
++	if (s[n] != '\0' && s[n] != ' ' && s[n] != '\t')
++		return NULL;
++	return pr_skip(s + n);
++}
++
++static int
++pr_sub(const char **sp, const char *word)
++{
++	const char *a = pr_word(*sp, word);
++
++	if (!a)
++		return 0;
++	*sp = a;
++	return 1;
++}
++
++static vm_offset_t
++pr_gate_base(int which)
++{
++	switch (which) {
++	case 0:
++		return pr.ifrao;
++	case 1:
++		return pr.imp_s;
++	case 2:
++		return pr.imp_n;
++	default:
++		return 0;
++	}
++}
++
++static const struct pr_gate *
++pr_gate_find(const char *name)
++{
++	uint32_t i;
++
++	for (i = 0; i < sizeof(pr_gates) / sizeof(pr_gates[0]); i++) {
++		if (pr_word(name, pr_gates[i].name) != NULL)
++			return &pr_gates[i];
++	}
++	return NULL;
++}
++
++/* ---- I2C bit-bang ------------------------------------------------------ */
++
++static void
++pr_i2c_delay(void)
++{
++	delay(5);
++	if (pr_i2c_budget)
++		pr_i2c_budget--;
++}
++
++static void
++pr_scl_release(struct pr_i2c_bus *b)
++{
++	pr_field_set(pr.gpio, b->do_off, 4, 1, 1);
++	pr_field_set(pr.gpio, b->dir_off, 4, 1, 0);
++}
++
++static void
++pr_scl_low(struct pr_i2c_bus *b)
++{
++	pr_field_set(pr.gpio, b->do_off, 4, 1, 0);
++	pr_field_set(pr.gpio, b->dir_off, 4, 1, 1);
++}
++
++static void
++pr_sda_release(struct pr_i2c_bus *b)
++{
++	pr_field_set(pr.gpio, b->do_off, 5, 1, 1);
++	pr_field_set(pr.gpio, b->dir_off, 5, 1, 0);
++}
++
++static void
++pr_sda_low(struct pr_i2c_bus *b)
++{
++	pr_field_set(pr.gpio, b->do_off, 5, 1, 0);
++	pr_field_set(pr.gpio, b->dir_off, 5, 1, 1);
++}
++
++/* Release SCL and wait for a slave to stop stretching it. */
++static int
++pr_scl_high(struct pr_i2c_bus *b)
++{
++	int i;
++
++	pr_scl_release(b);
++	for (i = 0; i < 1000; i++) {
++		if (pr_rd32(pr.gpio, b->di_off) & (1u << 4))
++			return 1;
++		if (!pr_i2c_budget)
++			return 0;
++		delay(1);
++	}
++	return 0;
++}
++
++static int
++pr_i2c_start(struct pr_i2c_bus *b)
++{
++	pr_i2c_budget = PR_I2C_BUDGET;
++	pr_sda_release(b);
++	if (!pr_scl_high(b))
++		return 0;
++	pr_i2c_delay();
++	pr_sda_low(b);
++	pr_i2c_delay();
++	pr_scl_low(b);
++	pr_i2c_delay();
++	return 1;
++}
++
++static void
++pr_i2c_stop(struct pr_i2c_bus *b)
++{
++	pr_sda_low(b);
++	pr_i2c_delay();
++	(void)pr_scl_high(b);
++	pr_i2c_delay();
++	pr_sda_release(b);
++	pr_i2c_delay();
++}
++
++static int
++pr_i2c_write_bit(struct pr_i2c_bus *b, int bit)
++{
++	if (bit)
++		pr_sda_release(b);
++	else
++		pr_sda_low(b);
++	pr_i2c_delay();
++	if (!pr_scl_high(b))
++		return 0;
++	pr_i2c_delay();
++	pr_scl_low(b);
++	pr_i2c_delay();
++	return 1;
++}
++
++/* Returns the bit, or -1 on a stretched/hung SCL. */
++static int
++pr_i2c_read_bit(struct pr_i2c_bus *b)
++{
++	int bit;
++
++	pr_sda_release(b);
++	pr_i2c_delay();
++	if (!pr_scl_high(b))
++		return -1;
++	pr_i2c_delay();
++	bit = (pr_rd32(pr.gpio, b->di_off) & (1u << 5)) != 0;
++	pr_scl_low(b);
++	pr_i2c_delay();
++	return bit;
++}
++
++/* 1 = ACK, 0 = NAK, -1 = timeout/stuck bus. */
++static int
++pr_i2c_write_byte(struct pr_i2c_bus *b, uint8_t val)
++{
++	int i, ack;
++
++	for (i = 7; i >= 0; i--) {
++		if (!pr_i2c_write_bit(b, (val >> i) & 1))
++			return -1;
++	}
++	pr_sda_release(b);
++	pr_i2c_delay();
++	if (!pr_scl_high(b))
++		return -1;
++	pr_i2c_delay();
++	ack = (pr_rd32(pr.gpio, b->di_off) & (1u << 5)) == 0;
++	pr_scl_low(b);
++	pr_i2c_delay();
++	return ack ? 1 : 0;
++}
++
++static int
++pr_i2c_read_byte(struct pr_i2c_bus *b, int ack)
++{
++	uint8_t val = 0;
++	int i, bit;
++
++	for (i = 7; i >= 0; i--) {
++		bit = pr_i2c_read_bit(b);
++		if (bit < 0)
++			return -1;
++		if (bit)
++			val |= (uint8_t)(1u << i);
++	}
++	if (ack)
++		pr_sda_low(b);
++	else
++		pr_sda_release(b);
++	pr_i2c_delay();
++	if (!pr_scl_high(b))
++		return -1;
++	pr_i2c_delay();
++	pr_scl_low(b);
++	pr_i2c_delay();
++	pr_sda_release(b);
++	return val;
++}
++
++static uint8_t
++pr_crc8(const uint8_t *p, int n)
++{
++	uint8_t crc = 0;
++	int i, b;
++
++	for (i = 0; i < n; i++) {
++		crc ^= p[i];
++		for (b = 0; b < 8; b++) {
++			crc = (crc & 0x80) ?
++			    (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
++		}
++	}
++	return crc;
++}
++
++static void
++pr_i2c_recover(struct pr_i2c_bus *b)
++{
++	int i;
++
++	pr_sda_release(b);
++	pr_scl_release(b);
++	delay(10);
++	for (i = 0; i < 9; i++) {
++		pr_scl_low(b);
++		pr_i2c_delay();
++		pr_scl_release(b);
++		pr_i2c_delay();
++	}
++	pr_sda_low(b);
++	pr_i2c_delay();
++	pr_scl_release(b);
++	pr_i2c_delay();
++	pr_sda_release(b);
++	pr_i2c_delay();
++	printf("RUBY PROBE: i2c%u recover DI=%08x\n", (unsigned)b->bus,
++	    pr_rd32(pr.gpio, b->di_off));
++}
++
++static int
++pr_i2c_take(struct pr_i2c_bus *b)
++{
++	vm_offset_t cfg;
++
++	if (b->taken)
++		return 0;
++	if (!pr.gpio || !b->iocfg_idx || !pr.iocfg[b->iocfg_idx])
++		return ENODEV;
++	cfg = pr.iocfg[b->iocfg_idx];
++
++	b->s_mode_scl = pr_field_get(pr.gpio, b->mode_off, b->mode_scl_shift, 4);
++	b->s_mode_sda = pr_field_get(pr.gpio, b->mode_off, b->mode_sda_shift, 4);
++	b->s_dir_scl = pr_field_get(pr.gpio, b->dir_off, 4, 1);
++	b->s_dir_sda = pr_field_get(pr.gpio, b->dir_off, 5, 1);
++	b->s_do_scl = pr_field_get(pr.gpio, b->do_off, 4, 1);
++	b->s_do_sda = pr_field_get(pr.gpio, b->do_off, 5, 1);
++	b->s_ies_scl = pr_field_get(cfg, b->ies_off, b->ies_scl_shift, 1);
++	b->s_ies_sda = pr_field_get(cfg, b->ies_off, b->ies_sda_shift, 1);
++	b->s_pu_scl = pr_field_get(cfg, b->pu_off, b->pu_scl_shift, 1);
++	b->s_pu_sda = pr_field_get(cfg, b->pu_off, b->pu_sda_shift, 1);
++	b->s_pd_scl = pr_field_get(cfg, b->pd_off, b->pd_scl_shift, 1);
++	b->s_pd_sda = pr_field_get(cfg, b->pd_off, b->pd_sda_shift, 1);
++	b->s_smt_scl = pr_field_get(cfg, b->smt_off, b->smt_scl_shift, 1);
++	b->s_smt_sda = pr_field_get(cfg, b->smt_off, b->smt_sda_shift, 1);
++	b->s_drv_scl = pr_field_get(cfg, b->drv_scl_off, b->drv_scl_shift, 3);
++	b->s_drv_sda = pr_field_get(cfg, b->drv_sda_off, b->drv_sda_shift, 3);
++	b->taken = true;
++
++	pr_field_set(pr.gpio, b->mode_off, b->mode_scl_shift, 4, 0);
++	pr_field_set(pr.gpio, b->mode_off, b->mode_sda_shift, 4, 0);
++	pr_field_set(pr.gpio, b->dir_off, 4, 1, 0);
++	pr_field_set(pr.gpio, b->dir_off, 5, 1, 0);
++	pr_field_set(pr.gpio, b->do_off, 4, 1, 1);
++	pr_field_set(pr.gpio, b->do_off, 5, 1, 1);
++	pr_field_set(cfg, b->ies_off, b->ies_scl_shift, 1, 1);
++	pr_field_set(cfg, b->ies_off, b->ies_sda_shift, 1, 1);
++	pr_field_set(cfg, b->pu_off, b->pu_scl_shift, 1, 1);
++	pr_field_set(cfg, b->pu_off, b->pu_sda_shift, 1, 1);
++	pr_field_set(cfg, b->pd_off, b->pd_scl_shift, 1, 0);
++	pr_field_set(cfg, b->pd_off, b->pd_sda_shift, 1, 0);
++	delay(20);
++
++	if (!(pr_rd32(pr.gpio, b->di_off) & (1u << 4)) ||
++	    !(pr_rd32(pr.gpio, b->di_off) & (1u << 5))) {
++		printf("RUBY PROBE: i2c%u line low (mode=%08x dir=%08x do=%08x DI=%08x)\n",
++		    (unsigned)b->bus, pr_rd32(pr.gpio, b->mode_off),
++		    pr_rd32(pr.gpio, b->dir_off), pr_rd32(pr.gpio, b->do_off),
++		    pr_rd32(pr.gpio, b->di_off));
++		pr_i2c_recover(b);
++		if (!(pr_rd32(pr.gpio, b->di_off) & (1u << 4)) ||
++		    !(pr_rd32(pr.gpio, b->di_off) & (1u << 5))) {
++			printf("RUBY PROBE: i2c%u line stuck; check pull-up/pinmux\n",
++			    (unsigned)b->bus);
++			return EIO;
++		}
++	}
++	printf("RUBY PROBE: i2c%u taken (SCL/SDA high)\n", (unsigned)b->bus);
++	return 0;
++}
++
++static int
++pr_i2c_release(struct pr_i2c_bus *b)
++{
++	vm_offset_t cfg;
++
++	if (!b->taken)
++		return 0;
++	cfg = pr.iocfg[b->iocfg_idx];
++	pr_field_set(pr.gpio, b->mode_off, b->mode_scl_shift, 4, b->s_mode_scl);
++	pr_field_set(pr.gpio, b->mode_off, b->mode_sda_shift, 4, b->s_mode_sda);
++	pr_field_set(pr.gpio, b->dir_off, 4, 1, b->s_dir_scl);
++	pr_field_set(pr.gpio, b->dir_off, 5, 1, b->s_dir_sda);
++	pr_field_set(pr.gpio, b->do_off, 4, 1, b->s_do_scl);
++	pr_field_set(pr.gpio, b->do_off, 5, 1, b->s_do_sda);
++	pr_field_set(cfg, b->ies_off, b->ies_scl_shift, 1, b->s_ies_scl);
++	pr_field_set(cfg, b->ies_off, b->ies_sda_shift, 1, b->s_ies_sda);
++	pr_field_set(cfg, b->pu_off, b->pu_scl_shift, 1, b->s_pu_scl);
++	pr_field_set(cfg, b->pu_off, b->pu_sda_shift, 1, b->s_pu_sda);
++	pr_field_set(cfg, b->pd_off, b->pd_scl_shift, 1, b->s_pd_scl);
++	pr_field_set(cfg, b->pd_off, b->pd_sda_shift, 1, b->s_pd_sda);
++	pr_field_set(cfg, b->smt_off, b->smt_scl_shift, 1, b->s_smt_scl);
++	pr_field_set(cfg, b->smt_off, b->smt_sda_shift, 1, b->s_smt_sda);
++	pr_field_set(cfg, b->drv_scl_off, b->drv_scl_shift, 3, b->s_drv_scl);
++	pr_field_set(cfg, b->drv_sda_off, b->drv_sda_shift, 3, b->s_drv_sda);
++	b->taken = false;
++	printf("RUBY PROBE: i2c%u released\n", (unsigned)b->bus);
++	return 0;
++}
++
++static void
++pr_i2c_line(struct pr_i2c_bus *b)
++{
++	vm_offset_t cfg;
++
++	if (!pr.gpio || !b->iocfg_idx || !pr.iocfg[b->iocfg_idx]) {
++		printf("RUBY PROBE: i2c%u iocfg/gpio not mapped\n", (unsigned)b->bus);
++		return;
++	}
++	cfg = pr.iocfg[b->iocfg_idx];
++	printf("RUBY PROBE: i2c%u DI=%08x SCL=%u SDA=%u mode=%08x dir=%08x do=%08x\n",
++	    (unsigned)b->bus, pr_rd32(pr.gpio, b->di_off),
++	    (pr_rd32(pr.gpio, b->di_off) >> 4) & 1,
++	    (pr_rd32(pr.gpio, b->di_off) >> 5) & 1,
++	    pr_rd32(pr.gpio, b->mode_off), pr_rd32(pr.gpio, b->dir_off),
++	    pr_rd32(pr.gpio, b->do_off));
++	printf("RUBY PROBE: i2c%u ies=%08x pu=%08x pd=%08x smt=%08x drv=%08x/%08x\n",
++	    (unsigned)b->bus, pr_rd32(cfg, b->ies_off), pr_rd32(cfg, b->pu_off),
++	    pr_rd32(cfg, b->pd_off), pr_rd32(cfg, b->smt_off),
++	    pr_rd32(cfg, b->drv_scl_off), pr_rd32(cfg, b->drv_sda_off));
++}
++
++static int
++pr_i2c_scan_bus(struct pr_i2c_bus *b)
++{
++	uint32_t addr;
++	int found = 0, ack;
++
++	for (addr = 0x08; addr <= 0x77; addr++) {
++		if (!pr_i2c_start(b)) {
++			printf("RUBY PROBE: i2c%u scan start failed at 0x%02x\n",
++			    (unsigned)b->bus, addr);
++			return ETIMEDOUT;
++		}
++		ack = pr_i2c_write_byte(b, (uint8_t)(addr << 1));
++		pr_i2c_stop(b);
++		if (ack == 1) {
++			printf("RUBY PROBE: i2c%u ack 0x%02x\n", (unsigned)b->bus, addr);
++			found++;
++		} else if (ack < 0) {
++			printf("RUBY PROBE: i2c%u scan error at 0x%02x\n",
++			    (unsigned)b->bus, addr);
++			return ETIMEDOUT;
++		}
++	}
++	printf("RUBY PROBE: i2c%u scan done, %d ack\n", (unsigned)b->bus, found);
++	return 0;
++}
++
++static int
++pr_i2c_read_regs(struct pr_i2c_bus *b, uint8_t addr, uint8_t reg,
++    uint8_t *buf, uint32_t len)
++{
++	uint32_t i;
++	int ack, v;
++
++	if (len == 0 || len > 16)
++		return EINVAL;
++	if (!pr_i2c_start(b))
++		return ETIMEDOUT;
++	if ((ack = pr_i2c_write_byte(b, (uint8_t)(addr << 1))) != 1)
++		goto out;
++	if ((ack = pr_i2c_write_byte(b, reg)) != 1)
++		goto out;
++	if (!pr_i2c_start(b)) {
++		pr_i2c_stop(b);
++		return ETIMEDOUT;
++	}
++	if ((ack = pr_i2c_write_byte(b, (uint8_t)((addr << 1) | 1))) != 1)
++		goto out;
++	for (i = 0; i < len; i++) {
++		v = pr_i2c_read_byte(b, i + 1 < len);
++		if (v < 0) {
++			pr_i2c_stop(b);
++			return ETIMEDOUT;
++		}
++		buf[i] = (uint8_t)v;
++	}
++	pr_i2c_stop(b);
++	return 0;
++
++out:
++	pr_i2c_stop(b);
++	return ack < 0 ? ETIMEDOUT : ENXIO;
++}
++
++static int
++pr_smb_read(struct pr_i2c_bus *b, uint8_t addr, uint8_t reg, uint8_t *val)
++{
++	uint8_t d[2], c[3];
++	int ack;
++
++	if (!pr_i2c_start(b))
++		return ETIMEDOUT;
++	if ((ack = pr_i2c_write_byte(b, (uint8_t)(addr << 1))) != 1)
++		goto out;
++	if ((ack = pr_i2c_write_byte(b, (uint8_t)(reg & 0x3f))) != 1)
++		goto out;
++	if (!pr_i2c_start(b)) {
++		pr_i2c_stop(b);
++		return ETIMEDOUT;
++	}
++	if ((ack = pr_i2c_write_byte(b, (uint8_t)((addr << 1) | 1))) != 1)
++		goto out;
++	if ((ack = pr_i2c_read_byte(b, 1)) < 0)
++		goto out;
++	d[0] = (uint8_t)ack;
++	if ((ack = pr_i2c_read_byte(b, 0)) < 0)
++		goto out;
++	d[1] = (uint8_t)ack;
++	pr_i2c_stop(b);
++	c[0] = (uint8_t)((addr << 1) | 1);
++	c[1] = (uint8_t)(reg & 0x3f);
++	c[2] = d[0];
++	if (pr_crc8(c, 3) != d[1])
++		return EIO;
++	*val = d[0];
++	return 0;
++
++out:
++	pr_i2c_stop(b);
++	return ack < 0 ? ETIMEDOUT : ENXIO;
++}
++
++/* ---- pwrap ------------------------------------------------------------- */
++
++static int
++pr_pwrap_check(void)
++{
++	uint32_t en, init, rd;
++
++	if (!pr.pwrap)
++		return ENODEV;
++	en = pr_rd32(pr.pwrap, PR_PWRAP_EN);
++	init = pr_rd32(pr.pwrap, PR_PWRAP_INIT);
++	rd = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
++	if (!(en & 1u) || !((init & 1u) || (rd & (1u << 21)))) {
++		printf("RUBY PMIC: pwrap not ready en=%08x init=%08x rd=%08x\n",
++		    en, init, rd);
++		return ENODEV;
++	}
++	return 0;
++}
++
++static int
++pr_pwrap_wait(uint32_t fsm)
++{
++	uint32_t i, v;
++
++	for (i = 0; i < 10000; i++) {
++		v = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
++		if (((v >> 16) & 7u) == fsm)
++			return 0;
++	}
++	printf("RUBY PMIC: pwrap wait fsm=%u timeout rd=%08x\n", fsm, v);
++	return ETIMEDOUT;
++}
++
++static int
++pr_pwrap_read(uint16_t reg, uint16_t *val)
++{
++	uint32_t rd;
++	int err;
++
++	if ((err = pr_pwrap_check()) != 0)
++		return err;
++	if ((err = pr_pwrap_wait(0)) != 0)
++		return err;
++	pr_wr32(pr.pwrap, PR_PWRAP_CMD, (uint32_t)(reg >> 1) << 16);
++	if ((err = pr_pwrap_wait(6)) != 0)
++		return err;
++	rd = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
++	*val = (uint16_t)(rd & 0xffffu);
++	pr_wr32(pr.pwrap, PR_PWRAP_VLDCLR, 1);
++	return 0;
++}
++
++static int
++pr_pwrap_write(uint16_t reg, uint16_t val)
++{
++	int err;
++
++	if (!pr.pmic_writes) {
++		printf("RUBY PMIC: pwrap write locked (rubypmic=1)\n");
++		return EACCES;
++	}
++	if ((err = pr_pwrap_check()) != 0)
++		return err;
++	if ((err = pr_pwrap_wait(0)) != 0)
++		return err;
++	pr_wr32(pr.pwrap, PR_PWRAP_CMD,
++	    (1u << 31) | ((uint32_t)(reg >> 1) << 16) | val);
++	return pr_pwrap_wait(0);
++}
++
++/* ---- WDT --------------------------------------------------------------- */
++
++static void
++pr_wdt_dump(const char *tag)
++{
++	uint32_t mode, len, rst, latch;
++
++	if (!pr.wdt) {
++		printf("RUBY WDT: not mapped\n");
++		return;
++	}
++	mode = pr_rd32(pr.wdt, PR_WDT_MODE);
++	len = pr_rd32(pr.wdt, PR_WDT_LENGTH);
++	rst = pr_rd32(pr.wdt, PR_WDT_RST);
++	latch = pr_rd32(pr.wdt, PR_WDT_LATCH);
++	printf("RUBY WDT: %s mode=%08x en=%u auto=%u dual=%u len=%08x rst=%08x latch=%08x\n",
++	    tag, mode, mode & 1u, (mode >> 4) & 1u, (mode >> 6) & 1u,
++	    len, rst, latch);
++}
++
++static int
++pr_wdt_pet(void)
++{
++	uint32_t v;
++
++	if (!pr.probe_writes) {
++		printf("RUBY WDT: pet locked (rubyprobe=1)\n");
++		return EACCES;
++	}
++	if (!pr.wdt) {
++		printf("RUBY WDT: not mapped\n");
++		return ENODEV;
++	}
++	pr_wr32(pr.wdt, PR_WDT_RST, 1);
++	v = pr_rd32(pr.wdt, PR_WDT_RST);
++	if (v != 1) {
++		pr_wr32(pr.wdt, PR_WDT_RST, PR_WDT_RST_ALT);
++		v = pr_rd32(pr.wdt, PR_WDT_RST);
++	}
++	printf("RUBY WDT: pet rst=%08x\n", v);
++	return 0;
++}
++
++static int
++pr_wdt_off(void)
++{
++	if (!pr.probe_writes) {
++		printf("RUBY WDT: off locked (rubyprobe=1)\n");
++		return EACCES;
++	}
++	if (!pr.wdt) {
++		printf("RUBY WDT: not mapped\n");
++		return ENODEV;
++	}
++	pr_wr32(pr.wdt, PR_WDT_MODE, PR_WDT_MODE_OFF);
++	pr_wdt_dump("after-off");
++	return 0;
++}
++
++/* ---- GPIO / keys ------------------------------------------------------- */
++
++static void
++pr_gpio_read(uint32_t pin)
++{
++	uint32_t bank = pin / 32, group = pin / 8;
++	uint32_t shift = (pin % 8) * 4;
++	uint32_t dir_off = 0x000 + bank * 0x10;
++	uint32_t do_off = 0x100 + bank * 0x10;
++	uint32_t di_off = 0x200 + bank * 0x10;
++	uint32_t mode_off = 0x300 + group * 0x10;
++	uint32_t mode;
++
++	if (!pr.gpio) {
++		printf("RUBY PROBE: gpio not mapped\n");
++		return;
++	}
++	if (pin > 208) {
++		printf("RUBY CMD: err: gpio pin 0..208\n");
++		return;
++	}
++	mode = pr_field_get(pr.gpio, mode_off, shift, 4);
++	printf("RUBY PROBE: gpio%u mode=%u dir=%u do=%u di=%u (mode[%02x]=%08x)\n",
++	    pin, mode, pr_field_get(pr.gpio, dir_off, pin % 32, 1),
++	    pr_field_get(pr.gpio, do_off, pin % 32, 1),
++	    pr_field_get(pr.gpio, di_off, pin % 32, 1),
++	    mode_off, pr_rd32(pr.gpio, mode_off));
++}
++
++static void
++pr_keyscan(void)
++{
++	uint32_t b;
++
++	if (!pr.gpio) {
++		printf("RUBY PROBE: gpio not mapped\n");
++		return;
++	}
++	printf("RUBY PROBE: keyscan DI banks 0-6\n");
++	for (b = 0; b <= 6; b++)
++		printf("RUBY PROBE: DI%u=%08x\n", b, pr_rd32(pr.gpio, 0x200 + b * 0x10));
++}
++
++static void
++pr_kpd_dump(void)
++{
++	if (!pr.kpd) {
++		printf("RUBY PROBE: KPD not mapped\n");
++		return;
++	}
++	printf("RUBY PROBE: KPD sta=%04x mem=%04x %04x %04x %04x %04x deb=%04x sel=%08x en=%08x\n",
++	    pr_rd16(pr.kpd, 0x00),
++	    pr_rd16(pr.kpd, 0x04), pr_rd16(pr.kpd, 0x08),
++	    pr_rd16(pr.kpd, 0x0c), pr_rd16(pr.kpd, 0x10),
++	    pr_rd16(pr.kpd, 0x14), pr_rd16(pr.kpd, 0x18),
++	    pr_rd32(pr.kpd, 0x20), pr_rd32(pr.kpd, 0x24));
++}
++
++/* ---- snap -------------------------------------------------------------- */
++
++static void
++pr_snap_pmic(void)
++{
++	uint8_t v;
++	uint8_t id[2];
++	uint16_t w;
++	uint32_t en, init, rd;
++	int err;
++
++	if (!pr.pwrap) {
++		PR_LINE("RUBY SNAP: pwrap not mapped\n");
++	} else {
++		en = pr_rd32(pr.pwrap, PR_PWRAP_EN);
++		init = pr_rd32(pr.pwrap, PR_PWRAP_INIT);
++		rd = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
++		PR_LINE("RUBY SNAP: pwrap en=%08x init=%08x rd=%08x\n", en, init, rd);
++		if ((err = pr_pwrap_read(0x0008, &w)) == 0)
++			PR_LINE("RUBY SNAP: MT6359 HWCID=0x%04x\n", w);
++		else
++			PR_LINE("RUBY SNAP: MT6359 HWCID err=%d\n", err);
++		if ((err = pr_pwrap_read(0x002a, &w)) == 0)
++			PR_LINE("RUBY SNAP: MT6359 TOPSTATUS=0x%04x\n", w);
++		else
++			PR_LINE("RUBY SNAP: MT6359 TOPSTATUS err=%d\n", err);
++		if ((err = pr_pwrap_read(0x0a16, &w)) == 0)
++			PR_LINE("RUBY SNAP: MT6359 PWRKEY=0x%04x\n", w);
++		else
++			PR_LINE("RUBY SNAP: MT6359 PWRKEY err=%d\n", err);
++	}
++
++	if (pr_i2c_take(&pr.i2c[0]) == 0) {
++		if ((err = pr_smb_read(&pr.i2c[0], 0x64, 0x09, &v)) == 0)
++			PR_LINE("RUBY SNAP: MT6360 LDO3_VOUT=0x%02x\n", v);
++		else
++			PR_LINE("RUBY SNAP: MT6360 LDO3_VOUT err=%d\n", err);
++		if ((err = pr_smb_read(&pr.i2c[0], 0x64, 0x15, &v)) == 0)
++			PR_LINE("RUBY SNAP: MT6360 LDO2_VOUT=0x%02x\n", v);
++		else
++			PR_LINE("RUBY SNAP: MT6360 LDO2_VOUT err=%d\n", err);
++		if ((err = pr_i2c_read_regs(&pr.i2c[0], 0x34, 0x00, id, 1)) == 0)
++			PR_LINE("RUBY SNAP: MT6360 PMU DEV_INFO=0x%02x\n", id[0]);
++		else
++			PR_LINE("RUBY SNAP: MT6360 PMU err=%d\n", err);
++		if ((err = pr_i2c_read_regs(&pr.i2c[0], 0x4e, 0x00, id, 2)) == 0)
++			PR_LINE("RUBY SNAP: MT6360 TCPC VID=0x%02x%02x\n", id[1], id[0]);
++		else
++			PR_LINE("RUBY SNAP: MT6360 TCPC VID err=%d\n", err);
++		if ((err = pr_i2c_read_regs(&pr.i2c[0], 0x4e, 0x02, id, 2)) == 0)
++			PR_LINE("RUBY SNAP: MT6360 TCPC PID=0x%02x%02x\n", id[1], id[0]);
++		else
++			PR_LINE("RUBY SNAP: MT6360 TCPC PID err=%d\n", err);
++	} else {
++		PR_LINE("RUBY SNAP: i2c5 take failed\n");
++	}
++}
++
++static void
++pr_snap_gpio(void)
++{
++	uint32_t b, g;
++
++	if (!pr.gpio) {
++		PR_LINE("RUBY SNAP: gpio not mapped\n");
++		return;
++	}
++	for (b = 0; b <= 6; b++) {
++		PR_LINE("RUBY SNAP: GPIO bank%u dir=%08x do=%08x di=%08x\n",
++		    b, pr_rd32(pr.gpio, 0x000 + b * 0x10),
++		    pr_rd32(pr.gpio, 0x100 + b * 0x10),
++		    pr_rd32(pr.gpio, 0x200 + b * 0x10));
++	}
++	for (g = 0; g < 27; g += 4) {
++		PR_LINE("RUBY SNAP: MODE g%02u %08x %08x %08x %08x\n", g,
++		    pr_rd32(pr.gpio, 0x300 + g * 0x10),
++		    g + 1 < 27 ? pr_rd32(pr.gpio, 0x300 + (g + 1) * 0x10) : 0,
++		    g + 2 < 27 ? pr_rd32(pr.gpio, 0x300 + (g + 2) * 0x10) : 0,
++		    g + 3 < 27 ? pr_rd32(pr.gpio, 0x300 + (g + 3) * 0x10) : 0);
++	}
++}
++
++static void
++pr_snap_clk(void)
++{
++	uint32_t i;
++	vm_offset_t base;
++
++	for (i = 0; i < sizeof(pr_gates) / sizeof(pr_gates[0]); i++) {
++		base = pr_gate_base(pr_gates[i].which);
++		if (!base)
++			continue;
++		PR_LINE("RUBY SNAP: clk %-10s set=%08x clr=%08x sta=%08x\n",
++		    pr_gates[i].name, pr_rd32(base, pr_gates[i].set_off),
++		    pr_rd32(base, pr_gates[i].clr_off),
++		    pr_rd32(base, pr_gates[i].sta_off));
++	}
++}
++
++static void
++pr_snap_iocfg(void)
++{
++	uint32_t i, off;
++
++	for (i = 0; i < 8; i++) {
++		if (!pr.iocfg[i])
++			continue;
++		PR_LINE("RUBY SNAP: iocfg%u @%08x\n", i, pr_iocfg_pa[i]);
++		for (off = 0; off <= 0x100; off += 0x10) {
++			PR_LINE("RUBY SNAP: iocfg%u[%02x] %08x %08x %08x %08x\n",
++			    i, off,
++			    pr_rd32(pr.iocfg[i], off),
++			    pr_rd32(pr.iocfg[i], off + 4),
++			    pr_rd32(pr.iocfg[i], off + 8),
++			    pr_rd32(pr.iocfg[i], off + 12));
++		}
++	}
++}
++
++static void
++pr_snap_wdt(void)
++{
++	uint32_t mode, len, rst, latch;
++
++	if (!pr.wdt) {
++		PR_LINE("RUBY SNAP: wdt not mapped\n");
++		return;
++	}
++	mode = pr_rd32(pr.wdt, PR_WDT_MODE);
++	len = pr_rd32(pr.wdt, PR_WDT_LENGTH);
++	rst = pr_rd32(pr.wdt, PR_WDT_RST);
++	latch = pr_rd32(pr.wdt, PR_WDT_LATCH);
++	PR_LINE("RUBY SNAP: wdt mode=%08x en=%u auto=%u dual=%u len=%08x rst=%08x latch=%08x\n",
++	    mode, mode & 1u, (mode >> 4) & 1u, (mode >> 6) & 1u,
++	    len, rst, latch);
++}
++
++static void
++pr_snap_do(const char *sec)
++{
++	pr_snap_lines = 0;
++	pr_snap_trunc = false;
++	printf("RUBY SNAP: begin section=%s\n", sec);
++	if (!strcmp(sec, "pmic")) {
++		pr_snap_pmic();
++	} else if (!strcmp(sec, "gpio")) {
++		pr_snap_gpio();
++	} else if (!strcmp(sec, "clk")) {
++		pr_snap_clk();
++	} else if (!strcmp(sec, "iocfg")) {
++		pr_snap_iocfg();
++	} else if (!strcmp(sec, "wdt")) {
++		pr_snap_wdt();
++	} else if (!strcmp(sec, "all")) {
++		PR_LINE("RUBY SNAP: -- pmic --\n");
++		pr_snap_pmic();
++		PR_LINE("RUBY SNAP: -- gpio --\n");
++		pr_snap_gpio();
++		PR_LINE("RUBY SNAP: -- clk --\n");
++		pr_snap_clk();
++		PR_LINE("RUBY SNAP: -- wdt --\n");
++		pr_snap_wdt();
++	} else {
++		printf("RUBY SNAP: unknown section=%s\n", sec);
++	}
++	if (pr_snap_trunc)
++		printf("RUBY SNAP: truncated at %u lines\n", pr_snap_lines);
++	printf("RUBY SNAP: end section=%s lines=%u%s\n", sec, pr_snap_lines,
++	    pr_snap_trunc ? " truncated" : "");
++}
++
++static void
++pr_pmic_survey(void)
++{
++	uint8_t v, id[2];
++	uint16_t w;
++	uint32_t en, init, rd;
++	int err;
++
++	if (!pr.pwrap) {
++		printf("RUBY PMIC: pwrap not mapped\n");
++		return;
++	}
++	en = pr_rd32(pr.pwrap, PR_PWRAP_EN);
++	init = pr_rd32(pr.pwrap, PR_PWRAP_INIT);
++	rd = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
++	printf("RUBY PMIC: pwrap en=%08x init=%08x rd=%08x\n", en, init, rd);
++	if ((err = pr_pwrap_read(0x0008, &w)) == 0)
++		printf("RUBY PMIC: MT6359 HWCID=0x%04x\n", w);
++	else
++		printf("RUBY PMIC: MT6359 HWCID err=%d\n", err);
++	if ((err = pr_pwrap_read(0x002a, &w)) == 0)
++		printf("RUBY PMIC: MT6359 TOPSTATUS=0x%04x\n", w);
++	else
++		printf("RUBY PMIC: MT6359 TOPSTATUS err=%d\n", err);
++	if ((err = pr_pwrap_read(0x0a16, &w)) == 0)
++		printf("RUBY PMIC: MT6359 PWRKEY=0x%04x\n", w);
++	else
++		printf("RUBY PMIC: MT6359 PWRKEY err=%d\n", err);
++
++	if (pr_i2c_take(&pr.i2c[0]) != 0) {
++		printf("RUBY PMIC: i2c5 take failed; LDO/PMU/TCPC not probed\n");
++		return;
++	}
++	if ((err = pr_smb_read(&pr.i2c[0], 0x64, 0x05, &v)) == 0)
++		printf("RUBY PMIC: MT6360 LDO3_EN=0x%02x\n", v);
++	else
++		printf("RUBY PMIC: MT6360 LDO3_EN err=%d\n", err);
++	if ((err = pr_smb_read(&pr.i2c[0], 0x64, 0x09, &v)) == 0)
++		printf("RUBY PMIC: MT6360 LDO3_VOUT=0x%02x\n", v);
++	else
++		printf("RUBY PMIC: MT6360 LDO3_VOUT err=%d\n", err);
++	if ((err = pr_smb_read(&pr.i2c[0], 0x64, 0x11, &v)) == 0)
++		printf("RUBY PMIC: MT6360 LDO2_EN=0x%02x\n", v);
++	else
++		printf("RUBY PMIC: MT6360 LDO2_EN err=%d\n", err);
++	if ((err = pr_smb_read(&pr.i2c[0], 0x64, 0x15, &v)) == 0)
++		printf("RUBY PMIC: MT6360 LDO2_VOUT=0x%02x\n", v);
++	else
++		printf("RUBY PMIC: MT6360 LDO2_VOUT err=%d\n", err);
++	if ((err = pr_i2c_read_regs(&pr.i2c[0], 0x34, 0x00, id, 1)) == 0)
++		printf("RUBY PMIC: MT6360 PMU DEV_INFO=0x%02x\n", id[0]);
++	else
++		printf("RUBY PMIC: MT6360 PMU err=%d\n", err);
++	if ((err = pr_i2c_read_regs(&pr.i2c[0], 0x4e, 0x00, id, 2)) == 0)
++		printf("RUBY PMIC: MT6360 TCPC VID=0x%02x%02x\n", id[1], id[0]);
++	else
++		printf("RUBY PMIC: MT6360 TCPC VID err=%d\n", err);
++	if ((err = pr_i2c_read_regs(&pr.i2c[0], 0x4e, 0x02, id, 2)) == 0)
++		printf("RUBY PMIC: MT6360 TCPC PID=0x%02x%02x\n", id[1], id[0]);
++	else
++		printf("RUBY PMIC: MT6360 TCPC PID err=%d\n", err);
++	(void)pr_i2c_scan_bus(&pr.i2c[0]);
++}
++
++/* ---- commands ---------------------------------------------------------- */
++
++static void
++pr_help(void)
++{
++	printf("RUBY CMD: help pwrap gpio i2c clk kpd keyscan wdt snap pmic_survey\n");
++	printf("RUBY CMD: pwrap r <reg> | w <reg> <val> (rubypmic)\n");
++	printf("RUBY CMD: i2c <5|6> take|line|scan|recover|release|r <addr> <reg> <len>|smb <addr> <reg>\n");
++	printf("RUBY CMD: gpio <pin> | clk <gate> [bit] sta | kpd | keyscan\n");
++	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|all]\n");
++}
++
++static int
++pr_cmd_pwrap(char *line)
++{
++	const char *p = pr_skip(line + 6);
++	uint32_t reg, val;
++	uint16_t v;
++	int err;
++
++	if (*p == 'r' && (p[1] == ' ' || p[1] == '\t')) {
++		p = pr_skip(p + 1);
++		if (!pr_parse_u32(&p, &reg) || *pr_skip(p) != '\0') {
++			printf("RUBY CMD: err: pwrap r <reg>\n");
++			return 1;
++		}
++		err = pr_pwrap_read((uint16_t)reg, &v);
++		if (err)
++			printf("RUBY PMIC: pwrap r 0x%04x err=%d\n", reg, err);
++		else
++			printf("RUBY PMIC: pwrap[0x%04x]=0x%04x\n", reg, v);
++		return 1;
++	}
++	if (*p == 'w' && (p[1] == ' ' || p[1] == '\t')) {
++		p = pr_skip(p + 1);
++		if (!pr_parse_u32(&p, &reg) || !pr_parse_u32(&p, &val) ||
++		    *pr_skip(p) != '\0') {
++			printf("RUBY CMD: err: pwrap w <reg> <val>\n");
++			return 1;
++		}
++		err = pr_pwrap_write((uint16_t)reg, (uint16_t)val);
++		if (err)
++			printf("RUBY PMIC: pwrap w 0x%04x err=%d\n", reg, err);
++		else
++			printf("RUBY PMIC: pwrap w 0x%04x=0x%04x\n", reg, val);
++		return 1;
++	}
++	printf("RUBY CMD: err: pwrap r|w\n");
++	return 1;
++}
++
++static int
++pr_cmd_i2c(char *line)
++{
++	const char *p = pr_skip(line + 4);
++	uint32_t bus, addr, reg, len, i;
++	struct pr_i2c_bus *b;
++	uint8_t buf[16], v;
++	int err;
++
++	if (!pr_parse_u32(&p, &bus) || (bus != 5 && bus != 6)) {
++		printf("RUBY CMD: err: i2c <5|6> ...\n");
++		return 1;
++	}
++	b = (bus == 5) ? &pr.i2c[0] : &pr.i2c[1];
++	p = pr_skip(p);
++	if (*p == '\0') {
++		printf("RUBY CMD: err: i2c <5|6> take|line|scan|recover|release|r|smb\n");
++		return 1;
++	}
++	if (pr_sub(&p, "take")) {
++		err = pr_i2c_take(b);
++		printf("RUBY PROBE: i2c%u take err=%d\n", bus, err);
++		return 1;
++	}
++	if (pr_sub(&p, "line")) {
++		pr_i2c_line(b);
++		return 1;
++	}
++	if (pr_sub(&p, "scan")) {
++		err = pr_i2c_take(b);
++		if (!err)
++			err = pr_i2c_scan_bus(b);
++		printf("RUBY PROBE: i2c%u scan err=%d\n", bus, err);
++		return 1;
++	}
++	if (pr_sub(&p, "recover")) {
++		err = pr_i2c_take(b);
++		if (!err)
++			pr_i2c_recover(b);
++		printf("RUBY PROBE: i2c%u recover err=%d\n", bus, err);
++		return 1;
++	}
++	if (pr_sub(&p, "release")) {
++		err = pr_i2c_release(b);
++		printf("RUBY PROBE: i2c%u release err=%d\n", bus, err);
++		return 1;
++	}
++	if (pr_sub(&p, "r")) {
++		if (!pr_parse_u32(&p, &addr) || !pr_parse_u32(&p, &reg) ||
++		    !pr_parse_u32(&p, &len) || len == 0 || len > 16 ||
++		    *pr_skip(p) != '\0') {
++			printf("RUBY CMD: err: i2c <5|6> r <addr> <reg> <len>\n");
++			return 1;
++		}
++		err = pr_i2c_take(b);
++		if (!err)
++			err = pr_i2c_read_regs(b, (uint8_t)addr, (uint8_t)reg, buf, len);
++		if (err) {
++			printf("RUBY PROBE: i2c%u r 0x%02x/0x%02x err=%d\n",
++			    bus, addr, reg, err);
++			return 1;
++		}
++		printf("RUBY PROBE: i2c%u r 0x%02x/0x%02x:", bus, addr, reg);
++		for (i = 0; i < len; i++)
++			printf(" %02x", buf[i]);
++		printf("\n");
++		return 1;
++	}
++	if (pr_sub(&p, "smb")) {
++		if (!pr_parse_u32(&p, &addr) || !pr_parse_u32(&p, &reg) ||
++		    *pr_skip(p) != '\0') {
++			printf("RUBY CMD: err: i2c <5|6> smb <addr> <reg>\n");
++			return 1;
++		}
++		err = pr_i2c_take(b);
++		if (!err)
++			err = pr_smb_read(b, (uint8_t)addr, (uint8_t)reg, &v);
++		if (err)
++			printf("RUBY PROBE: i2c%u smb 0x%02x/0x%02x err=%d\n",
++			    bus, addr, reg, err);
++		else
++			printf("RUBY PROBE: i2c%u smb 0x%02x/0x%02x=0x%02x\n",
++			    bus, addr, reg, v);
++		return 1;
++	}
++	printf("RUBY CMD: err: i2c subcommand\n");
++	return 1;
++}
++
++static int
++pr_cmd_clk(char *line)
++{
++	const char *p = pr_skip(line + 3);
++	const struct pr_gate *g;
++	char name[16];
++	const char *q = p;
++	uint32_t n = 0, bit = 0, have_bit = 0;
++	vm_offset_t base;
++	uint32_t sta;
++
++	while (*q && *q != ' ' && *q != '\t' && n + 1 < sizeof(name))
++		name[n++] = *q++;
++	name[n] = '\0';
++	while (*q == ' ' || *q == '\t')
++		q++;
++	g = pr_gate_find(name);
++	if (!g) {
++		printf("RUBY CMD: err: unknown gate %s\n", name);
++		return 1;
++	}
++	if (pr_word(q, "sta") != NULL) {
++		have_bit = 0;
++	} else {
++		const char *r = q;
++
++		if (!pr_parse_u32(&r, &bit) || bit >= 32 ||
++		    *pr_skip(r) == '\0') {
++			printf("RUBY CMD: err: clk <gate> [bit] sta\n");
++			return 1;
++		}
++		q = pr_skip(r);
++		if (pr_word(q, "sta") == NULL) {
++			printf("RUBY CMD: err: clk <gate> [bit] sta\n");
++			return 1;
++		}
++		have_bit = 1;
++	}
++	base = pr_gate_base(g->which);
++	if (!base) {
++		printf("RUBY PROBE: clk %s not mapped\n", g->name);
++		return 1;
++	}
++	sta = pr_rd32(base, g->sta_off);
++	if (have_bit)
++		printf("RUBY PROBE: clk %s sta=%08x bit%u=%u (1=gated)\n",
++		    g->name, sta, bit, (sta >> bit) & 1u);
++	else
++		printf("RUBY PROBE: clk %s sta=%08x\n", g->name, sta);
++	return 1;
++}
++
++static int
++pr_cmd_wdt(const char *p)
++{
++	if (*p == '\0') {
++		pr_wdt_dump("read");
++		return 1;
++	}
++	if (pr_word(p, "pet") != NULL) {
++		(void)pr_wdt_pet();
++		return 1;
++	}
++	if (pr_word(p, "off") != NULL) {
++		(void)pr_wdt_off();
++		return 1;
++	}
++	printf("RUBY CMD: err: wdt [pet|off]\n");
++	return 1;
++}
++
++static int
++pr_cmd_snap(const char *p)
++{
++	char sec[16];
++	uint32_t n = 0;
++	const char *q = p;
++
++	if (*p == '\0') {
++		pr_snap_do("pmic");
++		return 1;
++	}
++	while (*q && *q != ' ' && *q != '\t' && n + 1 < sizeof(sec))
++		sec[n++] = *q++;
++	sec[n] = '\0';
++	if (*pr_skip(q) != '\0') {
++		printf("RUBY CMD: err: snap [pmic|gpio|clk|iocfg|wdt|all]\n");
++		return 1;
++	}
++	if (strcmp(sec, "pmic") && strcmp(sec, "gpio") && strcmp(sec, "clk") &&
++	    strcmp(sec, "iocfg") && strcmp(sec, "wdt") && strcmp(sec, "all")) {
++		printf("RUBY CMD: err: snap section %s\n", sec);
++		return 1;
++	}
++	pr_snap_do(sec);
++	return 1;
++}
++
++int
++ruby_probe_cmd(char *line)
++{
++	const char *p = pr_skip(line);
++	uint32_t pin;
++
++	if (*p == '\0')
++		return 0;
++	if (!strcmp(p, "help")) {
++		pr_help();
++		return 1;
++	}
++	if (!strncmp(p, "pwrap ", 6))
++		return pr_cmd_pwrap(line);
++	if (!strncmp(p, "i2c ", 4))
++		return pr_cmd_i2c(line);
++	if (!strncmp(p, "gpio ", 5)) {
++		p = pr_skip(p + 5);
++		if (!pr_parse_u32(&p, &pin) || *pr_skip(p) != '\0') {
++			printf("RUBY CMD: err: gpio <pin>\n");
++			return 1;
++		}
++		pr_gpio_read(pin);
++		return 1;
++	}
++	if (!strncmp(p, "clk ", 4))
++		return pr_cmd_clk(line);
++	if (!strcmp(p, "kpd")) {
++		pr_kpd_dump();
++		return 1;
++	}
++	if (!strcmp(p, "keyscan")) {
++		pr_keyscan();
++		return 1;
++	}
++	if (!strcmp(p, "wdt"))
++		return pr_cmd_wdt(p + 3);
++	if (!strncmp(p, "wdt ", 4))
++		return pr_cmd_wdt(p + 4);
++	if (!strcmp(p, "snap")) {
++		pr_snap_do("pmic");
++		return 1;
++	}
++	if (!strncmp(p, "snap ", 5))
++		return pr_cmd_snap(p + 5);
++	if (!strcmp(p, "pmic_survey")) {
++		pr_pmic_survey();
++		return 1;
++	}
++	return 0;
++}
++
++/* ---- init -------------------------------------------------------------- */
++
++static void
++pr_i2c_bus_init(struct pr_i2c_bus *b, int bus)
++{
++	b->bus = (uint8_t)bus;
++	b->taken = false;
++	if (bus == 5) {
++		b->dir_off = 0x040;
++		b->do_off = 0x140;
++		b->di_off = 0x240;
++		b->mode_off = 0x400;
++		b->mode_scl_shift = 16;
++		b->mode_sda_shift = 20;
++		b->iocfg_idx = 4;
++		b->ies_off = 0x080;
++		b->ies_scl_shift = 0;
++		b->ies_sda_shift = 3;
++		b->pu_off = 0x0c0;
++		b->pu_scl_shift = 0;
++		b->pu_sda_shift = 3;
++		b->pd_off = 0x0a0;
++		b->pd_scl_shift = 0;
++		b->pd_sda_shift = 3;
++		b->smt_off = 0x100;
++		b->smt_scl_shift = 21;
++		b->smt_sda_shift = 21;
++		b->drv_scl_off = 0x020;
++		b->drv_scl_shift = 24;
++		b->drv_sda_off = 0x030;
++		b->drv_sda_shift = 3;
++	} else {
++		b->dir_off = 0x010;
++		b->do_off = 0x110;
++		b->di_off = 0x210;
++		b->mode_off = 0x340;
++		b->mode_scl_shift = 16;
++		b->mode_sda_shift = 20;
++		b->iocfg_idx = 7;
++		b->ies_off = 0x050;
++		b->ies_scl_shift = 17;
++		b->ies_sda_shift = 18;
++		b->pu_off = 0x080;
++		b->pu_scl_shift = 5;
++		b->pu_sda_shift = 6;
++		b->pd_off = 0x060;
++		b->pd_scl_shift = 5;
++		b->pd_sda_shift = 6;
++		b->smt_off = 0x0f0;
++		b->smt_scl_shift = 14;
++		b->smt_sda_shift = 15;
++		b->drv_scl_off = 0x010;
++		b->drv_scl_shift = 12;
++		b->drv_sda_off = 0x010;
++		b->drv_sda_shift = 15;
++	}
++}
++
++int
++ruby_probe_init(void)
++{
++	int v;
++	uint32_t i;
++
++	memset(&pr, 0, sizeof(pr));
++	v = 0;
++	if (PE_parse_boot_argn("rubyprobe", &v, sizeof(v)) && v == 1)
++		pr.probe_writes = true;
++	v = 0;
++	if (PE_parse_boot_argn("rubypmic", &v, sizeof(v)) && v == 1)
++		pr.pmic_writes = true;
++
++	pr.gpio = ml_io_map(PR_GPIO_PA, PR_GPIO_SIZE);
++	pr.pwrap = ml_io_map(PR_PWRAP_PA, PR_REG_SIZE);
++	pr.kpd = ml_io_map(PR_KPD_PA, PR_REG_SIZE);
++	pr.eint = ml_io_map(PR_EINT_PA, PR_REG_SIZE);
++	pr.wdt = ml_io_map(PR_WDT_PA, PR_REG_SIZE);
++	pr.ifrao = ml_io_map(PR_IFRAO_PA, PR_REG_SIZE);
++	pr.imp_s = ml_io_map(PR_IMP_S_PA, PR_REG_SIZE);
++	pr.imp_n = ml_io_map(PR_IMP_N_PA, PR_REG_SIZE);
++	for (i = 0; i < 8; i++)
++		pr.iocfg[i] = ml_io_map(pr_iocfg_pa[i], PR_REG_SIZE);
++
++	pr_i2c_bus_init(&pr.i2c[0], 5);
++	pr_i2c_bus_init(&pr.i2c[1], 6);
++	pr.ready = (pr.gpio != 0 && pr.pwrap != 0);
++	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d\n",
++	    pr.gpio != 0, pr.pwrap != 0, pr.kpd != 0, pr.wdt != 0,
++	    pr.iocfg[4] != 0, pr.iocfg[7] != 0,
++	    pr.probe_writes, pr.pmic_writes);
++	return pr.ready ? 0 : ENODEV;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ruby_probe.h b/bsd/dev/ruby_probe.h
+new file mode 100644
+index 0000000..6f3066a
+--- /dev/null
++++ b/bsd/dev/ruby_probe.h
+@@ -0,0 +1,9 @@
++#ifndef _BSD_DEV_RUBY_PROBE_H_
++#define _BSD_DEV_RUBY_PROBE_H_
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++int ruby_probe_init(void);
++int ruby_probe_cmd(char *line);
++#endif
++
++#endif /* _BSD_DEV_RUBY_PROBE_H_ */
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index d64cb47..0d70cd3 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -19,6 +19,8 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ 
++#include "ruby_probe.h"
++
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+ #define IPPC_PA      0x11203e00UL
+@@ -2311,6 +2313,8 @@ ruby_cmd_dispatch(vm_offset_t mac, char *line)
+         line++;
+     if (!*line)
+         return;
++    if (ruby_probe_cmd(line))
++        return;
+     if (ruby_cmd_streq(line, "help")) {
+         printf("RUBY CMD: help stat ring echo r32 w32 dump <text>\n");
+         return;
+@@ -3309,6 +3313,9 @@ ruby_usb_probe(void)
+         return;
+     }
+ 
++    if (ruby_probe_init() != 0)
++        printf("RUBY USB: probe init failed\n");
++
+     if (ruby_dump_on()) {
+         ruby_dump_dt();
+         ruby_dump_dt_strings();

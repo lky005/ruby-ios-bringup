@@ -9,8 +9,8 @@
 
 ## What is verified (2026-10-30) [measured]
 
-- Kernel 0143 (patchset `f47f4c19...`, 139 files; CI `41022192026`;
-  exec-data `6fa65088...`) runs USB 2.0 device mode as a vendor-specific
+- Kernel 0144+0145 (patchset `9f7b41cf...`, 141 files; CI `41229568807`;
+  exec-data `62a17d48...`) runs USB 2.0 device mode as a vendor-specific
   device (`1209:0002`) with one bulk OUT (`0x02`, 64-byte MPS) and one bulk
   IN (`0x82`, 512-byte MPS).
 - Enumeration, SET_CONFIGURATION and High-Speed are green; the kernel emits
@@ -153,6 +153,24 @@ python tools/host/ruby_usb_host.py watch --pace-ms 5 --log session.log
   wedged but still enumerated device. It needs an elevated shell; treat it
   as a last resort.
 
+## Session limits [measured]
+
+- One EP2 OUT session survives about twenty command writes; afterwards the
+  writes time out until the device re-enumerates. Send the whole command
+  set in a single write - the kernel parses the buffer line by line, so one
+  write can carry every command.
+- A device stall halts the EP0 IN endpoint **for that handle only**: later
+  control reads on the same handle fail with a pipe error, while a freshly
+  opened handle works again. Reopen the handle instead of retrying on it.
+- `0x2A` must be read behind the write cursor: a request that reaches the
+  cursor or past it makes the kernel stall EP0 IN, and the console flush
+  trails the write cursor. Read in small slices with a margin.
+- EP0 `0x2C`/`0x2D` register access works; a same-value write-back is
+  verified. A pipe error after a different-value write means the write
+  already landed.
+- There is no hot-plug recovery: once the endpoint is halted, only a
+  physical power cycle brings the device back.
+
 ## Protocol details [measured]
 
 ### EP0 vendor requests
@@ -216,7 +234,7 @@ read with `0x2C` until a kernel mapping is added.
 
 ## Evidence and limits
 
-- Build: CI `41022192026`; patchset `f47f4c19...` (139 files); kernel full
+- Build: CI `41229568807`; patchset `9f7b41cf...` (141 files); kernel full
   `d2eae74d...`, exec-data `6fa65088...`; image `5b6b8411...`
   (`config/0143.env`).
 - Device runs: 2026-10-30, author's host, CC and AC setups; small samples.

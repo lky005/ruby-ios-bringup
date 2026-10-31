@@ -24,6 +24,9 @@ wrong turns.
 | 10-21 | ICL NOP | 4-byte `bl`→`nop` | boot22 lock screen 58 s |
 | 10-21 | Autoswipe | 0084 kernel timer | boot23 warm 22 s from the Apple logo, home screen, animations |
 | 10-22 | Real touch | 0085 Goodix SPI bit-bang, LDO VOUT 1.8/3.3 V | real bottom-edge unlock, two-contact HID dispatch, edge |
+| 11-01 | Toolchain | build moved to a hosted `macos-15` image with Xcode 16.0; source unchanged | CI green; the interface-compiler step still generates cleanly |
+| 11-01 | Enumeration | 0145 widens the attach window from 4 s to 12 s and raises the attempt budget | the host configures the device on the first try |
+| 11-01 | Board probe | 0144 read-only probe commands over the USB console | 17 of 19 commands returned board data; the two pwrap reads stay empty |
 
 ## Failure catalogue
 
@@ -83,6 +86,13 @@ proved the chip. Revisit the controller (DMA or FIFO reset) for rate/IRQ later.
 VTP 1.8 V; enabling without writing VOUT leaves AVDD undervolted and the chip
 silent. Read the old VOUT, power-cycle, write 1.8 V/3.3 V, read back.
 
+
+**D11 — One write per session.** The EP2 OUT channel only survives about
+twenty writes per session, and the kernel parses the OUT buffer line by
+line, so the whole command set goes out in a single write. A device stall
+halts the EP0 IN endpoint for that handle only; reopen the handle and read
+behind the write cursor. There is no hot-plug recovery: a halted endpoint
+needs a physical power cycle.
 ## Do not repeat
 
 - Do not question kernel notification delivery without a `sent=1` trace.

@@ -23,7 +23,8 @@ BASELINE_FILES=${BASELINE_FILES:-82}
 ALLOW_PUBLIC_UPSTREAM=${ALLOW_PUBLIC_UPSTREAM:-0}
 BASE_REPO=${BASE_REPO:-https://github.com/MakrSas/ios-topaz.git}
 BASE_SHA=${BASE_SHA:-5095ac19dbdcf37b64b81fe443f4027ad51b84bf}
-PATCHSET_SHA256=${PATCHSET_SHA256:-f47f4c19c138d0f2e4bf6b0d6ac53dc895bc216c1084c0f4dd41c09b332edb4c}
+PATCHSET_SHA256=${PATCHSET_SHA256:-9f7b41cf26cc495ce1c0fcfacabcd27bf607b13718218c90809d200d53f1e011}
+SKIP_PATCHES=${SKIP_PATCHES:-}
 PYTHON=${PYTHON:-python3}
 DEST=${1:-baseline}
 
@@ -130,11 +131,24 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0141-ruby-usb-decouple.patch" \
     "$ROOT/patches/0142-ruby-ep2-mps512.patch" \
     "$ROOT/patches/0143-ruby-ep2-frame511-rearm-drain.patch" \
+    "$ROOT/patches/0144-ruby-probe-repl.patch" \
+    "$ROOT/patches/0145-ruby-usb-enum-window.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
     "$ROOT/patches/historical/0083-ruby-iokit-match-trace.patch" \
     "$DEST/xnu/patches/"
+
+# SKIP_PATCHES holds patch numbers (prefix match, e.g. "0144" or "0144 0143b").
+# The matching patches are dropped again so the caller can build an older
+# line from the same tree; it must then pass the matching PATCHSET_SHA256.
+for skip in $SKIP_PATCHES; do
+    for f in "$DEST/xnu/patches/${skip}"*.patch; do
+        [ -e "$f" ] || continue
+        echo "skipping patch: $(basename "$f")"
+        rm -f "$f"
+    done
+done
 
 git -C "$DEST" apply --whitespace=nowarn "$ROOT/ci/baseline-changes.patch"
 
