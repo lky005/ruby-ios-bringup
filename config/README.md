@@ -29,6 +29,11 @@ inert.
 patchset, a 30 s polling EP0 enumeration window, and `ufslogsecs=1` so the
 trace is flushed quickly. It is WIP; no booted reference is pinned.
 
+`0144.env` and `0144-boot.cmdline` are the P0 read-only board probe/REPL:
+`rubyprobe=1` for the I2C pin takeover/WDT emergency writes, `sweetgt=0` so
+the probe owns I2C5, and no `rubypmic` (pwrap/rail writes stay locked). No
+booted reference is pinned yet.
+
 The kernel SHA and image SHA in `0085.env` are from the build that booted.
 A CI rebuild is not promised to be byte-identical; the canonical patchset hash
 and the Mach-O exec-data hash are the gates. The boot image itself is not

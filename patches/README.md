@@ -40,10 +40,12 @@ order.
 | `0111-ruby-ep2-resume.patch` | WIP | `bsd/dev/ruby_usb.c` | the EP2 timeout only resumes the QMU every two seconds like the bare-metal P9 path instead of pulsing `EP_RST`: resetting the endpoint while the host was not reading flushed the FIFO repeatedly and reordered the stream; the timeout is armed only after the first TX done, so a bulk IN queue stays silent until the host has issued an IN token |
 | `0112-ruby-ep2-rx.patch` | WIP | `bsd/dev/ruby_usb.c` | add EP2 bulk OUT Stage A: 16 pre-armed RX GPDs with per-slot 64-byte buffers, the vendor RX GPD layout and RQCPR/HWO completion, slot 2/FIFO and ZLP configuration, and a read-only `0xC0/0x23` RX counter/CRC diagnostic; `QISAR1` is now cleared per direction so RX errors are not swallowed by the TX path |
 | `0112b-ruby-ep2-rx-diag.patch` | WIP | `bsd/dev/ruby_usb.c` | RX diagnostics only: a raw current/prev/next GPD request (`0xC0/0x24`), an RX reset for clean per-length tests (`0xC0/0x26`), CLEAR_FEATURE for EP2 OUT, RX2CSR0 stall and ZLP-error visibility; no buffer, GPD-layout, queue or TX change |
+| `0144-ruby-probe-repl.patch` | WIP (P0) | `bsd/dev/ruby_probe.c`, `bsd/dev/ruby_probe.h`, `bsd/dev/ruby_usb.c`, `bsd/conf/files` | read-only board probe/REPL: pwrap, bounded bit-bang I2C (pin takeover/line/scan/recover), GPIO/keyscan, clock status, KPD, WDT read/pet, segmented snap; writes only the I2C pin fields and WDT emergency registers |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
-topaz `sweet_usb.c` DWC3 driver. `0084` is the previous synthetic-swipe
+topaz `sweet_usb.c` DWC3 driver. `0144` adds the read-only board probe behind
+the same USB command channel; `sweetgt=0` lets it own I2C5 for the run. `0084` is the previous synthetic-swipe
 milestone and is not required when real touch is enabled. `0081`-`0083` are
 kept as evidence of the path; `0082`/`0083` were superseded by the ICL NOP
 bypass. Applying a historical patch is not required for a new build.

@@ -28,12 +28,13 @@ patches, and verifies the same manifest root.
    `ci/baseline_manifest.py` against the manifest root and file count.
 2. Add this project's patches: 0080 UFS, 0084 autoswipe, 0085 Goodix SPI,
    0086-0131b USB, 0140 ramdisk import, 0141 USB decouple, 0142 EP2 MPS 512,
-   and the historical 0081-0083.
+   0143 EP2 frames/rearm, 0144 read-only board probe/REPL, and the historical
+   0081-0083.
 3. Apply `ci/baseline-changes.patch`, the small 0010/0012 change for the ruby
    framebuffer addresses.
 4. Normalize every `.patch`/`.sh` to LF.
 5. Compute the canonical patchset hash over the sorted per-file SHA256 values
-   and refuse to build unless it equals `f47f4c19...` (139 files).
+   and refuse to build unless it equals `7e3bd2b9...` (140 files).
 6. Fetch `blacktop/darwin-xnu-build` at `6639065`, copy the patchset, and
    build on `macos-14` with Xcode 15.0.1.
 7. Hash the built Mach-O with `ci/kernel_hash.py`. When
@@ -66,6 +67,10 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
   ends on a short packet); the reset/rearm path resets the TX ring after
   stopping the QMU. CI `41022192026`; kernel full `d2eae74d...`, exec-data
   `6fa65088...`. The host-side first-session XACT remains open.
+- `p0-probe`: patchset `7e3bd2b9...` (140 files), config `config/0144.env`.
+  Adds `bsd/dev/ruby_probe.c` and the read-only pwrap/I2C/GPIO/clock/KPD/WDT
+  command set to the USB console; the test cmdline uses `sweetgt=0` so the
+  probe owns I2C5. No CI run or device run yet.
 
 Main keeps `config/0131b.env` and `config/0131b-boot.cmdline` as the USB
 branch reference. The kernel built on it is the ramdisk set, which contains
