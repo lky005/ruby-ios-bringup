@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/ruby_probe.c b/bsd/dev/ruby_probe.c
-index 1abd8b7..8229998 100644
+index 1abd8b7..f19a155 100644
 --- a/bsd/dev/ruby_probe.c
 +++ b/bsd/dev/ruby_probe.c
 @@ -1,14 +1,17 @@
@@ -119,16 +119,17 @@ index 1abd8b7..8229998 100644
  };
  
  static struct pr_state pr;
-@@ -751,6 +814,517 @@
+@@ -751,6 +814,541 @@
  	return pr_pwrap_wait(0);
  }
  
 +/*
 + * 0148: the explicit "pwrap init" path.  Only the PMIC SPI/cipher bootstrap
 + * registers are writable here; rails and functional PMIC registers are not
-+ * in the allowlist.  The sequence follows the vendor pwrap HAL (reset SPISLV,
-+ * enable WACS2, SPI waveform, SPI slave config, DIO, SI strobe, cipher, write
-+ * test, INIT_DONE2), with short bounded waits and no EINT/WDT/sta-upd setup.
++ * in the allowlist.  The sequence follows the vendor pwrap HAL (PMIC clock
++ * gate/reset, reset SPISLV, enable WACS2, SPI waveform, SPI slave config,
++ * DIO, SI strobe, cipher, write test, INIT_DONE2), with short bounded waits
++ * and no EINT/WDT/sta-upd setup.
 + */
 +static bool
 +pr_pwrap_init_reg_ok(uint16_t reg)
@@ -289,6 +290,23 @@ index 1abd8b7..8229998 100644
 +		    pr_rd32(pr.topckgen, 0x008u));
 +	else
 +		printf("RUBY PMIC: dump topckgen not mapped\n");
++}
++
++static void
++pr_pwrap_clock_reset(void)
++{
++	/*
++	 * Vendor __pwrap_spi_clk_set: gate the PMIC clocks, reset the
++	 * wrapper, then enable them again.  The topckgen CLK_CFG_5 writes
++	 * are omitted: on MT6877 those offsets are CLK_CFG_8, not the
++	 * pwrap clock mux.
++	 */
++	pr_wr32(pr.ifrao, 0x080u, 0x0000000fu);
++	pr_wr32(pr.ifrao, 0x0a4u, 0x00000100u);
++	pr_wr32(pr.ifrao, 0x140u, 1);
++	pr_wr32(pr.ifrao, 0x144u, 1);
++	pr_wr32(pr.ifrao, 0x084u, 0x0000000fu);
++	pr_wr32(pr.ifrao, 0x0a8u, 0x00000100u);
 +}
 +
 +static int
@@ -548,6 +566,12 @@ index 1abd8b7..8229998 100644
 +	clock_get_uptime(&start);
 +	printf("RUBY PMIC: init allow 0x0032 0x0042 0x0098 0x0408 0x040c 0x0410 0x0418 0x041a 0x041c 0x0420 0x0422 0x0424 0x0426 0x044a\n");
 +
++	pr_pwrap_clock_reset();
++	printf("RUBY PMIC: init clock_reset gates0=%08x gates2=%08x\n",
++	    pr_rd32(pr.ifrao, 0x090u), pr_rd32(pr.ifrao, 0x0acu));
++	if ((err = pr_pwrap_budget(start, "clock_reset")) != 0)
++		return err;
++
 +	if ((err = pr_pwrap_reset_spislv()) != 0)
 +		return pr_pwrap_init_fail("reset_spislv", err);
 +	if ((err = pr_pwrap_budget(start, "reset_spislv")) != 0)
@@ -637,7 +661,7 @@ index 1abd8b7..8229998 100644
  /* ---- WDT --------------------------------------------------------------- */
  
  static void
-@@ -1110,6 +1684,7 @@
+@@ -1110,6 +1708,7 @@
  {
  	printf("RUBY CMD: help pwrap gpio i2c clk kpd keyscan wdt snap pmic_survey\n");
  	printf("RUBY CMD: pwrap r <reg> | w <reg> <val> (rubypmic)\n");
@@ -645,7 +669,7 @@ index 1abd8b7..8229998 100644
  	printf("RUBY CMD: i2c <5|6> take|line|scan|recover|release|r <addr> <reg> <len>|smb <addr> <reg>\n");
  	printf("RUBY CMD: gpio <pin> | clk <gate> [bit] sta | kpd | keyscan\n");
  	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|all]\n");
-@@ -1123,6 +1698,24 @@
+@@ -1123,6 +1722,24 @@
  	uint16_t v;
  	int err;
  
@@ -670,7 +694,7 @@ index 1abd8b7..8229998 100644
  	if (*p == 'r' && (p[1] == ' ' || p[1] == '\t')) {
  		p = pr_skip(p + 1);
  		if (!pr_parse_u32(&p, &reg) || *pr_skip(p) != '\0') {
-@@ -1150,7 +1743,7 @@
+@@ -1150,7 +1767,7 @@
  			printf("RUBY PMIC: pwrap w 0x%04x=0x%04x\n", reg, val);
  		return 1;
  	}
@@ -679,7 +703,7 @@ index 1abd8b7..8229998 100644
  	return 1;
  }
  
-@@ -1464,6 +2057,9 @@
+@@ -1464,6 +2081,9 @@
  	v = 0;
  	if (PE_parse_boot_argn("rubypmic", &v, sizeof(v)) && v == 1)
  		pr.pmic_writes = true;
@@ -689,7 +713,7 @@ index 1abd8b7..8229998 100644
  
  	pr.gpio = ml_io_map(PR_GPIO_PA, PR_GPIO_SIZE);
  	pr.pwrap = ml_io_map(PR_PWRAP_PA, PR_REG_SIZE);
-@@ -1471,6 +2067,7 @@
+@@ -1471,6 +2091,7 @@
  	pr.eint = ml_io_map(PR_EINT_PA, PR_REG_SIZE);
  	pr.wdt = ml_io_map(PR_WDT_PA, PR_REG_SIZE);
  	pr.ifrao = ml_io_map(PR_IFRAO_PA, PR_REG_SIZE);
@@ -697,7 +721,7 @@ index 1abd8b7..8229998 100644
  	pr.imp_s = ml_io_map(PR_IMP_S_PA, PR_REG_SIZE);
  	pr.imp_n = ml_io_map(PR_IMP_N_PA, PR_REG_SIZE);
  	for (i = 0; i < 8; i++)
-@@ -1479,10 +2076,10 @@
+@@ -1479,10 +2100,10 @@
  	pr_i2c_bus_init(&pr.i2c[0], 5);
  	pr_i2c_bus_init(&pr.i2c[1], 6);
  	pr.ready = (pr.gpio != 0 && pr.pwrap != 0);
