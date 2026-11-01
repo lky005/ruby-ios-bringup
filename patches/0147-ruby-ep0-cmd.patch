@@ -1,0 +1,254 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index ac46216..8368dc9 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -13,6 +13,9 @@
+  * command path are unchanged.  0146a-qmu stops both QMUs with a bounded
+  * wait before it touches their rings; RX empty/CS/LEN events recover with
+  * stop/reset/start instead of bypassing the GPD the QMU may still own.
++ * 0147 adds the 0x40/0x2E command channel: one line per control OUT,
++ * a seq/done marker, caps in 0x2B, and a single-slot cooperative runner
++ * in the 1 ms thread; the legacy EP2 OUT parser stays as a fallback.
+  * the Qualcomm DWC3/ECM driver in sweet_usb.c is not used by ruby.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -153,6 +156,8 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+ /* EP0 responses are copied here: handler buffers may live on the stack. */
+ #define RUBY_EP0_TXBUF 512
++/* 0147: one command line, both on EP2 OUT and EP0 0x2E. */
++#define RUBY_CMD_MAX 64
+ 
+ /*
+  * Inline window for one EP0 packet: 15 x 10 us covers a high-speed
+@@ -237,6 +242,25 @@ static uint32_t ruby_probe_enabled;
+ static uint32_t ruby_ep2log_on = 1;
+ static volatile uint32_t ruby_probe_wr_pending;
+ static uint32_t ruby_probe_wr_pa;
++static char ruby_cmd_buf[RUBY_CMD_MAX];
++static uint32_t ruby_cmd_len;
++static uint32_t ruby_cmd_count;
++static uint32_t ruby_cmd_errors;
++/*
++ * 0147: one-slot EP0 command channel (0x40/0x2E).  The data stage copies
++ * one line here; the 1 ms EP0 thread runs it from ruby_cmd_tick(), not
++ * from the EP0/RX handler, so a command cannot re-enter the service loop.
++ */
++static char ruby_cmd_line[RUBY_CMD_MAX + 1];
++static uint32_t ruby_cmd_out_pending;
++static uint32_t ruby_cmd_out_len;
++static uint32_t ruby_cmd_out_seq;
++static uint32_t ruby_cmd_pending;
++static uint32_t ruby_cmd_seq_pending;
++static uint32_t ruby_cmd_seq_active;
++static uint32_t ruby_cmd_busy;
++static uint32_t ruby_cmd_done;
++static uint32_t ruby_cmd_busy_rejects;
+ /*
+  * Milliseconds since the USB probe started.  The window counts it from its
+  * own tick, the resident thread keeps counting at 1 ms per iteration, so
+@@ -785,6 +809,10 @@ static void ruby_ep0_vendor_probe_read(vm_offset_t mac, uint32_t t,
+     uint32_t value, uint32_t index, uint32_t wlen);
+ static void ruby_ep0_vendor_probe_write(vm_offset_t mac, uint32_t t,
+     uint32_t value, uint32_t index, uint32_t wlen);
++static void ruby_ep0_vendor_cmd(vm_offset_t mac, uint32_t t,
++    uint32_t value, uint32_t index, uint32_t wlen);
++static void ruby_cmd_submit(uint32_t seq, const char *line);
++static void ruby_cmd_tick(vm_offset_t mac);
+ static void ruby_ep2_halt_clear(vm_offset_t mac);
+ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+@@ -974,6 +1002,8 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_vendor_probe_read(mac, t, value, index, len);
+     else if (st[0] == 0x40 && st[1] == 0x2d)
+         ruby_ep0_vendor_probe_write(mac, t, value, index, len);
++    else if (st[0] == 0x40 && st[1] == 0x2e)
++        ruby_ep0_vendor_cmd(mac, t, value, index, len);
+     else
+         ruby_ep0_stall(mac, t, key, len);
+ }
+@@ -1026,6 +1056,7 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+         ruby_ep0_tx_sent = 0;
+         ruby_ep0_tx_total = 0;
+         ruby_probe_wr_pending = 0;
++        ruby_cmd_out_pending = 0;
+         ruby_ep0_capture(mac, t);
+         return;
+     }
+@@ -1037,7 +1068,22 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+         uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
+         uint32_t csr;
+ 
+-        if (ruby_probe_wr_pending) {
++        if (ruby_cmd_out_pending) {
++            if (count == ruby_cmd_out_len && count <= RUBY_CMD_MAX) {
++                for (uint32_t i = 0; i < count; i++)
++                    ruby_cmd_line[i] = (char)ruby_rd8(mac, FIFO0_OFF);
++                ruby_cmd_line[count] = '\0';
++                ruby_cmd_out_pending = 0;
++                ruby_cmd_submit(ruby_cmd_out_seq, ruby_cmd_line);
++            } else {
++                for (uint32_t i = 0; i < count; i++)
++                    (void)ruby_rd8(mac, FIFO0_OFF);
++                ruby_cmd_out_pending = 0;
++                ruby_cmd_errors++;
++                printf("RUBY CMD[%u]: bad len=%u\n",
++                    ruby_cmd_out_seq, count);
++            }
++        } else if (ruby_probe_wr_pending) {
+             uint32_t pa = ruby_probe_wr_pa;
+             uint32_t val = 0;
+ 
+@@ -1078,6 +1124,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+     (void)wr;
+     for (;;) {
+         ruby_ep0_service(ruby_mac_base, 0);
++        ruby_cmd_tick(ruby_mac_base);
+         ruby_usb_attach_poll(ruby_mac_base, ruby_ippc_base);
+         ruby_ep2_status_poll(ruby_mac_base);
+         ruby_ep2_push_log(ruby_mac_base);
+@@ -1155,7 +1202,6 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define EP_RST_TX2_BIT      (1u << 18)  /* EP_RST(in, 2) = BIT(16) << 2 */
+ #define RUBY_RX_GPD_NUM 16
+ #define RUBY_RX_BUF     64
+-#define RUBY_CMD_MAX    64
+ #define RUBY_GPD_NUM    64
+ #define RUBY_GPD_DESC   16
+ #define RUBY_GPD_STRIDE 64
+@@ -1241,10 +1287,6 @@ static uint32_t ruby_rx_bypasses;
+ static uint32_t ruby_rx_ext_bad;
+ static uint32_t ruby_rx_zlp_err;
+ static uint32_t ruby_rx_stall_seen;
+-static char ruby_cmd_buf[RUBY_CMD_MAX];
+-static uint32_t ruby_cmd_len;
+-static uint32_t ruby_cmd_count;
+-static uint32_t ruby_cmd_errors;
+ 
+ #define RUBY_FNV_OFFSET 2166136261u
+ 
+@@ -2494,6 +2536,42 @@ ruby_cmd_dispatch(vm_offset_t mac, char *line)
+     printf("RUBY CMD: err: %s\n", line);
+ }
+ 
++static void
++ruby_cmd_submit(uint32_t seq, const char *line)
++{
++    uint32_t i;
++
++    if (ruby_cmd_busy || ruby_cmd_pending) {
++        ruby_cmd_busy_rejects++;
++        printf("RUBY CMD[%u]: busy\n", seq);
++        return;
++    }
++    for (i = 0; i < RUBY_CMD_MAX && line[i]; i++)
++        ruby_cmd_line[i] = line[i];
++    ruby_cmd_line[i] = '\0';
++    ruby_cmd_seq_pending = seq;
++    ruby_cmd_pending = 1;
++}
++
++static void
++ruby_cmd_tick(vm_offset_t mac)
++{
++    uint32_t seq;
++
++    if (!ruby_cmd_pending || ruby_cmd_busy)
++        return;
++    ruby_cmd_busy = 1;
++    ruby_cmd_pending = 0;
++    seq = ruby_cmd_seq_pending;
++    ruby_cmd_seq_active = seq;
++    ruby_cmd_count++;
++    ruby_cmd_dispatch(mac, ruby_cmd_line);
++    printf("RUBY CMD[%u]: done\n", seq);
++    ruby_cmd_seq_active = 0;
++    ruby_cmd_busy = 0;
++    ruby_cmd_done++;
++}
++
+ static void
+ ruby_cmd_consume(vm_offset_t mac, const uint8_t *data, uint32_t len)
+ {
+@@ -2657,6 +2735,12 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+     ruby_ep0_tx_sent = 0;
+     ruby_ep0_tx_total = 0;
+     ruby_wr32(mac, EPISR_OFF, ruby_rd32(mac, EPISR_OFF));
++    /* 0147: a bus reset drops any queued/failed command, not a running one. */
++    ruby_cmd_out_pending = 0;
++    ruby_cmd_pending = 0;
++    ruby_cmd_busy = 0;
++    ruby_cmd_seq_pending = 0;
++    ruby_cmd_seq_active = 0;
+ 
+     dc = ruby_rd32(mac, DEVICE_CONF - MTU3_PA);
+     dc &= ~0x7f000000u;         /* device address back to 0 */
+@@ -3008,6 +3092,13 @@ ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t, uint32_t wlen)
+ #define RUBY_LOG_SIZE   (4u << 20)      /* SWEET_LOG_SIZE, sweet_ufs.c */
+ #define RUBY_LOG_SLICE  64u
+ 
++/* 0147 caps: v[1] protocol 2, v[6] caps, v[7] counters. */
++#define RUBY_CAP_EP0_CMD  (1u << 0)     /* 0x40/0x2E command channel */
++#define RUBY_CAP_COOP     (1u << 1)     /* command runs from the 1 ms tick */
++#define RUBY_CAP_SEQ      (1u << 2)     /* seq/done correlation */
++#define RUBY_CAP_EP2OUT   (1u << 3)     /* legacy EP2 OUT parser */
++#define RUBY_CAP_CMDLEN(x) (((x) & 0xffu) << 8)
++
+ static void
+ ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
+ {
+@@ -3015,7 +3106,7 @@ ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     uint32_t v[8];
+ 
+     v[0] = RUBY_LOG_MAGIC;
+-    v[1] = 1;
++    v[1] = 2;
+     v[2] = RUBY_LOG_SIZE;
+     v[3] = (uint32_t)total;
+     v[4] = (uint32_t)(total >> 32);
+@@ -3028,8 +3119,11 @@ ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
+         (ruby_probe_enabled ? (1u << 1) : 0) |
+         (ruby_ep_ready ? (1u << 2) : 0) |
+         (ruby_rx_ready ? (1u << 3) : 0);
+-    v[6] = 0;
+-    v[7] = 0;
++    v[6] = RUBY_CAP_EP0_CMD | RUBY_CAP_COOP | RUBY_CAP_SEQ |
++        RUBY_CAP_EP2OUT | RUBY_CAP_CMDLEN(RUBY_CMD_MAX);
++    v[7] = (ruby_cmd_done & 0xffffu) |
++        ((ruby_cmd_busy & 1u) << 16) |
++        ((ruby_cmd_busy_rejects & 0xffu) << 24);
+     ruby_ep0_send(mac, t, 0xc02b, (const uint8_t *)v, sizeof(v), wlen);
+ }
+ 
+@@ -3084,6 +3178,32 @@ ruby_ep0_vendor_probe_write(vm_offset_t mac, uint32_t t, uint32_t value,
+     }
+ }
+ 
++/*
++ * 0147: vendor OUT 0x40/0x2E, one command line in the data stage.
++ *   wValue = sequence, wLength = 1..64.  The setup is ACKed without
++ *   DATAEND; ruby_ep0_service() copies the line and queues it.  The
++ *   command runs from the 1 ms tick, not from the EP0/RX context.
++ */
++static void
++ruby_ep0_vendor_cmd(vm_offset_t mac, uint32_t t, uint32_t value,
++    uint32_t index, uint32_t wlen)
++{
++    uint32_t csr;
++
++    (void)index;
++    if (wlen == 0 || wlen > RUBY_CMD_MAX) {
++        ruby_ep0_stall(mac, t, 0x402e, wlen);
++        return;
++    }
++    ruby_cmd_out_seq = value & 0xffffu;
++    ruby_cmd_out_len = wlen;
++    ruby_cmd_out_pending = 1;
++    csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++    csr |= EP0_SETUPPKTRDY;
++    ruby_wr32(mac, EP0CSR_OFF, csr);
++    ruby_trace(t, RUBY_TR_NOTE, 10, value, wlen, 0);
++}
++
+ /*
+  * Vendor IN 0xC0/0x2A: one slice of the console ring.
+  *   wValue = offset bits 0-15, wIndex = bits 16-31, wLength = 8..64.
