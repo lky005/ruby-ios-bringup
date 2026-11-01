@@ -6,6 +6,19 @@ Evidence-first. Each claim is tagged **[measured]**, **[DTS]**, **[inferred]**
 or **[historical]**. Unverified claims are not presented as facts. There are no
 personal paths, device identifiers or Apple binaries here.
 
+## Current line
+
+| Item | Value |
+|---|---|
+| Line | 0155 |
+| `main` / tag | `e81510f` / `v0.4.0` |
+| Patchset | `da13b6df…` (151 files) |
+| Kernel | full `491f2373…`, exec-data `2e98fd85…` |
+| Image | `3b44c0e2…` (`x16-0155-a00dd751.img`) |
+| Known limits | P2.4 battery UI 30 s lag; Type-C read-only; no USB host/audio/ Wi-Fi/BT/camera/GPU/RTC/sleep; P3 target open |
+
+See [STATUS](../../STATUS.md) · [VERIFICATION](../../VERIFICATION.md) · [GUARANTEE](../../GUARANTEE.md).
+
 ## Reading paths
 
 | Time | Read | Goal |
@@ -16,27 +29,27 @@ personal paths, device identifiers or Apple binaries here.
 
 ## Chapters
 
-| Doc | Contents |
-|---|---|
-| [`01-architecture`](01-architecture.md) | boot chain and component map |
-| [`02-hardware`](02-hardware.md) | measured MT6877 coordinates |
-| [`03-boot-chain`](03-boot-chain.md) | LK, 128 MiB image, WDT/console |
-| [`04-display`](04-display.md) | surface to panel, cache maintenance |
-| [`05-userland`](05-userland.md) | launchd/LS/MG deadlock, ICL NOP disassembly |
-| [`06-input`](06-input.md) | real Goodix touch, SweetHID, edge tip, autoswipe |
-| [`touch-goodix-9916r`](touch-goodix-9916r.md) | GT9916R hardware, power/protocol manual, bring-up history |
-| [`07-experiments`](07-experiments.md) | timeline, failure catalogue, decisions |
-| [`08-recovery`](08-recovery.md) | Android restore, TWRP, raw I/O |
-| [`09-reproduce`](09-reproduce.md) | build, pack, flash, verify |
-| [`10-scripts`](10-scripts.md) | per-script purpose and boundaries |
-| [`11-ci-baseline`](11-ci-baseline.md) | content-pinned baseline, branch pins, exec-data gates |
-| [`12-usb-host`](12-usb-host.md) | USB host channel: test conditions (AMD USB4 / CC / A-C), driver binding, safe debugging, pinned host tool |
-| [`appendix-dualboot`](appendix-dualboot.md) | optional layout; method note only |
-| [`glossary`](glossary.md) | codenames, acronyms and status tags |
-| [`device`](device.md) | device situation; no baseline hashes |
-| [`root-recipe`](root-recipe.md) | root inputs and steps; no root image |
-| [`reproducibility`](reproducibility.md) | Tier B recipe, drift controls, deferred tests |
-| [`Guarantee`](../../GUARANTEE.md) | success-path scope, bundle hashes, deferred tests |
+| Doc | Contents | Status | Last verified |
+|---|---|---|---|
+| [`01-architecture`](01-architecture.md) | boot chain and component map | `[measured]` | 2026-10-22 |
+| [`02-hardware`](02-hardware.md) | measured MT6877 coordinates | `[measured]` | 2026-10-22 |
+| [`03-boot-chain`](03-boot-chain.md) | LK, 128 MiB image, WDT/console | `[measured]` | 2026-10-22 |
+| [`04-display`](04-display.md) | surface to panel, cache maintenance | `[measured]` | 2026-10-22 |
+| [`05-userland`](05-userland.md) | launchd/LS/MG deadlock, ICL NOP disassembly | `[measured]` | 2026-10-22 |
+| [`06-input`](06-input.md) | real Goodix touch, keys, SweetHID, edge tip, autoswipe | `[measured]` | 2026-11-02 |
+| [`touch-goodix-9916r`](touch-goodix-9916r.md) | GT9916R hardware, power/protocol manual, bring-up history | `[measured]` | 2026-10-22 |
+| [`07-experiments`](07-experiments.md) | timeline, failure catalogue, decisions | `[measured]` | 2026-11-02 |
+| [`08-recovery`](08-recovery.md) | Android restore, TWRP, raw I/O | `[measured]` | 2026-10-22 |
+| [`09-reproduce`](09-reproduce.md) | build, pack, flash, verify | `[measured]` | 2026-11-02 |
+| [`10-scripts`](10-scripts.md) | per-script purpose and boundaries | `[measured]` | 2026-11-02 |
+| [`11-ci-baseline`](11-ci-baseline.md) | content-pinned baseline, branch pins, exec-data gates | `[measured]` | 2026-11-02 |
+| [`12-usb-host`](12-usb-host.md) | USB host channel: test conditions, driver binding, safe debugging | `[measured]` | 2026-11-02 |
+| [`appendix-dualboot`](appendix-dualboot.md) | optional layout; method note only | `[inferred]` | — |
+| [`glossary`](glossary.md) | codenames, acronyms and status tags | — | — |
+| [`device`](device.md) | device situation; no baseline hashes | `[measured]` | 2026-10-22 |
+| [`root-recipe`](root-recipe.md) | root inputs and steps; no root image | `[measured]` | 2026-10-22 |
+| [`reproducibility`](reproducibility.md) | Tier B recipe, drift controls, deferred tests | `[measured]` | 2026-11-02 |
+| [`Guarantee`](../../GUARANTEE.md) | success-path scope, bundle hashes, deferred tests | `[measured]` | 2026-11-02 |
 
 ## Rules
 
