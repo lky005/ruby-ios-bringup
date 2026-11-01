@@ -1,6 +1,6 @@
 # Status
 
-As of **2026-11-01**. This is a snapshot of verified results, not a live device
+As of **2026-11-02**. This is a snapshot of verified results, not a live device
 status. No phone is attached to this repository or to its CI.
 
 ## Verified
@@ -27,6 +27,19 @@ The ICL blocks, boot images, root images and logs are **not** in this
 repository. Only their hashes and conclusions are recorded. Pre-boot image
 hashes are fixed for the named files; post-boot root/ring/log hashes are
 volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
+
+## 2026-11-02 state
+
+| Item | Result | Evidence |
+|---|---|---|
+| Current line | 0155: P1 probe/pwrap (0146a/0147/0148), P2 keys/reboot/battery (0149/0150/0152/0152b/0154), P3 touch re-enable (0155) | patchset `da13b6df...` (151 files); `config/0155.env` |
+| Kernel | full `491f2373...`, exec-data `2e98fd85...`; CI `41354317810`; gate rerun `41355922057` success | `config/0155.env`; workflow `xnu-0155` |
+| Image | `x16-0155-a00dd751.img` `3b44c0e2...`; payload `a00dd751...`; `boot_a` 0155 | device run 2026-11-02 |
+| Input | volume down KPD, power/volume up `TOPSTATUS 0x2a`; HID `0xe9/0xea/0x30`; zero PMIC writes; `0x910=0x0025` | 0150 device run; 0155 19/19 |
+| Battery/charging | MT6360 read-only: OCV 4311 mV, CHG `0xa2` FULL, FOD `0x94` external, `external=1/full=1`; I2C5 shared IOLock; last-valid during probe; no PMIC/charger/rail writes | 0155 device run; `battery status`; `SWEET BATTERY: MT6360` |
+| Touch | 0085 GT9916R BerlinD re-enabled with `sweetgt=1`; boot LDO section under the shared I2C5 lock; `BERLIN/9916R ready`; real HID down/up | 0155 device run; `SWEET GT`; 11+ HID lines |
+| Probe/arbiter | 8/8 i2c5 take/line/release + battery; 19/19 probe; `i2c5 scan` 4 ack; `0x2a=0x000e`, `0x910=0x0025`; no panic | 0155 device run |
+| Known limits | battery UI 30 s lag / 100→98 (P2.4); Type-C read-only; software fastboot/combo parked; USB replug needs reboot; USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep not implemented; P3 target open | device run |
 
 ## 2026-11-01 state
 
@@ -58,12 +71,26 @@ volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 | CI baseline | 82-file baseline from a private content-addressed mirror; public pin is manifest root `829d7598...`; fallback `ALLOW_PUBLIC_UPSTREAM=1` | `ci/baseline_manifest.py`; `config/0144.env` (current line), `config/0140.env`, `config/0131b.env` |
 | Main | ramdisk + USB combined (squashed 2026-10-29) | see `docs/en/11-ci-baseline.md` |
 
+## Build provenance (2026-11-02)
+
+- Apple xnu: `xnu-8796.141.3` (`f625db25...`).
+- Baseline: 82 files, manifest root `829d7598...`; private mirror, public
+  fallback `ALLOW_PUBLIC_UPSTREAM=1`.
+- 0155 line: patchset `da13b6df...` (151 files); kernel full `491f2373...`,
+  exec `2e98fd85...`; CI `41354317810`; gate rerun `41355922057`; image
+  `3b44c0e2...` (`config/0155.env`); workflow `xnu-0155`.
+- Build harness: `blacktop/darwin-xnu-build` @ `6639065`; macOS 13.5 xnu built
+  on a `macos-15` runner with Xcode 16.0; `DEVELOPMENT` + `MACHINE_CONFIG=SWEET`,
+  `-mcpu=cortex-a55`.
+- The exec-data hash is the build gate; the earlier lines keep their hashes in
+  the dated sections below.
+
 ## Build provenance (2026-11-01)
 
 - Apple xnu: `xnu-8796.141.3` (`f625db25...`).
 - Baseline: 82 files, manifest root `829d7598...`; private mirror, public
   fallback `ALLOW_PUBLIC_UPSTREAM=1`.
-- Current line (0144 + 0145): patchset `9f7b41cf...` (141 files); kernel full
+- 2026-11-01 line (0144 + 0145): patchset `9f7b41cf...` (141 files); kernel full
   `9c82ea75...`, core `34c8a93f...`, exec `62a17d48...`; CI `41222632828`;
   image `66352038...` (`config/0144.env`).
 - Build harness: `blacktop/darwin-xnu-build` @ `6639065`; macOS 13.5 xnu
@@ -145,8 +172,12 @@ of `VERIFICATION.md`.
 
 ## Not working
 
-- Hardware buttons.
-- USB, Wi-Fi, Bluetooth, cellular, audio, camera, GPU, RTC.
+- Wi-Fi, Bluetooth, cellular, audio, camera, GPU, RTC; sleep/wake; USB host/OTG;
+  charger control/OTG; Type-C role.
+- Battery/charging is read-only; the UI polls every 30 s (P2.4: 100→98 on
+  unplug).
+- Software fastboot and the volume-down+power combo are parked; a full USB
+  replug needs a reboot.
 - MobileGestalt cache is absent; the ICL NOP is a bypass, not a fix.
 - The original (unpatched) ICL block has not been regression-tested after the
   first-boot state was created.
@@ -156,6 +187,10 @@ of `VERIFICATION.md`.
 
 - **host-verified**: commands and tools run on the author's PC against local
   files; see `VERIFICATION.md`.
+- **device-verified (2026-11-02)**: 0155 (patchset `da13b6df...`; exec
+  `2e98fd85...`) booted on the author's unit: GT9916R touch, volume/power keys,
+  battery 4311 mV `external=1/full=1`, 8/8 I2C5 arbiter, 19/19 probe, no panic;
+  known P2.4 battery UI latency and Type-C read-only.
 - **device-verified (2026-10-22)**: B+NOP first boot -> A', the CI kernel boot,
   and the real-touch 0085 boot were observed on the author's unit. The 0085
   sweetlog shows `BERLIN/9916R`, 206 down / 206 up records, 40 finger-1 and

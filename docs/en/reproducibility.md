@@ -53,7 +53,7 @@ Main (2026-10-29 integration, squashed from `merge-ramdisk-usb-2026-10-29`) buil
 | Fixed topaz deletion list | patch leftovers on the public fallback |
 | Fail-closed recipe | missing files or changed 0010/0012 context |
 | LF normalization | Windows/macOS line-ending drift |
-| `PATCHSET_SHA256` (per branch) | any patchset content change; current `9f7b41cf...` (141 files), USB `f47f4c19...` (139) |
+| `PATCHSET_SHA256` (per branch) | any patchset content change; current `da13b6df...` (151 files), 2026-11-01 `9f7b41cf...` (141), USB `f47f4c19...` (139) |
 | `ci/baseline-changes.patch` SHA | baseline change drift |
 | `check-bundle.py` | wrong kernel/boot/root/ICL/cmdline |
 | Pinned Actions by SHA | CI supply-chain drift |

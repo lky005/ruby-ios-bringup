@@ -1,4 +1,4 @@
-# 06 — 输入：Goodix 触摸与合成上滑
+# 06 — 输入：Goodix 触摸、按键与合成上滑
 
 [English](../en/06-input.md) · **中文**
 
@@ -45,6 +45,20 @@ SweetHIDTouch::touch()
 
 真实驱动和合成定时器共用这个入口。`touch()` 期望面板像素
 （0..1079 × 0..2399），所以喂 `raw/10`。
+
+## 按键（0150）
+
+0150 驱动轮询 MTK KPD 和 MT6359 `TOPSTATUS`：
+
+- 音量下：KPD `KP_MEM1` bit0（0 = 按下）；
+- 电源：`TOPSTATUS 0x2a` bit1；音量上：bit3（低有效、消抖）；
+- 20 ms 轮询 + 两次确认；`sweet_hid_key(0/1/2)` -> HID
+  `0xe9`/`0xea`/`0x30`；
+- 零 PMIC 写；`0x910` 保持 `0x0025`；0155 真机 19 步已覆盖按键；
+- 音量下+电源组合 parked；长按电源、音量上+电源可用。
+
+0155 的触摸 LDO 段与电池/probe 共用 I2C5 IOLock；`sweetgt=1` 重新启用
+0085 驱动。P2 测试镜像使用 `sweetgt=0`。
 
 ## 边缘位
 

@@ -6,6 +6,13 @@
 > **[historical]**。没有来源的数字就是 bug。本页说明如何操作该通道，
 > 不是 host 侧 XACT 的修复方案。
 
+## 已验证（2026-11-02）[measured]
+
+- 内核 0155（patchset `da13b6df...`，151 文件；CI `41354317810`；
+  exec-data `2e98fd85...`）以 USB 2.0 设备模式运行，并带 EP0 命令
+  通道/探针。按键、电池、触摸不在本章；下面的 0143 EP2 日志/HS/XACT
+  证据是 host 侧历史。
+
 ## 已验证（2026-10-30）[measured]
 
 - 内核 0144+0145（patchset `9f7b41cf...`，141 文件；CI `41229568807`；
@@ -204,6 +211,9 @@ python tools/host/ruby_usb_host.py watch --pace-ms 5 --log session.log
 
 ## 证据与边界
 
+- 2026-11-02 构建：CI `41354317810`；patchset `da13b6df...`（151 文件）；
+  kernel full `491f2373...`、exec-data `2e98fd85...`；镜像 `3b44c0e2...`
+  （`config/0155.env`）；EP0 命令通道/探针。
 - 构建：CI `41229568807`；patchset `9f7b41cf...`（141 文件）；
   kernel full `d2eae74d...`、exec-data `6fa65088...`；镜像
   `5b6b8411...`（`config/0143.env`）。

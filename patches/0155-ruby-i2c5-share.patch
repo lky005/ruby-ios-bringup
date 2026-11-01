@@ -1,0 +1,291 @@
+diff --git a/bsd/dev/ruby_battery.c b/bsd/dev/ruby_battery.c
+index 82efa93..cbe6990 100644
+--- a/bsd/dev/ruby_battery.c
++++ b/bsd/dev/ruby_battery.c
+@@ -9,8 +9,10 @@
+  * The I2C5 lock is an IOLock (a sleeping mutex, not an interrupt-disabled
+  * spinlock).  ruby_probe takes it around its I2C5 take/release, so the
+  * probe and the 30 s battery poll cannot interleave on the bus.  The
+- * probe's manual "i2c 5 take" sets ruby_battery_taken(1); a poll during
+- * that hold fails and SweetBattery keeps its last valid sample.
++ * Goodix touch driver also holds it across its whole boot-time LDO
++ * sequence.  The probe's manual "i2c 5 take" sets ruby_battery_taken(1);
++ * a poll during that hold fails and SweetBattery keeps its last valid
++ * sample.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -59,6 +61,7 @@ struct rb_i2c_bus {
+ static vm_offset_t rb_gpio, rb_cfg;
+ static struct rb_i2c_bus rb_bus;
+ static IOLock *rb_lock;
++static volatile int rb_lock_state; /* 0 uninit, 1 allocating, 2 ready, 3 failed */
+ static bool rb_ready, rb_init_attempted, rb_probe_taken;
+ static uint32_t rb_budget;
+ 
+@@ -433,24 +436,53 @@ rb_bus_init(void)
+ 	b->drv_sda_shift = 3;
+ }
+ 
++int
++ruby_i2c5_lock_init(void)
++{
++	int expected = 0;
++
++	if (__atomic_load_n(&rb_lock_state, __ATOMIC_ACQUIRE) == 2)
++		return 0;
++	if (__atomic_load_n(&rb_lock_state, __ATOMIC_ACQUIRE) == 3)
++		return -1;
++	if (!__atomic_compare_exchange_n(&rb_lock_state, &expected, 1, false,
++	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		while (__atomic_load_n(&rb_lock_state, __ATOMIC_ACQUIRE) == 1)
++			delay(100);
++		return __atomic_load_n(&rb_lock_state, __ATOMIC_ACQUIRE) == 2 ?
++		    0 : -1;
++	}
++	rb_lock = IOLockAlloc();
++	__atomic_store_n(&rb_lock_state, rb_lock ? 2 : 3, __ATOMIC_RELEASE);
++	return rb_lock ? 0 : -1;
++}
++
+ int
+ ruby_battery_init(void)
+ {
++	if (rb_ready)
++		return 0;
+ 	if (rb_init_attempted)
+-		return rb_ready ? 0 : -1;
++		return -1;
+ 	rb_init_attempted = true;
+-	rb_lock = IOLockAlloc();
+-	if (!rb_lock) {
++	if (ruby_i2c5_lock_init() != 0) {
+ 		printf("RUBY BATTERY: no IOLock\n");
+ 		return -1;
+ 	}
++	if (ruby_i2c5_acquire() != 0) {
++		/* Probe holds I2C5; retry on the next poll. */
++		rb_init_attempted = false;
++		return -1;
++	}
+ 	rb_gpio = ml_io_map(RB_GPIO_PA, RB_REG_SIZE);
+ 	rb_cfg = ml_io_map(RB_IOCFG_PA, RB_REG_SIZE);
+ 	if (!rb_gpio || !rb_cfg) {
+ 		printf("RUBY BATTERY: I2C5 mapping failed\n");
++		ruby_i2c5_release();
+ 		return -1;
+ 	}
+ 	rb_bus_init();
++	ruby_i2c5_release();
+ 	rb_ready = true;
+ 	printf("RUBY BATTERY: MT6360 I2C5 read-only ready\n");
+ 	return 0;
+@@ -460,7 +492,7 @@ void
+ ruby_battery_lock(void)
+ {
+ 	/* IOLock: sleeping mutex, never called from interrupt context. */
+-	if (rb_lock)
++	if (ruby_i2c5_lock_init() == 0)
+ 		IOLockLock(rb_lock);
+ }
+ 
+@@ -477,6 +509,26 @@ ruby_battery_taken(int taken)
+ 	rb_probe_taken = taken != 0;
+ }
+ 
++int
++ruby_i2c5_acquire(void)
++{
++	if (ruby_i2c5_lock_init() != 0)
++		return -1;
++	IOLockLock(rb_lock);
++	if (rb_probe_taken) {
++		IOLockUnlock(rb_lock);
++		return -1;
++	}
++	return 0;
++}
++
++void
++ruby_i2c5_release(void)
++{
++	if (rb_lock)
++		IOLockUnlock(rb_lock);
++}
++
+ int
+ ruby_battery_read(struct ruby_battery_sample *sample)
+ {
+@@ -487,17 +539,11 @@ ruby_battery_read(struct ruby_battery_sample *sample)
+ 		return -1;
+ 	if (!rb_ready && ruby_battery_init() != 0)
+ 		return -1;
+-	if (!rb_lock)
++	if (ruby_i2c5_acquire() != 0)
+ 		return -1;
+-
+-	IOLockLock(rb_lock);
+-	if (rb_probe_taken) {
+-		IOLockUnlock(rb_lock);
+-		return -1;
+-	}
+ 	if (rb_bus_take() != 0) {
+ 		rb_bus_release();
+-		IOLockUnlock(rb_lock);
++		ruby_i2c5_release();
+ 		return -1;
+ 	}
+ 	e1 = rb_i2c_read_regs(RB_I2C_ADDR, RB_REG_OCV, ocv, 2);
+@@ -505,7 +551,7 @@ ruby_battery_read(struct ruby_battery_sample *sample)
+ 	e3 = rb_i2c_read_regs(RB_I2C_ADDR, RB_REG_FOD, &fod, 1);
+ 	e4 = rb_i2c_read_regs(RB_I2C_ADDR, RB_REG_USB, &usb, 1);
+ 	rb_bus_release();
+-	IOLockUnlock(rb_lock);
++	ruby_i2c5_release();
+ 
+ 	if (e1 || e2 || e3)
+ 		return -1;
+diff --git a/bsd/dev/ruby_battery.h b/bsd/dev/ruby_battery.h
+index 129b358..9c7358f 100644
+--- a/bsd/dev/ruby_battery.h
++++ b/bsd/dev/ruby_battery.h
+@@ -19,6 +19,9 @@ int ruby_battery_read(struct ruby_battery_sample *sample);
+ void ruby_battery_lock(void);
+ void ruby_battery_unlock(void);
+ void ruby_battery_taken(int taken);
++int ruby_i2c5_lock_init(void);
++int ruby_i2c5_acquire(void);
++void ruby_i2c5_release(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/bsd/dev/sweet_goodix_spi.c b/bsd/dev/sweet_goodix_spi.c
+index 80606c4..350207c 100644
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -20,6 +20,7 @@
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
++#include "ruby_battery.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -449,10 +450,21 @@ gt_version_ok(void)
+ }
+ 
+ static bool
+-gt_hw_init(void)
++gt_power_on(void)
+ {
+ 	uint8_t en3 = 0, en2 = 0, v3 = 0, v2 = 0;
+ 	uint32_t v;
++	int i;
++
++	for (i = 0; i < 200; i++) {
++		if (ruby_i2c5_acquire() == 0)
++			break;
++		delay(10000);
++	}
++	if (i == 200) {
++		printf("SWEET GT: I2C5 busy; abort\n");
++		return false;
++	}
+ 
+ 	/* I2C5 pins 132/133 to GPIO, both released. */
+ 	v = gt_rd(GT_I2C_MODE);
+@@ -462,7 +474,7 @@ gt_hw_init(void)
+ 	delay(20);
+ 	if ((gt_rd(GT_I2C_DI) & (GT_SCL | GT_SDA)) != (GT_SCL | GT_SDA)) {
+ 		printf("SWEET GT: I2C5 idle low; abort\n");
+-		return false;
++		goto fail;
+ 	}
+ 
+ 	if (!pmic_read(GT_LDO3_EN, &en3) ||
+@@ -470,7 +482,7 @@ gt_hw_init(void)
+ 	    !pmic_read(GT_LDO3_VOUT, &v3) ||
+ 	    !pmic_read(GT_LDO2_VOUT, &v2)) {
+ 		printf("SWEET GT: PMIC read failed; abort\n");
+-		return false;
++		goto fail;
+ 	}
+ 	printf("SWEET GT: LDO3 en=%02x vout=%02x, LDO2 en=%02x vout=%02x\n",
+ 	    en3, v3, en2, v2);
+@@ -479,26 +491,26 @@ gt_hw_init(void)
+ 	if (!pmic_write(GT_LDO3_EN, en3 & ~0x40) ||
+ 	    !pmic_write(GT_LDO2_EN, en2 & ~0x40)) {
+ 		printf("SWEET GT: PMIC disable failed; abort\n");
+-		return false;
++		goto fail;
+ 	}
+ 	gt_wait(20);
+ 
+ 	if (v3 < 0x3a || v3 > 0x40) {
+ 		if (!pmic_write(GT_LDO3_VOUT, 0x3a)) {
+ 			printf("SWEET GT: LDO3 VOUT write failed; abort\n");
+-			return false;
++			goto fail;
+ 		}
+ 	}
+ 	if (v2 < 0xd0 || v2 > 0xd9) {
+ 		if (!pmic_write(GT_LDO2_VOUT, 0xd0)) {
+ 			printf("SWEET GT: LDO2 VOUT write failed; abort\n");
+-			return false;
++			goto fail;
+ 		}
+ 	}
+ 	if (!pmic_read(GT_LDO3_VOUT, &v3) || !pmic_read(GT_LDO2_VOUT, &v2) ||
+ 	    v3 < 0x3a || v3 > 0x40 || v2 < 0xd0 || v2 > 0xd9) {
+ 		printf("SWEET GT: VOUT readback bad (%02x/%02x); abort\n", v3, v2);
+-		return false;
++		goto fail;
+ 	}
+ 
+ 	/* IOVDD switch GPIO110 high, then VMC 1.8 V and VTP 3.3 V. */
+@@ -510,17 +522,32 @@ gt_hw_init(void)
+ 	    !pmic_write(GT_LDO3_EN, en3 | 0x40) ||
+ 	    !pmic_read(GT_LDO3_EN, &en3) || !(en3 & 0x40)) {
+ 		printf("SWEET GT: LDO3 enable failed; abort\n");
+-		return false;
++		goto fail;
+ 	}
+ 	gt_wait(30);
+ 	if (!pmic_read(GT_LDO2_EN, &en2) ||
+ 	    !pmic_write(GT_LDO2_EN, en2 | 0x40) ||
+ 	    !pmic_read(GT_LDO2_EN, &en2) || !(en2 & 0x40)) {
+ 		printf("SWEET GT: LDO2 enable failed; abort\n");
+-		return false;
++		goto fail;
+ 	}
+ 	printf("SWEET GT: rails on en3=%02x en2=%02x\n", en3, en2);
++	ruby_i2c5_release();
+ 	gt_wait(15);
++	return true;
++
++fail:
++	ruby_i2c5_release();
++	return false;
++}
++
++static bool
++gt_hw_init(void)
++{
++	uint32_t v;
++
++	if (!gt_power_on())
++		return false;
+ 
+ 	/* reset 15 / IOVDD 110 pinmux back to GPIO */
+ 	v = gt_rd(GT_MODE(1));
+@@ -700,6 +727,10 @@ sweet_goodix_spi_init(void)
+ 		printf("SWEET GT: disabled (sweetgt=0)\n");
+ 		return;
+ 	}
++	if (ruby_i2c5_lock_init() != 0) {
++		printf("SWEET GT: no I2C5 lock\n");
++		return;
++	}
+ 	gt.gpio = ml_io_map(GT_GPIO_PA, 0x1000);
+ 	if (!gt.gpio) {
+ 		printf("SWEET GT: GPIO mapping failed\n");

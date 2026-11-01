@@ -2,16 +2,19 @@
 
 **English** · [中文](GUARANTEE.zh.md)
 
-**Status 2026-10-22 — documented recipe with one-unit device evidence.**
+**Status 2026-11-02 — documented recipe with one-unit device evidence.**
 B+NOP first boot -> A', a CI kernel boot, and a real-touch 0085 boot were
-observed on the author's unit. This is not an independently reproduced
-second-unit or clean-room guarantee. Detailed test guarantees are deferred.
+observed on the author's unit. The 0155 line adds the P1 probe/pwrap,
+P2 keys/reboot/battery and P3 touch re-enable; it was observed on the same
+unit on 2026-11-02. This is not an independently reproduced second-unit or
+clean-room guarantee. Detailed test guarantees are deferred.
 
-**Scope note (2026-11-01):** this guarantee covers the historical 0085/0084
-success bundle only. The current main line uses the pins in `config/0144.env`
-(patchset `9f7b41cf...`, 141 files, exec-data `62a17d48...`); the earlier
-lines used `config/0140.env` and `config/0131b.env`; see
-`docs/en/11-ci-baseline.md`.
+**Scope note (2026-11-02):** the current line uses the pins in
+`config/0155.env` (patchset `da13b6df...`, 151 files, exec-data
+`2e98fd85...`). The 2026-11-01 probe line used `config/0144.env` (patchset
+`9f7b41cf...`, exec-data `62a17d48...`); the 0085/0084 success bundle is
+historical. The earlier USB lines used `config/0140.env` and
+`config/0131b.env`; see `docs/en/11-ci-baseline.md`.
 
 ## Scope
 
@@ -23,6 +26,9 @@ stock LK -> XNU 8796 -> iOS 16.7.16 userland
   or -> synthetic swipe (0084) -> SpringBoard home screen
 ```
 
+The 0155 line adds P1/P2/P3 (probe/pwrap, keys, battery, touch) to the same
+boot path; its success bundle is in the table above.
+
 Failed routes are historical evidence, not covered by this guarantee.
 
 ## Definition
@@ -32,13 +38,15 @@ Given all of the following:
 - the same device situation (ruby / MT6877, Android 12 / MIUI 13.0.4, unlocked,
   slot `_a`, the partition layout in `docs/en/device.md`);
 - the same boot image and iOS root/ICL state (hashes below);
-- the boot args in `config/0085-boot.cmdline` (or `config/0084-boot.cmdline`
-  for the synthetic-swipe image);
+- the boot args in `config/0155-boot.cmdline` for the current line
+  (`config/0085-boot.cmdline` for the historical real-touch image;
+  `config/0084-boot.cmdline` for the synthetic-swipe image);
 - the documented procedure in `docs/en/09-reproduce.md` and
   `docs/en/05-userland.md`;
 
 the success state is **expected** to reproduce. One author's unit was tested on
-2026-10-22; no second-unit or clean-room device validation has been performed.
+2026-10-22 and again on 2026-11-02 (0155); no second-unit or clean-room device
+validation has been performed.
 
 If any hash differs, this guarantee does not apply; treat it as a different
 configuration.
@@ -48,10 +56,11 @@ configuration.
 | Item | Value | Note |
 |---|---|---|
 | Baseline | `MakrSas/ios-topaz@5095ac1` | upstream commit |
-| Patchset (current line) | `9f7b41cf...` | 141 files; recipe output; the workflow refuses to build on anything else |
-| Current kernel | `9c82ea75...` | exec-data `62a17d48...`; CI `41229568807` |
-| Current image | `66352038...` | external; not in the repo |
-| Current boot args | `config/0144-boot.cmdline` | read-only probe cmdline (`sweetgt=0`, `rubyprobe=1`) |
+| Patchset (current line) | `da13b6df...` | 151 files; recipe output; the workflow refuses to build on anything else |
+| Current kernel | `491f2373...` | exec-data `2e98fd85...`; CI `41354317810`; gate rerun `41355922057` |
+| Current image | `3b44c0e2...` | payload `a00dd751...`; external; not in the repo |
+| Current boot args | `config/0155-boot.cmdline` | `sweetgt=1`, `rubybatt=1`, `rubyprobe=1`, `rubkeys=1` |
+| 2026-11-01 probe line | `9f7b41cf...` | 141 files; exec-data `62a17d48...`; image `66352038...`; `config/0144.env` |
 | Patchset (0085) | `cf4008e3...` | 88 files; recipe output; same as the harness build |
 | Patchset (0084) | `de1824c2...` | 87 files; previous milestone |
 | 0010/0012 change | `1edb6633...` | small baseline patch |
@@ -65,6 +74,7 @@ configuration.
 | ICL patched block | `4a489542...` | bypass |
 | Boot args | `config/0085-boot.cmdline` | real-touch cmdline; `0084` is the previous milestone |
 | Success criterion | all timings from the Apple logo: first boot ~60 s (58 s measured); warm reboot ~22 s; 2026-10-22 B+NOP first boot 22 s / 30 s; swipe to home; animations | author's boot22/boot23 and 2026-10-22 run |
+| 0155 success criterion | `x16-0155-a00dd751.img` boots; GT9916R touch; volume/power keys; battery 4311 mV `external=1/full=1`; 8/8 I2C5; 19/19 probe; no panic | 2026-11-02 device run |
 
 Root states (all external; full images are not in the repo):
 
@@ -82,6 +92,11 @@ stable pin; post-boot hashes are volatile.
 Full hashes:
 
 ```text
+patch0155  da13b6df7cb9498f4d7b96a69e88be2af9632157829d26514af7ea5f1de8bea0
+kernel0155 491f2373415d85aa5a2f9fa63fab2fbf7c9fac34a37bae42b4a7bfb0dbea5a10
+exec0155   2e98fd85dc155b4ff73e40452da0b3a6cb3fe8e82300abd3684c4982b7874ed9
+image0155  3b44c0e2e73bade6638a12b1b748dd392a2f1baf2618bceaf9aac0722d49b144
+payload0155 a00dd751be8caf0ee950e2c3bf6926335b276294146ec91949fc834db1649ca2
 patch85    cf4008e309cfa566e3df968592a2d3f3224a9b3d0813d6054326115fecc0a03f
 kernel85   9eb9acac8a4c936c1861fba1e0d29c105b714e8d0e6d407b48f4237076e6b947
 execdata85 e4823afb97360e24708184d09c0dc6c9f7280e33d5c4aefbeb901b3fa9b11e3e
@@ -114,15 +129,17 @@ they can fingerprint the unit. The device situation is described in
 
 ## Hash stability
 
-Fixed / pre-boot (identity): the current patchset `9f7b41cf...` (141 files)
-with its exec-data hash `62a17d48...`, the 0085 patchset `cf4008e3...` and 0084
-patchset `de1824c2...`, boot args, ICL blocks, the named root snapshots (A/B/C/A') and
-the named kernel/payload/image artifacts for a specific run. Kernel CI builds
-are not bit-identical; the patchset hash is the source gate and the Mach-O
-exec-data hash is the artifact-level gate; record the actual full artifact hash
-for each run. The current exec-data reference is `62a17d48...`; the 0085
-reference is `e4823afb...`. A' is one first-boot
-snapshot; a new first boot is a new state.
+Fixed / pre-boot (identity): the current patchset `da13b6df...` (151 files)
+with its exec-data hash `2e98fd85...`, the 2026-11-01 probe line
+`9f7b41cf...` (141 files, exec `62a17d48...`), the 0085 patchset
+`cf4008e3...` and 0084 patchset `de1824c2...`, boot args, ICL blocks, the
+named root snapshots (A/B/C/A') and the named kernel/payload/image artifacts
+for a specific run. Kernel CI builds are not bit-identical; the patchset hash
+is the source gate and the Mach-O exec-data hash is the artifact-level gate;
+record the actual full artifact hash for each run. The current exec-data
+reference is `2e98fd85...`; the 2026-11-01 line is `62a17d48...`; the 0085
+reference is `e4823afb...`. A' is one first-boot snapshot; a new first boot is
+a new state.
 
 Volatile / post-boot (do not require these to match): the live root after any
 boot (A' -> A''), UUIDs/timestamps, logs and caches, the SWEETLOG ring and its
@@ -133,9 +150,10 @@ whole-disk hash.
 ## Guaranteed
 
 - The patchset and recipe: the workflow refuses to build unless the recipe
-  reproduces `9f7b41cf...` (141 files). The current CI run `41229568807`
-  succeeded and its exec-data hash matched the recorded baseline
-  `62a17d48...`.
+  reproduces `da13b6df...` (151 files). CI `41354317810` succeeded and its
+  exec-data hash matched the recorded baseline `2e98fd85...`; the gate rerun
+  `41355922057` succeeded. The 2026-11-01 probe line remains
+  `9f7b41cf...`/`62a17d48...`.
 - The earlier milestones keep their own identity: the 0085 patchset
   `cf4008e3...` (88 files) with run `39694456200`, whose exec-data hash
   matched the booted kernel.

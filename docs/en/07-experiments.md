@@ -27,6 +27,7 @@ wrong turns.
 | 11-01 | Toolchain | build moved to a hosted `macos-15` image with Xcode 16.0; source unchanged | CI green; the interface-compiler step still generates cleanly |
 | 11-01 | Enumeration | 0145 widens the attach window from 4 s to 12 s and raises the attempt budget | the host configures the device on the first try |
 | 11-01 | Board probe | 0144 read-only probe commands over the USB console | 17 of 19 commands returned board data; the two pwrap reads stay empty |
+| 11-02 | P1/P2/P3 line | 0146a-0155: probe/pwrap, keys/reboot, battery, touch re-enable; 0155 shares the I2C5 lock | 0155 device PASS: touch, keys, battery `external=1`; 19/19; 8/8 I2C5 |
 
 ## Failure catalogue
 

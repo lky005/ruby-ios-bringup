@@ -1,0 +1,377 @@
+diff --git a/bsd/dev/ruby_probe.c b/bsd/dev/ruby_probe.c
+index 1abd8b7..afdbef4 100644
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -1,14 +1,16 @@
+ /*
+- * Ruby (MT6877) P0 read-only board probe.
++ * Ruby (MT6877) board probe.
+  *
+  * The USB command channel in ruby_usb.c calls ruby_probe_cmd() for the
+  * commands implemented here.  The probe maps the board blocks it needs and
+  * provides bounded pwrap/bit-bang I2C/GPIO/clock/KPD/WDT access.  It writes
+- * only the I2C pin takeover/restore fields and the WDT pet/off registers;
+- * PMIC, rails and clock gates stay read-only.
++ * only the I2C pin takeover/restore fields, the WDT pet/off registers, and
++ * the PMIF init-done bit used by the explicit "pwrap init" command.  PMIC
++ * registers, rails and clock gates stay read-only.
+  *
+  * Boot args: rubyprobe=1 enables the GPIO/pin writes; rubypmic=1 additionally
+- * enables pwrap/I2C writes (not used by P0).  The default is read-only.
++ * enables arbitrary pwrap writes (not used by this line); rubypwrap=1 allows
++ * "pwrap init".  The default is read-only.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 
+@@ -36,11 +38,38 @@
+ #define PR_GPIO_SIZE     0x1000u
+ #define PR_REG_SIZE      0x1000u
+ 
+-#define PR_PWRAP_EN      0x090u
+-#define PR_PWRAP_INIT    0x094u
+-#define PR_PWRAP_CMD     0xc20u
+-#define PR_PWRAP_RDATA   0xc24u
+-#define PR_PWRAP_VLDCLR  0xc28u
++/*
++ * MT6877 uses the PMIF v3 register block (vendor mtk-pmic-wrap_v1.c,
++ * mt6877_regs).  The bootloader normally initialises the wrapper and the
++ * PMIC SPI slave; the kernel only sets the init-done bit and uses SWINF_2.
++ */
++#define PR_PWRAP_INIT_DONE    0x000u
++#define PR_PWRAP_STAUPD_CTRL  0x04cu
++#define PR_PWRAP_CRC_CTRL     0x39cu
++#define PR_PWRAP_TIMER_CTRL   0x3e4u
++#define PR_PWRAP_IRQ_FLAG_3   0x458u
++#define PR_PWRAP_IRQ_CLR_3    0x45cu
++#define PR_PWRAP_IRQ_FLAG_4   0x468u
++#define PR_PWRAP_IRQ_CLR_4    0x46cu
++#define PR_PWRAP_MONITOR_CTRL 0x484u
++#define PR_PWRAP_SWINF_ACC    0x880u
++#define PR_PWRAP_SWINF_WDATA  0x884u
++#define PR_PWRAP_SWINF_RDATA  0x894u
++#define PR_PWRAP_SWINF_VLDCLR 0x8a4u
++#define PR_PWRAP_SWINF_STA    0x8a8u
++
++#define PR_SWINF_FSM(v)       (((v) >> 1) & 7u)
++#define PR_SWINF_FSM_IDLE     0u
++#define PR_SWINF_FSM_VLDCLR   6u
++#define PR_SWINF_INIT_DONE    (1u << 15)
++#define PR_SWINF_SYNC_IDLE    (1u << 20)
++
++#define PR_PMIC_HWCID         0x0008u
++#define PR_PMIC_TOPSTATUS     0x002au
++#define PR_PMIC_PWRKEY        0x0a16u
++#define PR_PMIC_READ_TEST     0x040eu
++#define PR_PMIC_READ_TEST_VAL 0x5aa5u
++#define PR_PMIC_HWCID_VAL     0x5930u
+ 
+ #define PR_WDT_MODE      0x00u
+ #define PR_WDT_LENGTH    0x04u
+@@ -88,6 +117,8 @@
+ 	bool ready;
+ 	bool probe_writes;
+ 	bool pmic_writes;
++	bool wrap_init_allowed;
++	bool wrap_init_attempted;
+ };
+ 
+ static struct pr_state pr;
+@@ -685,16 +716,15 @@
+ static int
+ pr_pwrap_check(void)
+ {
+-	uint32_t en, init, rd;
++	uint32_t init, sta;
+ 
+ 	if (!pr.pwrap)
+ 		return ENODEV;
+-	en = pr_rd32(pr.pwrap, PR_PWRAP_EN);
+-	init = pr_rd32(pr.pwrap, PR_PWRAP_INIT);
+-	rd = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
+-	if (!(en & 1u) || !((init & 1u) || (rd & (1u << 21)))) {
+-		printf("RUBY PMIC: pwrap not ready en=%08x init=%08x rd=%08x\n",
+-		    en, init, rd);
++	init = pr_rd32(pr.pwrap, PR_PWRAP_INIT_DONE);
++	sta = pr_rd32(pr.pwrap, PR_PWRAP_SWINF_STA);
++	if (!(sta & PR_SWINF_INIT_DONE)) {
++		printf("RUBY PMIC: pwrap not ready init=%08x sta=%08x\n",
++		    init, sta);
+ 		return ENODEV;
+ 	}
+ 	return 0;
+@@ -703,14 +733,14 @@
+ static int
+ pr_pwrap_wait(uint32_t fsm)
+ {
+-	uint32_t i, v;
++	uint32_t i, v = 0;
+ 
+ 	for (i = 0; i < 10000; i++) {
+-		v = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
+-		if (((v >> 16) & 7u) == fsm)
++		v = pr_rd32(pr.pwrap, PR_PWRAP_SWINF_STA);
++		if (PR_SWINF_FSM(v) == fsm)
+ 			return 0;
+ 	}
+-	printf("RUBY PMIC: pwrap wait fsm=%u timeout rd=%08x\n", fsm, v);
++	printf("RUBY PMIC: pwrap wait fsm=%u timeout sta=%08x\n", fsm, v);
+ 	return ETIMEDOUT;
+ }
+ 
+@@ -722,14 +752,14 @@
+ 
+ 	if ((err = pr_pwrap_check()) != 0)
+ 		return err;
+-	if ((err = pr_pwrap_wait(0)) != 0)
++	if ((err = pr_pwrap_wait(PR_SWINF_FSM_IDLE)) != 0)
+ 		return err;
+-	pr_wr32(pr.pwrap, PR_PWRAP_CMD, (uint32_t)(reg >> 1) << 16);
+-	if ((err = pr_pwrap_wait(6)) != 0)
++	pr_wr32(pr.pwrap, PR_PWRAP_SWINF_ACC, reg);
++	if ((err = pr_pwrap_wait(PR_SWINF_FSM_VLDCLR)) != 0)
+ 		return err;
+-	rd = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
++	rd = pr_rd32(pr.pwrap, PR_PWRAP_SWINF_RDATA);
+ 	*val = (uint16_t)(rd & 0xffffu);
+-	pr_wr32(pr.pwrap, PR_PWRAP_VLDCLR, 1);
++	pr_wr32(pr.pwrap, PR_PWRAP_SWINF_VLDCLR, 1);
+ 	return 0;
+ }
+ 
+@@ -744,11 +774,122 @@
+ 	}
+ 	if ((err = pr_pwrap_check()) != 0)
+ 		return err;
+-	if ((err = pr_pwrap_wait(0)) != 0)
++	if ((err = pr_pwrap_wait(PR_SWINF_FSM_IDLE)) != 0)
++		return err;
++	pr_wr32(pr.pwrap, PR_PWRAP_SWINF_WDATA, val);
++	pr_wr32(pr.pwrap, PR_PWRAP_SWINF_ACC, (1u << 29) | reg);
++	return pr_pwrap_wait(PR_SWINF_FSM_IDLE);
++}
++
++static void
++pr_pwrap_dump(void)
++{
++	uint32_t sta;
++
++	if (!pr.pwrap) {
++		printf("RUBY PMIC: pwrap not mapped\n");
++		return;
++	}
++	printf("RUBY PMIC: dump wrapinit=%u attempted=%u pmic=%u\n",
++	    pr.wrap_init_allowed, pr.wrap_init_attempted, pr.pmic_writes);
++	printf("RUBY PMIC: dump init=%08x staupd=%08x crc=%08x timer=%08x\n",
++	    pr_rd32(pr.pwrap, PR_PWRAP_INIT_DONE),
++	    pr_rd32(pr.pwrap, PR_PWRAP_STAUPD_CTRL),
++	    pr_rd32(pr.pwrap, PR_PWRAP_CRC_CTRL),
++	    pr_rd32(pr.pwrap, PR_PWRAP_TIMER_CTRL));
++	printf("RUBY PMIC: dump irq3=%08x/%08x irq4=%08x/%08x monitor=%08x\n",
++	    pr_rd32(pr.pwrap, PR_PWRAP_IRQ_FLAG_3),
++	    pr_rd32(pr.pwrap, PR_PWRAP_IRQ_CLR_3),
++	    pr_rd32(pr.pwrap, PR_PWRAP_IRQ_FLAG_4),
++	    pr_rd32(pr.pwrap, PR_PWRAP_IRQ_CLR_4),
++	    pr_rd32(pr.pwrap, PR_PWRAP_MONITOR_CTRL));
++	printf("RUBY PMIC: dump acc=%08x wdata=%08x rdata=%08x vldclr=%08x\n",
++	    pr_rd32(pr.pwrap, PR_PWRAP_SWINF_ACC),
++	    pr_rd32(pr.pwrap, PR_PWRAP_SWINF_WDATA),
++	    pr_rd32(pr.pwrap, PR_PWRAP_SWINF_RDATA),
++	    pr_rd32(pr.pwrap, PR_PWRAP_SWINF_VLDCLR));
++	sta = pr_rd32(pr.pwrap, PR_PWRAP_SWINF_STA);
++	printf("RUBY PMIC: dump sta=%08x fsm=%u init_done=%u sync_idle=%u\n",
++	    sta, PR_SWINF_FSM(sta), (sta >> 15) & 1u, (sta >> 20) & 1u);
++	if (pr.ifrao)
++		printf("RUBY PMIC: dump ifrao gates0=%08x gates2=%08x (bit=1 gated)\n",
++		    pr_rd32(pr.ifrao, 0x090u), pr_rd32(pr.ifrao, 0x0acu));
++	else
++		printf("RUBY PMIC: dump ifrao not mapped\n");
++}
++
++static int
++pr_pwrap_init(void)
++{
++	uint64_t start, end;
++	uint32_t init, sta;
++	uint16_t hwcid = 0, readtest = 0, top = 0, pwrkey = 0;
++	int err;
++
++	if (!pr.pwrap) {
++		printf("RUBY PMIC: init FAIL mapped\n");
++		return ENODEV;
++	}
++	if (!pr.wrap_init_allowed) {
++		printf("RUBY PMIC: init locked (rubypwrap=1)\n");
++		return EACCES;
++	}
++	if (pr.wrap_init_attempted) {
++		printf("RUBY PMIC: init busy (one attempt per boot)\n");
++		return EBUSY;
++	}
++
++	init = pr_rd32(pr.pwrap, PR_PWRAP_INIT_DONE);
++	sta = pr_rd32(pr.pwrap, PR_PWRAP_SWINF_STA);
++	printf("RUBY PMIC: init pre init=%08x sta=%08x\n", init, sta);
++	clock_get_uptime(&start);
++	pr.wrap_init_attempted = true;
++
++	if (!(init & 1u)) {
++		pr_wr32(pr.pwrap, PR_PWRAP_INIT_DONE, 1);
++		init = pr_rd32(pr.pwrap, PR_PWRAP_INIT_DONE);
++		printf("RUBY PMIC: init set done=%08x\n", init);
++	} else {
++		printf("RUBY PMIC: init already done\n");
++	}
++
++	sta = pr_rd32(pr.pwrap, PR_PWRAP_SWINF_STA);
++	if (!(sta & PR_SWINF_INIT_DONE)) {
++		printf("RUBY PMIC: init FAIL sta=%08x\n", sta);
++		return ENODEV;
++	}
++	printf("RUBY PMIC: init ready sta=%08x\n", sta);
++
++	if ((err = pr_pwrap_read(PR_PMIC_HWCID, &hwcid)) != 0) {
++		printf("RUBY PMIC: init FAIL hwcid err=%d\n", err);
++		return err;
++	}
++	if (hwcid != PR_PMIC_HWCID_VAL) {
++		printf("RUBY PMIC: init FAIL hwcid=0x%04x\n", hwcid);
++		return EPROTO;
++	}
++	if ((err = pr_pwrap_read(PR_PMIC_READ_TEST, &readtest)) != 0) {
++		printf("RUBY PMIC: init FAIL read_test err=%d\n", err);
++		return err;
++	}
++	if (readtest != PR_PMIC_READ_TEST_VAL) {
++		printf("RUBY PMIC: init FAIL read_test=0x%04x\n", readtest);
++		return EPROTO;
++	}
++	if ((err = pr_pwrap_read(PR_PMIC_TOPSTATUS, &top)) != 0) {
++		printf("RUBY PMIC: init FAIL topstatus err=%d\n", err);
++		return err;
++	}
++	if ((err = pr_pwrap_read(PR_PMIC_PWRKEY, &pwrkey)) != 0) {
++		printf("RUBY PMIC: init FAIL pwrkey err=%d\n", err);
+ 		return err;
+-	pr_wr32(pr.pwrap, PR_PWRAP_CMD,
+-	    (1u << 31) | ((uint32_t)(reg >> 1) << 16) | val);
+-	return pr_pwrap_wait(0);
++	}
++
++	clock_get_uptime(&end);
++	printf("RUBY PMIC: init PASS %llu ms hwcid=0x%04x readtest=0x%04x top=0x%04x pwrkey=0x%04x\n",
++	    (unsigned long long)((end - start) / 1000000ull),
++	    hwcid, readtest, top, pwrkey);
++	return 0;
+ }
+ 
+ /* ---- WDT --------------------------------------------------------------- */
+@@ -876,16 +1017,16 @@
+ 	uint8_t v;
+ 	uint8_t id[2];
+ 	uint16_t w;
+-	uint32_t en, init, rd;
++	uint32_t init, sta;
+ 	int err;
+ 
+ 	if (!pr.pwrap) {
+ 		PR_LINE("RUBY SNAP: pwrap not mapped\n");
+ 	} else {
+-		en = pr_rd32(pr.pwrap, PR_PWRAP_EN);
+-		init = pr_rd32(pr.pwrap, PR_PWRAP_INIT);
+-		rd = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
+-		PR_LINE("RUBY SNAP: pwrap en=%08x init=%08x rd=%08x\n", en, init, rd);
++		init = pr_rd32(pr.pwrap, PR_PWRAP_INIT_DONE);
++		sta = pr_rd32(pr.pwrap, PR_PWRAP_SWINF_STA);
++		PR_LINE("RUBY SNAP: pwrap init=%08x sta=%08x done=%u\n",
++		    init, sta, (sta >> 15) & 1u);
+ 		if ((err = pr_pwrap_read(0x0008, &w)) == 0)
+ 			PR_LINE("RUBY SNAP: MT6359 HWCID=0x%04x\n", w);
+ 		else
+@@ -1044,17 +1185,17 @@
+ {
+ 	uint8_t v, id[2];
+ 	uint16_t w;
+-	uint32_t en, init, rd;
++	uint32_t init, sta;
+ 	int err;
+ 
+ 	if (!pr.pwrap) {
+ 		printf("RUBY PMIC: pwrap not mapped\n");
+ 		return;
+ 	}
+-	en = pr_rd32(pr.pwrap, PR_PWRAP_EN);
+-	init = pr_rd32(pr.pwrap, PR_PWRAP_INIT);
+-	rd = pr_rd32(pr.pwrap, PR_PWRAP_RDATA);
+-	printf("RUBY PMIC: pwrap en=%08x init=%08x rd=%08x\n", en, init, rd);
++	init = pr_rd32(pr.pwrap, PR_PWRAP_INIT_DONE);
++	sta = pr_rd32(pr.pwrap, PR_PWRAP_SWINF_STA);
++	printf("RUBY PMIC: pwrap init=%08x sta=%08x done=%u\n",
++	    init, sta, (sta >> 15) & 1u);
+ 	if ((err = pr_pwrap_read(0x0008, &w)) == 0)
+ 		printf("RUBY PMIC: MT6359 HWCID=0x%04x\n", w);
+ 	else
+@@ -1110,6 +1251,7 @@
+ {
+ 	printf("RUBY CMD: help pwrap gpio i2c clk kpd keyscan wdt snap pmic_survey\n");
+ 	printf("RUBY CMD: pwrap r <reg> | w <reg> <val> (rubypmic)\n");
++	printf("RUBY CMD: pwrap dump | init (rubypwrap)\n");
+ 	printf("RUBY CMD: i2c <5|6> take|line|scan|recover|release|r <addr> <reg> <len>|smb <addr> <reg>\n");
+ 	printf("RUBY CMD: gpio <pin> | clk <gate> [bit] sta | kpd | keyscan\n");
+ 	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|all]\n");
+@@ -1123,6 +1265,24 @@
+ 	uint16_t v;
+ 	int err;
+ 
++	if (pr_sub(&p, "dump")) {
++		if (*p != '\0') {
++			printf("RUBY CMD: err: pwrap dump\n");
++			return 1;
++		}
++		pr_pwrap_dump();
++		return 1;
++	}
++	if (pr_sub(&p, "init")) {
++		if (*p != '\0') {
++			printf("RUBY CMD: err: pwrap init\n");
++			return 1;
++		}
++		err = pr_pwrap_init();
++		if (err)
++			printf("RUBY PMIC: init cmd err=%d\n", err);
++		return 1;
++	}
+ 	if (*p == 'r' && (p[1] == ' ' || p[1] == '\t')) {
+ 		p = pr_skip(p + 1);
+ 		if (!pr_parse_u32(&p, &reg) || *pr_skip(p) != '\0') {
+@@ -1150,7 +1310,7 @@
+ 			printf("RUBY PMIC: pwrap w 0x%04x=0x%04x\n", reg, val);
+ 		return 1;
+ 	}
+-	printf("RUBY CMD: err: pwrap r|w\n");
++	printf("RUBY CMD: err: pwrap r|w|dump|init\n");
+ 	return 1;
+ }
+ 
+@@ -1464,6 +1624,9 @@
+ 	v = 0;
+ 	if (PE_parse_boot_argn("rubypmic", &v, sizeof(v)) && v == 1)
+ 		pr.pmic_writes = true;
++	v = 0;
++	if (PE_parse_boot_argn("rubypwrap", &v, sizeof(v)) && v == 1)
++		pr.wrap_init_allowed = true;
+ 
+ 	pr.gpio = ml_io_map(PR_GPIO_PA, PR_GPIO_SIZE);
+ 	pr.pwrap = ml_io_map(PR_PWRAP_PA, PR_REG_SIZE);
+@@ -1479,10 +1642,10 @@
+ 	pr_i2c_bus_init(&pr.i2c[0], 5);
+ 	pr_i2c_bus_init(&pr.i2c[1], 6);
+ 	pr.ready = (pr.gpio != 0 && pr.pwrap != 0);
+-	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d\n",
++	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d wrapinit=%d\n",
+ 	    pr.gpio != 0, pr.pwrap != 0, pr.kpd != 0, pr.wdt != 0,
+ 	    pr.iocfg[4] != 0, pr.iocfg[7] != 0,
+-	    pr.probe_writes, pr.pmic_writes);
++	    pr.probe_writes, pr.pmic_writes, pr.wrap_init_allowed);
+ 	return pr.ready ? 0 : ENODEV;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
