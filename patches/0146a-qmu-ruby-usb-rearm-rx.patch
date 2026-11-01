@@ -1,0 +1,233 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 11c2697..ac46216 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -10,7 +10,9 @@
+  * rubydump=1 additionally dumps the handoff state (PE_state/DT and
+  * IPPC/MAC/PHY registers) to SWEETLOG.  rubyep2log=0 (0146a) leaves the
+  * EP2 IN log QMU unconfigured; the EP0 0x2A console path and the EP2 OUT
+- * command path are unchanged.
++ * command path are unchanged.  0146a-qmu stops both QMUs with a bounded
++ * wait before it touches their rings; RX empty/CS/LEN events recover with
++ * stop/reset/start instead of bypassing the GPD the QMU may still own.
+  * the Qualcomm DWC3/ECM driver in sweet_usb.c is not used by ruby.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -1372,6 +1374,31 @@ ruby_ep2_qmu_stop(vm_offset_t mac)
+     return 0;
+ }
+ 
++/*
++ * 0146a-qmu: the RX QMU owns its ring just like TX.  Wait for ACTIVE to
++ * clear before any EP_RST or GPD rewrite; a timeout leaves the ring alone
++ * so a later rearm/config can retry instead of corrupting live DMA.
++ */
++static int
++ruby_ep2_rx_qmu_stop(vm_offset_t mac)
++{
++    uint32_t i;
++
++    if (ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE)
++        ruby_wr32(mac, RQCSR2_OFF, QMU_Q_STOP);
++    for (i = 0; i < RUBY_EP2_STOP_SPINS; i++) {
++        if (!(ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE))
++            return 0;
++        delay(RUBY_EP2_STOP_SPIN_US);
++    }
++    ruby_ep2_stop_timeouts++;
++    if (ruby_ep2_stop_timeouts <= 3 ||
++        (ruby_ep2_stop_timeouts & 0x3f) == 0)
++        printf("RUBY USB: EP2 RX stop timeout timeouts=%u\n",
++            ruby_ep2_stop_timeouts);
++    return -1;
++}
++
+ static void
+ ruby_ep2_ring_reset(vm_offset_t mac)
+ {
+@@ -1490,6 +1517,14 @@ ruby_ep2_config(vm_offset_t mac)
+         ruby_seq("TXCFG_SKIP", ruby_cfg_seen, 0);
+         return;
+     }
++    /*
++     * 0146a-qmu: a rearm that could not stop the old QMU (or a host
++     * reconfigure) must not reprogram an active queue.
++     */
++    if (ruby_ep2_qmu_stop(mac) != 0) {
++        printf("RUBY USB: EP2 TX stop timeout in config\n");
++        return;
++    }
+     ruby_ep2_host_seen = 0;
+     ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
+     if (!ruby_ring_pa || (ruby_ring_pa & 0x3fu) ||
+@@ -2054,6 +2089,14 @@ ruby_ep2_rx_config(vm_offset_t mac)
+         ruby_seq("RXCFG_SKIP", ruby_cfg_seen, 0);
+         return;
+     }
++    /*
++     * 0146a-qmu: never reprogram a queue whose old instance is still
++     * active; wait for it to stop first and bail out if it does not.
++     */
++    if (ruby_ep2_rx_qmu_stop(mac) != 0) {
++        printf("RUBY USB: EP2 RX stop timeout in config\n");
++        return;
++    }
+     ruby_rx_ring_pa = ruby_dma_pa(ruby_rx_gpd_ring);
+     for (i = 0; i < RUBY_RX_GPD_NUM; i++) {
+         ruby_rx_buf_pa[i] = ruby_dma_pa(ruby_rx_buf[i]);
+@@ -2119,7 +2162,10 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     if (!ruby_rx_ring_pa)
+         return;
+ 
+-    ruby_wr32(mac, RQCSR2_OFF, QMU_Q_STOP);
++    if (ruby_ep2_rx_qmu_stop(mac) != 0) {
++        printf("RUBY USB: EP2 RX stop timeout in reset\n");
++        return;
++    }
+     csr = ruby_rd32(mac, RX2CSR0_OFF) &
+         ~(RX_SENTSTALL_BIT | RX_RXPKTRDY_BIT);
+     csr = (csr & ~RX_SENDSTALL_BIT) | RX_SENTSTALL_BIT | RX_RXPKTRDY_BIT;
+@@ -2170,6 +2216,27 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     ruby_rx_ready = 1;
+ }
+ 
++/*
++ * 0146a-qmu: vendor parity for a corrupt RX GPD/queue: stop with a bounded
++ * wait, clear the error latches, then reset/re-arm/start the ring.  Never
++ * mark the live GPD BPS: the QMU may still own it.
++ */
++static void
++ruby_ep2_rx_recover(vm_offset_t mac)
++{
++    uint32_t err;
++
++    if (ruby_ep2_rx_qmu_stop(mac) != 0)
++        return;
++    err = ruby_rd32(mac, RQERRIR0_OFF);
++    if (err)
++        ruby_wr32(mac, RQERRIR0_OFF, err);
++    err = ruby_rd32(mac, RQERRIR1_OFF);
++    if (err)
++        ruby_wr32(mac, RQERRIR1_OFF, err);
++    ruby_ep2_rx_reset(mac, 0);
++}
++
+ static void
+ ruby_ep2_rx_halt_clear(vm_offset_t mac)
+ {
+@@ -2510,23 +2577,6 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+         ruby_ep2_rx_resume(mac);
+ }
+ 
+-static void
+-ruby_ep2_rx_bypass(vm_offset_t mac)
+-{
+-    uint32_t cur;
+-    uint8_t *g;
+-
+-    cur = ruby_ep2_rx_cur_slot(mac);
+-    if (cur == 0xffu)
+-        return;
+-    g = ruby_rx_gpd_ring + cur * 16;
+-    ruby_dc_civac(g, 16);
+-    g[0] |= (1u << 0) | (1u << 2);      /* HWO | BPS: bypass this GPD */
+-    ruby_dc_civac(g, 16);
+-    ruby_rx_bypasses++;
+-    ruby_ep2_rx_resume(mac);
+-}
+-
+ static void
+ ruby_ep2_rx_poll(vm_offset_t mac)
+ {
+@@ -2550,7 +2600,7 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+             if (err)
+                 ruby_wr32(mac, RQERRIR0_OFF, err);
+             ruby_rx_errors++;
+-            ruby_ep2_rx_bypass(mac);
++            ruby_ep2_rx_recover(mac);
+         }
+         if (rxq & QISAR1_RXQ_ZLPERR) {
+             err = ruby_rd32(mac, RQERRIR1_OFF);
+@@ -2568,6 +2618,15 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+     }
+ 
+     ruby_ep2_rx_drain(mac);
++
++    /*
++     * 0146a-qmu: RXQ_EMPTY means the QMU ran out of GPDs and stopped.
++     * The drain re-arms what completed; if the queue is still inactive,
++     * resume it so the next host OUT is not NAKed forever.
++     */
++    if (ruby_rx_ready &&
++        !(ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE))
++        ruby_ep2_rx_resume(mac);
+ }
+ 
+ /*
+@@ -2577,9 +2636,11 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+ static void
+ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+ {
+-    uint32_t csr, dc, v, count, i;
++    uint32_t csr, dc, v, count, i, was_tx, was_rx;
+ 
+     ruby_seq("REARM_IN", reason, ruby_cfg_seen);
++    was_tx = ruby_ep_ready;
++    was_rx = ruby_rx_ready;
+     /* Drop whatever the host left in the FIFO before the reset. */
+     count = ruby_rd32(mac, RXCOUNT0_OFF);
+     for (i = 0; i < count; i++)
+@@ -2610,8 +2671,6 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+     ruby_gpd_deq = 0;
+     ruby_inflight = 0;
+     ruby_ep2_host_seen = 0;
+-    ruby_wr32(mac, TQCSR2_OFF, QMU_Q_STOP);   /* stop the TX QMU */
+-
+     /*
+      * 0143: the ring may still hold GPDs the QMU owns (HWO=1) from
+      * before the reset.  Zeroing enq/deq/inflight without clearing the
+@@ -2619,14 +2678,40 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+      * frames after the next start (measured on 0142: inflight=15 vs
+      * hwo=63).  Reset the ring while the QMU is stopped so the counters
+      * match the hardware.
++     *
++     * 0146a-qmu: stop with a bounded wait first.  If ACTIVE does not
++     * clear, leave the ring alone and let the next rearm/config retry;
++     * rewriting a live ring is the failure documented in 0143.
+      */
+-    ruby_ep2_ring_reset(mac);
++    if (was_tx || (ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE)) {
++        if (ruby_ep2_qmu_stop(mac) == 0)
++            ruby_ep2_ring_reset(mac);
++        else
++            printf("RUBY USB: EP2 TX stop timeout in rearm\n");
++    } else {
++        /* The log QMU was never started (rubyep2log=0). */
++        ruby_ep2_ring_reset(mac);
++    }
+ 
++    /*
++     * 0146a-qmu: same rule for RX.  Only pulse EP_RST after the QMU is
++     * inactive; a timeout leaves the endpoint and ring for the next
++     * rearm/config to retry.
++     */
++    if (was_rx || (ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE)) {
++        if (ruby_ep2_rx_qmu_stop(mac) == 0) {
++            ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
++            ruby_wr32(mac, EP_RST_OFF, 0);
++        } else {
++            printf("RUBY USB: EP2 RX stop timeout in rearm\n");
++        }
++    } else {
++        ruby_wr32(mac, RQCSR2_OFF, QMU_Q_STOP);
++        ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
++        ruby_wr32(mac, EP_RST_OFF, 0);
++    }
+     ruby_rx_ready = 0;
+     ruby_rx_deq = 0;
+-    ruby_wr32(mac, RQCSR2_OFF, QMU_Q_STOP);   /* stop the RX QMU */
+-    ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
+-    ruby_wr32(mac, EP_RST_OFF, 0);
+ 
+     if (reason == RUBY_REARM_ATTACH) {
+         /* The PHY lost its session with the unplug; re-assert the port. */

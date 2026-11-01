@@ -1,0 +1,248 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index db6ac24..5dab50a 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,6 +107,7 @@ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
++bsd/dev/ruby_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
+ bsd/dev/ruby_usb.c			standard
+diff --git a/bsd/dev/ruby_keys.c b/bsd/dev/ruby_keys.c
+new file mode 100644
+index 0000000..05af506
+--- /dev/null
++++ b/bsd/dev/ruby_keys.c
+@@ -0,0 +1,205 @@
++/*
++ * RUBY: the board's buttons, polled.
++ *
++ *   volume down  the SoC keypad controller, KP_MEM1 bit 0 (clear while down)
++ *   volume up    MT6359 TOPSTATUS bit 3 (HOMEKEY_DEB, clear while down)
++ *   power        MT6359 TOPSTATUS bit 1 (PWRKEY_DEB, clear while down)
++ *
++ * TOPSTATUS is the PMIC's debounced key level.  It is independent of the PSC
++ * interrupt enable (0x910), so this driver never writes the PMIC; the boot
++ * loader has already initialized the wrapper and the key blocks.  A thread
++ * looks every 20 ms and a key has to read the same twice in a row before it is
++ * reported, so contact bounce cannot reach the HID service.
++ *
++ * Boot arg rubkeys=1.  The legacy sweet_keys.c is the Qualcomm PM6150 path and
++ * stays behind sweethw=1.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern void sweet_hid_key(int key, int down);
++void ruby_keys_init(void);
++
++#define RK_KPD_PA        0x10010000u
++#define RK_KPD_MEM1      0x0004u
++
++#define RK_PWRAP_PA      0x10026000u
++#define RK_PWRAP_SIZE    0x1000u
++#define RK_PWRAP_ACC     0x0880u
++#define RK_PWRAP_RDATA   0x0894u
++#define RK_PWRAP_VLDCLR  0x08a4u
++#define RK_PWRAP_STA     0x08a8u
++
++#define RK_SWINF_FSM(v)  (((v) >> 1) & 7u)
++#define RK_SWINF_IDLE    0u
++#define RK_SWINF_VLDCLR  6u
++#define RK_SWINF_INIT    (1u << 15)
++
++#define RK_MT6359_TOPSTATUS  0x002au
++#define RK_TOP_PWRKEY_DEB    (1u << 1)
++#define RK_TOP_HOMEKEY_DEB   (1u << 3)
++
++#define RK_POLL_MS       20
++#define RK_POWER         0
++#define RK_VOLUME_UP     1
++#define RK_VOLUME_DOWN   2
++
++struct rk_key {
++	const char *name;
++	int usage;
++	bool down;
++	bool seen;
++};
++
++static struct rk_key rk_keys[] = {
++	{ "power", RK_POWER, false, false },
++	{ "volume up", RK_VOLUME_UP, false, false },
++	{ "volume down", RK_VOLUME_DOWN, false, false },
++};
++
++static vm_offset_t rk_kpd, rk_pwrap;
++static bool rk_started;
++static int rk_sleep_chan;
++static unsigned rk_errors;
++
++static inline uint32_t
++rk_rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline uint16_t
++rk_rd16(vm_offset_t base, uint32_t off)
++{
++	uint16_t v = *(volatile uint16_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++rk_wr32(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static bool
++rk_pwrap_wait(uint32_t fsm)
++{
++	uint32_t i;
++
++	for (i = 0; i < 10000; i++) {
++		if (RK_SWINF_FSM(rk_rd32(rk_pwrap, RK_PWRAP_STA)) == fsm)
++			return true;
++	}
++	return false;
++}
++
++static bool
++rk_pmic_read(uint16_t reg, uint16_t *val)
++{
++	uint32_t sta, rd;
++
++	if (!rk_pwrap)
++		return false;
++	sta = rk_rd32(rk_pwrap, RK_PWRAP_STA);
++	if (!(sta & RK_SWINF_INIT))
++		return false;
++	if (!rk_pwrap_wait(RK_SWINF_IDLE))
++		return false;
++	rk_wr32(rk_pwrap, RK_PWRAP_ACC, reg);
++	if (!rk_pwrap_wait(RK_SWINF_VLDCLR))
++		return false;
++	rd = rk_rd32(rk_pwrap, RK_PWRAP_RDATA);
++	*val = (uint16_t)(rd & 0xffffu);
++	rk_wr32(rk_pwrap, RK_PWRAP_VLDCLR, 1);
++	return true;
++}
++
++static void
++rk_report(struct rk_key *key, bool down, uint16_t mem1, uint16_t top)
++{
++	key->down = down;
++	printf("RUBY KEYS: %s %s kpd=%04x top=%04x\n", key->name,
++	    down ? "down" : "up", mem1, top);
++	sweet_hid_key(key->usage, down);
++}
++
++static void
++rk_thread(void *arg, wait_result_t result)
++{
++	uint64_t deadline;
++	(void)arg;
++	(void)result;
++
++	for (;;) {
++		uint16_t mem1 = 0xffffu, top = 0xffffu;
++		bool pmic_ok = rk_pmic_read(RK_MT6359_TOPSTATUS, &top);
++		bool now[3];
++
++		if (rk_kpd)
++			mem1 = rk_rd16(rk_kpd, RK_KPD_MEM1);
++		now[0] = pmic_ok ? !(top & RK_TOP_PWRKEY_DEB) : rk_keys[0].down;
++		now[1] = pmic_ok ? !(top & RK_TOP_HOMEKEY_DEB) : rk_keys[1].down;
++		now[2] = rk_kpd && !(mem1 & 1u);
++		if (pmic_ok) {
++			rk_errors = 0;
++		} else if ((rk_errors++ % 250u) == 0) {
++			printf("RUBY KEYS: PMIC read failed\n");
++		}
++		for (unsigned i = 0; i < 3; i++) {
++			if (now[i] == rk_keys[i].seen &&
++			    now[i] != rk_keys[i].down)
++				rk_report(&rk_keys[i], now[i], mem1, top);
++			rk_keys[i].seen = now[i];
++		}
++		clock_interval_to_deadline(RK_POLL_MS, NSEC_PER_MSEC, &deadline);
++		(void)assert_wait_deadline(&rk_sleep_chan, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++void
++ruby_keys_init(void)
++{
++	int enabled = 0;
++	thread_t thread;
++	uint16_t top = 0;
++	bool pmic_ok;
++
++	if (rk_started)
++		return;
++	rk_started = true;
++	if (!PE_parse_boot_argn("rubkeys", &enabled, sizeof(enabled)) ||
++	    enabled != 1) {
++		printf("RUBY KEYS: disabled (rubkeys=0)\n");
++		return;
++	}
++	rk_kpd = ml_io_map(RK_KPD_PA, RK_PWRAP_SIZE);
++	rk_pwrap = ml_io_map(RK_PWRAP_PA, RK_PWRAP_SIZE);
++	if (!rk_kpd && !rk_pwrap) {
++		printf("RUBY KEYS: MMIO mapping failed\n");
++		return;
++	}
++	pmic_ok = rk_pmic_read(RK_MT6359_TOPSTATUS, &top);
++	printf("RUBY KEYS: start kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x\n",
++	    rk_kpd != 0, rk_pwrap != 0, pmic_ok, top,
++	    rk_kpd ? rk_rd16(rk_kpd, RK_KPD_MEM1) : 0xffffu);
++	if (kernel_thread_start(rk_thread, NULL, &thread) == KERN_SUCCESS)
++		thread_deallocate(thread);
++	else
++		printf("RUBY KEYS: kernel_thread_start failed\n");
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index cf9781d..698868b 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -51,6 +51,7 @@ extern int hz;
+ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
++extern void ruby_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_goodix_spi_init(void);
+ extern void sweet_usb_probe(void);
+@@ -699,8 +700,11 @@ sweet_ufs_init(void)
+ 		sweet_touch_init();
+ 		sweet_usb_probe();
+ 	} else {
+-		printf("SWEET UFS: keys/touch/USB skipped (ruby, sweethw=0)\n");
++		printf("SWEET UFS: legacy keys/touch/USB skipped (ruby, sweethw=0)\n");
+ 	}
++	int keys = 0;
++	if (PE_parse_boot_argn("rubkeys", &keys, sizeof(keys)) && keys == 1)
++		ruby_keys_init();
+ 	sweet_goodix_spi_init();
+ 	return 0;
+ }

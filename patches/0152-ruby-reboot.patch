@@ -1,0 +1,110 @@
+diff --git a/bsd/dev/ruby_probe.c b/bsd/dev/ruby_probe.c
+index a12d62c..8e3c540 100644
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -83,6 +83,13 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define PR_WDT_LATCH     0x48u
+ #define PR_WDT_MODE_OFF  0x22000000u
+ #define PR_WDT_RST_ALT   0x1971u
++#define PR_WDT_SWRST     0x14u
++#define PR_WDT_NONRST2   0x24u
++#define PR_WDT_MODE_KEY  0x22000000u
++#define PR_WDT_MODE_EXTEN (1u << 2)
++#define PR_WDT_MODE_AUTO  (1u << 4)
++#define PR_WDT_SWRST_KEY 0x1209u
++#define PR_BOOT_BOOTLOADER 3u
+ 
+ #define PR_I2C_BUDGET    4000u   /* 5 us phases: about 20 ms per transaction */
+ 
+@@ -125,6 +132,7 @@ struct pr_state {
+ 	bool pmic_writes;
+ 	bool wrap_init_allowed;
+ 	bool wrap_init_attempted;
++	bool reboot_allowed;
+ };
+ 
+ static struct pr_state pr;
+@@ -957,6 +965,38 @@ pr_wdt_off(void)
+ 	return 0;
+ }
+ 
++/*
++ * The bootloader reads TOPRGU+0x24 (NONRST2, low four bits) after a reset;
++ * 3 is BOOT_BOOTLOADER.  Use the LK SWRST sequence: restart key, then
++ * KEY|EXTEN|AUTO_RESTART, then the SWRST key.  Without the MODE write the
++ * SWRST only raises an interrupt and the CPU hangs.
++ */
++static int
++pr_reboot_bootloader(void)
++{
++	uint32_t old, new, mode;
++
++	if (!pr.reboot_allowed) {
++		printf("RUBY WDT: reboot locked (rubyreboot=1)\n");
++		return 1;
++	}
++	if (!pr.wdt) {
++		printf("RUBY WDT: not mapped\n");
++		return 1;
++	}
++	old = pr_rd32(pr.wdt, PR_WDT_NONRST2);
++	new = (old & ~0xfu) | PR_BOOT_BOOTLOADER;
++	pr_wr32(pr.wdt, PR_WDT_NONRST2, new);
++	printf("RUBY WDT: boot mode old=%08x new=%08x read=%08x\n",
++	    old, new, pr_rd32(pr.wdt, PR_WDT_NONRST2));
++	pr_wr32(pr.wdt, PR_WDT_RST, PR_WDT_RST_ALT);
++	mode = PR_WDT_MODE_KEY | PR_WDT_MODE_EXTEN | PR_WDT_MODE_AUTO;
++	pr_wr32(pr.wdt, PR_WDT_MODE, mode);
++	printf("RUBY WDT: swrst mode=%08x key=%04x\n", mode, PR_WDT_SWRST_KEY);
++	pr_wr32(pr.wdt, PR_WDT_SWRST, PR_WDT_SWRST_KEY);
++	return 1;
++}
++
+ /* ---- GPIO / keys ------------------------------------------------------- */
+ 
+ static void
+@@ -1442,6 +1482,7 @@ pr_help(void)
+ 	printf("RUBY CMD: gpio <pin> | clk <gate> [bit] sta | kpd | keyscan\n");
+ 	printf("RUBY CMD: key watch [ms] (read-only transition log)\n");
+ 	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|all]\n");
++	printf("RUBY CMD: reboot bootloader (rubyreboot)\n");
+ }
+ 
+ static int
+@@ -1730,6 +1771,12 @@ ruby_probe_cmd(char *line)
+ 		}
+ 		return pr_key_watch(ms);
+ 	}
++	if (!strncmp(p, "reboot", 6)) {
++		if (!strcmp(p, "reboot bootloader"))
++			return pr_reboot_bootloader();
++		printf("RUBY CMD: err: reboot bootloader\n");
++		return 1;
++	}
+ 	if (!strcmp(p, "kpd")) {
+ 		pr_kpd_dump();
+ 		return 1;
+@@ -1829,6 +1876,9 @@ ruby_probe_init(void)
+ 	v = 0;
+ 	if (PE_parse_boot_argn("rubypwrap", &v, sizeof(v)) && v == 1)
+ 		pr.wrap_init_allowed = true;
++	v = 0;
++	if (PE_parse_boot_argn("rubyreboot", &v, sizeof(v)) && v == 1)
++		pr.reboot_allowed = true;
+ 
+ 	pr.gpio = ml_io_map(PR_GPIO_PA, PR_GPIO_SIZE);
+ 	pr.pwrap = ml_io_map(PR_PWRAP_PA, PR_REG_SIZE);
+@@ -1844,10 +1894,11 @@ ruby_probe_init(void)
+ 	pr_i2c_bus_init(&pr.i2c[0], 5);
+ 	pr_i2c_bus_init(&pr.i2c[1], 6);
+ 	pr.ready = (pr.gpio != 0 && pr.pwrap != 0);
+-	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d wrapinit=%d\n",
++	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d wrapinit=%d reboot=%d\n",
+ 	    pr.gpio != 0, pr.pwrap != 0, pr.kpd != 0, pr.wdt != 0,
+ 	    pr.iocfg[4] != 0, pr.iocfg[7] != 0,
+-	    pr.probe_writes, pr.pmic_writes, pr.wrap_init_allowed);
++	    pr.probe_writes, pr.pmic_writes, pr.wrap_init_allowed,
++	    pr.reboot_allowed);
+ 	return pr.ready ? 0 : ENODEV;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
