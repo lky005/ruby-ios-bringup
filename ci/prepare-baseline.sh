@@ -137,6 +137,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0146a-qmu-ruby-usb-rearm-rx.patch" \
     "$ROOT/patches/0147-ruby-ep0-cmd.patch" \
     "$ROOT/patches/0148-ruby-pwrap-init.patch" \
+    "$ROOT/patches/0149-ruby-keywatch.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
