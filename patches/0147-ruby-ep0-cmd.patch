@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
-index ac46216..8368dc9 100644
+index ac46216..e4236b4 100644
 --- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
 @@ -13,6 +13,9 @@
@@ -47,7 +47,55 @@ index ac46216..8368dc9 100644
  /*
   * Milliseconds since the USB probe started.  The window counts it from its
   * own tick, the resident thread keeps counting at 1 ms per iteration, so
-@@ -785,6 +809,10 @@ static void ruby_ep0_vendor_probe_read(vm_offset_t mac, uint32_t t,
+@@ -554,6 +578,47 @@ ruby_ep0_write_fifo(vm_offset_t mac, const uint8_t *src, uint32_t len)
+         *(volatile uint8_t *)(mac + FIFO0_OFF) = src[i];
+ }
+ 
++/*
++ * 0147: U3D_FIFO0 is a 32-bit port.  Reading it byte-by-byte returns the
++ * same lane repeatedly; vendor ep0_read_fifo() reads words and one final
++ * word for the 1..3 byte tail.  Use the same order for the 0x2E line.
++ */
++static void
++ruby_ep0_read_fifo_bytes(vm_offset_t mac, uint8_t *dst, uint32_t len)
++{
++    uint32_t i = 0;
++
++    while (i + 4 <= len) {
++        uint32_t w = ruby_rd32(mac, FIFO0_OFF);
++
++        dst[i++] = (uint8_t)(w & 0xffu);
++        dst[i++] = (uint8_t)((w >> 8) & 0xffu);
++        dst[i++] = (uint8_t)((w >> 16) & 0xffu);
++        dst[i++] = (uint8_t)((w >> 24) & 0xffu);
++    }
++    if (i < len) {
++        uint32_t w = ruby_rd32(mac, FIFO0_OFF);
++
++        while (i < len) {
++            dst[i++] = (uint8_t)(w & 0xffu);
++            w >>= 8;
++        }
++    }
++}
++
++static void
++ruby_ep0_drain_fifo(vm_offset_t mac, uint32_t len)
++{
++    uint32_t i = 0;
++
++    while (i + 4 <= len) {
++        (void)ruby_rd32(mac, FIFO0_OFF);
++        i += 4;
++    }
++    if (i < len)
++        (void)ruby_rd32(mac, FIFO0_OFF);
++}
++
+ /*
+  * Advance a pending IN data stage by one hardware action: load the next
+  * packet, or write DATAEND after the last one.
+@@ -785,6 +850,10 @@ static void ruby_ep0_vendor_probe_read(vm_offset_t mac, uint32_t t,
      uint32_t value, uint32_t index, uint32_t wlen);
  static void ruby_ep0_vendor_probe_write(vm_offset_t mac, uint32_t t,
      uint32_t value, uint32_t index, uint32_t wlen);
@@ -58,7 +106,7 @@ index ac46216..8368dc9 100644
  static void ruby_ep2_halt_clear(vm_offset_t mac);
  static void ruby_ep2_status_poll(vm_offset_t mac);
  static void ruby_ep2_rx_config(vm_offset_t mac);
-@@ -974,6 +1002,8 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+@@ -974,6 +1043,8 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
          ruby_ep0_vendor_probe_read(mac, t, value, index, len);
      else if (st[0] == 0x40 && st[1] == 0x2d)
          ruby_ep0_vendor_probe_write(mac, t, value, index, len);
@@ -67,7 +115,7 @@ index ac46216..8368dc9 100644
      else
          ruby_ep0_stall(mac, t, key, len);
  }
-@@ -1026,6 +1056,7 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+@@ -1026,6 +1097,7 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
          ruby_ep0_tx_sent = 0;
          ruby_ep0_tx_total = 0;
          ruby_probe_wr_pending = 0;
@@ -75,21 +123,20 @@ index ac46216..8368dc9 100644
          ruby_ep0_capture(mac, t);
          return;
      }
-@@ -1037,7 +1068,22 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+@@ -1037,7 +1109,21 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
          uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
          uint32_t csr;
  
 -        if (ruby_probe_wr_pending) {
 +        if (ruby_cmd_out_pending) {
 +            if (count == ruby_cmd_out_len && count <= RUBY_CMD_MAX) {
-+                for (uint32_t i = 0; i < count; i++)
-+                    ruby_cmd_line[i] = (char)ruby_rd8(mac, FIFO0_OFF);
++                ruby_ep0_read_fifo_bytes(mac,
++                    (uint8_t *)ruby_cmd_line, count);
 +                ruby_cmd_line[count] = '\0';
 +                ruby_cmd_out_pending = 0;
 +                ruby_cmd_submit(ruby_cmd_out_seq, ruby_cmd_line);
 +            } else {
-+                for (uint32_t i = 0; i < count; i++)
-+                    (void)ruby_rd8(mac, FIFO0_OFF);
++                ruby_ep0_drain_fifo(mac, count);
 +                ruby_cmd_out_pending = 0;
 +                ruby_cmd_errors++;
 +                printf("RUBY CMD[%u]: bad len=%u\n",
@@ -99,7 +146,23 @@ index ac46216..8368dc9 100644
              uint32_t pa = ruby_probe_wr_pa;
              uint32_t val = 0;
  
-@@ -1078,6 +1124,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+@@ -1055,13 +1141,11 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+                     printf("RUBY USB: probe w32 unmapped %08x\n", pa);
+                 }
+             } else {
+-                for (uint32_t i = 0; i < count; i++)
+-                    (void)ruby_rd8(mac, FIFO0_OFF);
++                ruby_ep0_drain_fifo(mac, count);
+                 printf("RUBY USB: probe w32 bad len=%u\n", count);
+             }
+         } else {
+-            for (uint32_t i = 0; i < count; i++)
+-                (void)ruby_rd8(mac, FIFO0_OFF);
++            ruby_ep0_drain_fifo(mac, count);
+         }
+         csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+         csr |= EP0_RXPKTRDY | EP0_DATAEND;
+@@ -1078,6 +1162,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
      (void)wr;
      for (;;) {
          ruby_ep0_service(ruby_mac_base, 0);
@@ -107,7 +170,7 @@ index ac46216..8368dc9 100644
          ruby_usb_attach_poll(ruby_mac_base, ruby_ippc_base);
          ruby_ep2_status_poll(ruby_mac_base);
          ruby_ep2_push_log(ruby_mac_base);
-@@ -1155,7 +1202,6 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+@@ -1155,7 +1240,6 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
  #define EP_RST_TX2_BIT      (1u << 18)  /* EP_RST(in, 2) = BIT(16) << 2 */
  #define RUBY_RX_GPD_NUM 16
  #define RUBY_RX_BUF     64
@@ -115,7 +178,7 @@ index ac46216..8368dc9 100644
  #define RUBY_GPD_NUM    64
  #define RUBY_GPD_DESC   16
  #define RUBY_GPD_STRIDE 64
-@@ -1241,10 +1287,6 @@ static uint32_t ruby_rx_bypasses;
+@@ -1241,10 +1325,6 @@ static uint32_t ruby_rx_bypasses;
  static uint32_t ruby_rx_ext_bad;
  static uint32_t ruby_rx_zlp_err;
  static uint32_t ruby_rx_stall_seen;
@@ -126,7 +189,7 @@ index ac46216..8368dc9 100644
  
  #define RUBY_FNV_OFFSET 2166136261u
  
-@@ -2494,6 +2536,42 @@ ruby_cmd_dispatch(vm_offset_t mac, char *line)
+@@ -2494,6 +2574,42 @@ ruby_cmd_dispatch(vm_offset_t mac, char *line)
      printf("RUBY CMD: err: %s\n", line);
  }
  
@@ -169,7 +232,7 @@ index ac46216..8368dc9 100644
  static void
  ruby_cmd_consume(vm_offset_t mac, const uint8_t *data, uint32_t len)
  {
-@@ -2657,6 +2735,12 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+@@ -2657,6 +2773,12 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
      ruby_ep0_tx_sent = 0;
      ruby_ep0_tx_total = 0;
      ruby_wr32(mac, EPISR_OFF, ruby_rd32(mac, EPISR_OFF));
@@ -182,7 +245,7 @@ index ac46216..8368dc9 100644
  
      dc = ruby_rd32(mac, DEVICE_CONF - MTU3_PA);
      dc &= ~0x7f000000u;         /* device address back to 0 */
-@@ -3008,6 +3092,13 @@ ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t, uint32_t wlen)
+@@ -3008,6 +3130,13 @@ ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t, uint32_t wlen)
  #define RUBY_LOG_SIZE   (4u << 20)      /* SWEET_LOG_SIZE, sweet_ufs.c */
  #define RUBY_LOG_SLICE  64u
  
@@ -196,7 +259,7 @@ index ac46216..8368dc9 100644
  static void
  ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
  {
-@@ -3015,7 +3106,7 @@ ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
+@@ -3015,7 +3144,7 @@ ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
      uint32_t v[8];
  
      v[0] = RUBY_LOG_MAGIC;
@@ -205,7 +268,7 @@ index ac46216..8368dc9 100644
      v[2] = RUBY_LOG_SIZE;
      v[3] = (uint32_t)total;
      v[4] = (uint32_t)(total >> 32);
-@@ -3028,8 +3119,11 @@ ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
+@@ -3028,8 +3157,11 @@ ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t, uint32_t wlen)
          (ruby_probe_enabled ? (1u << 1) : 0) |
          (ruby_ep_ready ? (1u << 2) : 0) |
          (ruby_rx_ready ? (1u << 3) : 0);
@@ -219,7 +282,7 @@ index ac46216..8368dc9 100644
      ruby_ep0_send(mac, t, 0xc02b, (const uint8_t *)v, sizeof(v), wlen);
  }
  
-@@ -3084,6 +3178,32 @@ ruby_ep0_vendor_probe_write(vm_offset_t mac, uint32_t t, uint32_t value,
+@@ -3084,6 +3216,32 @@ ruby_ep0_vendor_probe_write(vm_offset_t mac, uint32_t t, uint32_t value,
      }
  }
  
