@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/ruby_probe.c b/bsd/dev/ruby_probe.c
-index afdbef4..2c386ef 100644
+index afdbef4..a12d62c 100644
 --- a/bsd/dev/ruby_probe.c
 +++ b/bsd/dev/ruby_probe.c
 @@ -71,6 +71,12 @@
@@ -15,7 +15,7 @@ index afdbef4..2c386ef 100644
  #define PR_WDT_MODE      0x00u
  #define PR_WDT_LENGTH    0x04u
  #define PR_WDT_RST       0x08u
-@@ -1009,6 +1015,121 @@
+@@ -1009,6 +1015,186 @@
  	    pr_rd32(pr.kpd, 0x20), pr_rd32(pr.kpd, 0x24));
  }
  
@@ -45,7 +45,7 @@ index afdbef4..2c386ef 100644
 +	if (pr.kpd) {
 +		s->ksta = pr_rd16(pr.kpd, PR_KPD_STA);
 +		for (b = 0; b < 5; b++)
-+			s->kmem[b] = pr_rd16(pr.kpd, PR_KPD_MEM + b * 2);
++			s->kmem[b] = pr_rd16(pr.kpd, PR_KPD_MEM + b * 4);
 +	}
 +	if (!want_pwrap)
 +		return 0;
@@ -65,9 +65,15 @@ index afdbef4..2c386ef 100644
 +pr_key_watch(uint32_t ms)
 +{
 +	struct pr_key_sample prev, cur;
-+	uint32_t i, samples = 0, changes = 0, lines = 0;
++	uint32_t i, samples = 0, changes = 0, key_lines = 0, gpio_lines = 0;
++	uint32_t di_or[7], di_and[7];
++	uint16_t ksta_or, ksta_and;
++	uint16_t kmem_or[5], kmem_and[5];
++	uint16_t psc_or[3], psc_and[3];
++	uint16_t pwr_or, pwr_and;
 +	bool pwrap_ok;
-+	uint64_t start, end;
++	uint64_t start, end, elapsed_ns;
++	uint32_t b;
 +
 +	if (!pr.gpio) {
 +		printf("RUBY KEYWATCH: gpio not mapped\n");
@@ -82,50 +88,109 @@ index afdbef4..2c386ef 100644
 +		printf("RUBY KEYWATCH: first sample failed\n");
 +		return 1;
 +	}
-+	printf("RUBY KEYWATCH: start ms=%u pwrap=%d DI=%08x/%08x/%08x/%08x/%08x/%08x/%08x KPDsta=%04x PSC=%04x/%04x/%04x PWR=%04x\n",
++	for (b = 0; b < 7; b++)
++		di_or[b] = di_and[b] = prev.di[b];
++	ksta_or = ksta_and = prev.ksta;
++	for (b = 0; b < 5; b++)
++		kmem_or[b] = kmem_and[b] = prev.kmem[b];
++	psc_or[0] = psc_and[0] = prev.psc_con;
++	psc_or[1] = psc_and[1] = prev.psc_sta;
++	psc_or[2] = psc_and[2] = prev.psc_raw;
++	pwr_or = pwr_and = prev.pwrkey;
++	printf("RUBY KEYWATCH: start ms=%u pwrap=%d DI=%08x/%08x/%08x/%08x/%08x/%08x/%08x KPDsta=%04x KPDmem=%04x/%04x/%04x/%04x/%04x PSC=%04x/%04x/%04x PWR=%04x\n",
 +	    ms, pwrap_ok, prev.di[0], prev.di[1], prev.di[2], prev.di[3],
-+	    prev.di[4], prev.di[5], prev.di[6], prev.ksta, prev.psc_con,
-+	    prev.psc_sta, prev.psc_raw, prev.pwrkey);
++	    prev.di[4], prev.di[5], prev.di[6], prev.ksta, prev.kmem[0],
++	    prev.kmem[1], prev.kmem[2], prev.kmem[3], prev.kmem[4],
++	    prev.psc_con, prev.psc_sta, prev.psc_raw, prev.pwrkey);
 +	clock_get_uptime(&start);
 +	for (i = 0; i < ms / 10; i++) {
++		bool gpio_changed = false, key_changed = false;
++
 +		delay(10000);
 +		if (pr_key_sample(&cur, pwrap_ok) != 0) {
 +			printf("RUBY KEYWATCH: sample %u failed\n", i + 1);
 +			break;
 +		}
 +		samples = i + 1;
-+		if (memcmp(&cur, &prev, sizeof(cur)) != 0) {
-+			uint32_t b;
++		for (b = 0; b < 7; b++) {
++			di_or[b] |= cur.di[b];
++			di_and[b] &= cur.di[b];
++			if (cur.di[b] != prev.di[b])
++				gpio_changed = true;
++		}
++		ksta_or |= cur.ksta;
++		ksta_and &= cur.ksta;
++		for (b = 0; b < 5; b++) {
++			kmem_or[b] |= cur.kmem[b];
++			kmem_and[b] &= cur.kmem[b];
++		}
++		psc_or[0] |= cur.psc_con;
++		psc_and[0] &= cur.psc_con;
++		psc_or[1] |= cur.psc_sta;
++		psc_and[1] &= cur.psc_sta;
++		psc_or[2] |= cur.psc_raw;
++		psc_and[2] &= cur.psc_raw;
++		pwr_or |= cur.pwrkey;
++		pwr_and &= cur.pwrkey;
++		key_changed = cur.ksta != prev.ksta ||
++		    memcmp(cur.kmem, prev.kmem, sizeof(cur.kmem)) != 0 ||
++		    cur.psc_con != prev.psc_con ||
++		    cur.psc_sta != prev.psc_sta ||
++		    cur.psc_raw != prev.psc_raw ||
++		    cur.pwrkey != prev.pwrkey;
++		if (gpio_changed || key_changed) {
++			bool force_pwr = cur.pwrkey != prev.pwrkey;
 +
 +			changes++;
-+			if (lines < 40) {
++			if ((force_pwr || key_changed) &&
++			    (force_pwr || key_lines < 40)) {
 +				printf("RUBY KEYWATCH: t=%ums", (i + 1) * 10);
-+				for (b = 0; b < 7; b++)
-+					if (cur.di[b] != prev.di[b])
-+						printf(" DI%u=%08x", b, cur.di[b]);
++				if (gpio_changed) {
++					for (b = 0; b < 7; b++)
++						if (cur.di[b] != prev.di[b])
++							printf(" DI%u=%08x", b,
++							    cur.di[b]);
++				}
 +				if (cur.ksta != prev.ksta)
 +					printf(" KPDsta=%04x", cur.ksta);
 +				if (memcmp(cur.kmem, prev.kmem,
 +				    sizeof(cur.kmem)) != 0)
 +					printf(" KPDmem=%04x/%04x/%04x/%04x/%04x",
-+					    cur.kmem[0], cur.kmem[1], cur.kmem[2],
-+					    cur.kmem[3], cur.kmem[4]);
++					    cur.kmem[0], cur.kmem[1],
++					    cur.kmem[2], cur.kmem[3],
++					    cur.kmem[4]);
 +				if (cur.psc_con != prev.psc_con ||
 +				    cur.psc_sta != prev.psc_sta ||
 +				    cur.psc_raw != prev.psc_raw)
 +					printf(" PSC=%04x/%04x/%04x",
-+					    cur.psc_con, cur.psc_sta, cur.psc_raw);
++					    cur.psc_con, cur.psc_sta,
++					    cur.psc_raw);
 +				if (cur.pwrkey != prev.pwrkey)
 +					printf(" PWR=%04x", cur.pwrkey);
 +				printf("\n");
-+				lines++;
++				key_lines++;
++			} else if (gpio_changed && gpio_lines < 10) {
++				printf("RUBY KEYWATCH: t=%ums", (i + 1) * 10);
++				for (b = 0; b < 7; b++)
++					if (cur.di[b] != prev.di[b])
++						printf(" DI%u=%08x", b, cur.di[b]);
++				printf("\n");
++				gpio_lines++;
 +			}
 +			prev = cur;
 +		}
 +	}
 +	clock_get_uptime(&end);
++	absolutetime_to_nanoseconds(end - start, &elapsed_ns);
 +	printf("RUBY KEYWATCH: done ms=%u samples=%u changes=%u elapsed=%llums\n",
-+	    ms, samples, changes, (unsigned long long)((end - start) / 1000000ull));
++	    ms, samples, changes,
++	    (unsigned long long)(elapsed_ns / 1000000ull));
++	printf("RUBY KEYWATCH: seen DI1or=%08x and=%08x KPDsta or=%04x and=%04x PSCor=%04x/%04x/%04x PWRor=%04x and=%04x\n",
++	    di_or[1], di_and[1], ksta_or, ksta_and, psc_or[0], psc_or[1],
++	    psc_or[2], pwr_or, pwr_and);
++	printf("RUBY KEYWATCH: seen KPDmem or=%04x/%04x/%04x/%04x/%04x and=%04x/%04x/%04x/%04x/%04x\n",
++	    kmem_or[0], kmem_or[1], kmem_or[2], kmem_or[3], kmem_or[4],
++	    kmem_and[0], kmem_and[1], kmem_and[2], kmem_and[3], kmem_and[4]);
 +	printf("RUBY KEYWATCH: last DI=%08x/%08x/%08x/%08x/%08x/%08x/%08x KPDsta=%04x KPDmem=%04x/%04x/%04x/%04x/%04x PSC=%04x/%04x/%04x PWR=%04x\n",
 +	    prev.di[0], prev.di[1], prev.di[2], prev.di[3], prev.di[4],
 +	    prev.di[5], prev.di[6], prev.ksta, prev.kmem[0], prev.kmem[1],
@@ -137,7 +202,7 @@ index afdbef4..2c386ef 100644
  /* ---- snap -------------------------------------------------------------- */
  
  static void
-@@ -1254,6 +1375,7 @@
+@@ -1254,6 +1440,7 @@
  	printf("RUBY CMD: pwrap dump | init (rubypwrap)\n");
  	printf("RUBY CMD: i2c <5|6> take|line|scan|recover|release|r <addr> <reg> <len>|smb <addr> <reg>\n");
  	printf("RUBY CMD: gpio <pin> | clk <gate> [bit] sta | kpd | keyscan\n");
@@ -145,7 +210,7 @@ index afdbef4..2c386ef 100644
  	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|all]\n");
  }
  
-@@ -1528,6 +1650,21 @@
+@@ -1528,6 +1715,21 @@
  	}
  	if (!strncmp(p, "clk ", 4))
  		return pr_cmd_clk(line);
