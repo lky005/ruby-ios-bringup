@@ -2,13 +2,17 @@
 
 [English](GUARANTEE.md) · **中文**
 
-**状态 2026-10-22 —— 有单台设备证据的文档化配方。**
+**状态 2026-11-02 —— 有单台设备证据的文档化配方。**
 B+NOP 首启 -> A'、CI kernel 启动和 0085 真实触摸启动已在作者设备上观察到。
-这不是已经独立复现的第二台/干净室保证；更详细的测试保证暂缓。
+0155 线补上 P1 探针/pwrap、P2 按键/复位/电池和 P3 触摸接回，并在同一台设备上
+于 2026-11-02 观察到。这不是已经独立复现的第二台/干净室保证；更详细的测试
+保证暂缓。
 
-**范围说明（2026-10-29）：** 本文只覆盖历史 0085/0084 成功包；2026-10-29
-主线使用 `config/0140.env` 与 `config/0131b.env` 的 pin，见
-`docs/zh/11-ci-baseline.md`。
+**范围说明（2026-11-02）：** 当前线使用 `config/0155.env` 的 pin
+（patchset `da13b6df...`，151 文件；exec-data `2e98fd85...`）。2026-11-01
+探针线使用 `config/0144.env`（patchset `9f7b41cf...`，exec-data
+`62a17d48...`）；0085/0084 成功包为历史。更早的 USB 线使用
+`config/0140.env` 与 `config/0131b.env`，见 `docs/zh/11-ci-baseline.md`。
 
 ## 范围
 
@@ -20,7 +24,8 @@ stock LK -> XNU 8796 -> iOS 16.7.16 用户态
   或 -> 合成上滑（0084）-> SpringBoard 桌面
 ```
 
-失败路线是历史证据，不在保证范围内。
+0155 线在同一启动路径上增加 P1/P2/P3（探针/pwrap、按键、电池、触摸）；
+成功 bundle 见上表。失败路线是历史证据，不在保证范围内。
 
 ## 定义
 
@@ -29,12 +34,12 @@ stock LK -> XNU 8796 -> iOS 16.7.16 用户态
 - 同一设备情况（ruby / MT6877，Android 12 / MIUI 13.0.4，已解锁，slot
   `_a`，分区布局见 `docs/zh/device.md`）；
 - 同一 boot 镜像和 iOS root/ICL 状态（见下方 hash）；
-- 启动参数为 `config/0085-boot.cmdline`（合成上滑镜像用
-  `config/0084-boot.cmdline`）；
+- 当前线启动参数为 `config/0155-boot.cmdline`（历史真实触摸镜像用
+  `config/0085-boot.cmdline`；合成上滑镜像用 `config/0084-boot.cmdline`）；
 - 按 `docs/zh/09-reproduce.md` 和 `docs/zh/05-userland.md` 的步骤操作；
 
-则**预期**能复现成功状态。2026-10-22 在作者一台设备上做过验证；没有做
-第二台设备或干净室验证。
+则**预期**能复现成功状态。2026-10-22 和 2026-11-02（0155）在作者一台设备上
+做过验证；没有做第二台设备或干净室验证。
 
 任何一项 hash 不同，本保证不适用；那是一个不同的配置。
 
@@ -43,10 +48,11 @@ stock LK -> XNU 8796 -> iOS 16.7.16 用户态
 | 项 | 值 | 说明 |
 |---|---|---|
 | 基线 | `MakrSas/ios-topaz@5095ac1` | 上游 commit |
-| Patchset（当前线） | `9f7b41cf...` | 141 个文件；recipe 输出；workflow 只认这个哈希 |
-| 当前内核 | `9c82ea75...` | exec-data `62a17d48...`；CI `41229568807` |
-| 当前镜像 | `66352038...` | 外部文件，不在仓库里 |
-| 当前启动参数 | `config/0144-boot.cmdline` | 只读探针命令行（`sweetgt=0`、`rubyprobe=1`） |
+| Patchset（当前线） | `da13b6df...` | 151 个文件；recipe 输出；workflow 只认这个哈希 |
+| 当前内核 | `491f2373...` | exec-data `2e98fd85...`；CI `41354317810`；gate rerun `41355922057` |
+| 当前镜像 | `3b44c0e2...` | payload `a00dd751...`；外部文件，不在仓库里 |
+| 当前启动参数 | `config/0155-boot.cmdline` | `sweetgt=1`、`rubybatt=1`、`rubyprobe=1`、`rubkeys=1` |
+| 2026-11-01 探针线 | `9f7b41cf...` | 141 个文件；exec-data `62a17d48...`；镜像 `66352038...`；`config/0144.env` |
 | Patchset（0085） | `cf4008e3...` | 88 个文件；与 harness 构建一致 |
 | Patchset（0084） | `de1824c2...` | 87 个文件；上一里程碑 |
 | 0010/0012 改动 | `1edb6633...` | 小的基线补丁 |
@@ -60,6 +66,7 @@ stock LK -> XNU 8796 -> iOS 16.7.16 用户态
 | ICL 补丁块 | `4a489542...` | 绕过 |
 | 启动参数 | `config/0085-boot.cmdline` | 真实触摸 cmdline；0084 为上一里程碑 |
 | 成功判据 | 所有计时从 Apple logo 起：首次启动约 60 秒（实测 58 秒）；热重启约 22 秒；2026-10-22 B+NOP 首启 22 秒 / 30 秒；上滑到桌面；动画正常 | 作者 boot22/boot23 和 2026-10-22 run |
+| 0155 成功判据 | `x16-0155-a00dd751.img` 启动；GT9916R 触摸；音量/电源键；电池 4311 mV、`external=1/full=1`；8/8 I2C5；19/19 探针；无 panic | 2026-11-02 device run |
 
 root 状态（全部为外部工件；完整镜像不在仓库）：
 
@@ -76,6 +83,11 @@ A' 是首启快照，不是稳定 pin；启动后的 hash 是易变的。
 完整 hash：
 
 ```text
+patch0155  da13b6df7cb9498f4d7b96a69e88be2af9632157829d26514af7ea5f1de8bea0
+kernel0155 491f2373415d85aa5a2f9fa63fab2fbf7c9fac34a37bae42b4a7bfb0dbea5a10
+exec0155   2e98fd85dc155b4ff73e40452da0b3a6cb3fe8e82300abd3684c4982b7874ed9
+image0155  3b44c0e2e73bade6638a12b1b748dd392a2f1baf2618bceaf9aac0722d49b144
+payload0155 a00dd751be8caf0ee950e2c3bf6926335b276294146ec91949fc834db1649ca2
 patch85    cf4008e309cfa566e3df968592a2d3f3224a9b3d0813d6054326115fecc0a03f
 kernel85   9eb9acac8a4c936c1861fba1e0d29c105b714e8d0e6d407b48f4237076e6b947
 execdata85 e4823afb97360e24708184d09c0dc6c9f7280e33d5c4aefbeb901b3fa9b11e3e
@@ -107,14 +119,14 @@ root 和 boot 镜像**不在仓库**：它们含不可分发的 Apple/Android �
 
 ## hash 稳定性
 
-固定 / 启动前（身份）：当前 patchset `9f7b41cf...`（141 个文件）及其 exec-data
-`62a17d48...`、0085 patchset `cf4008e3...`、0084 patchset
+固定 / 启动前（身份）：当前 patchset `da13b6df...`（151 个文件）及其
+exec-data `2e98fd85...`、2026-11-01 探针线 `9f7b41cf...`（141 个文件，
+exec `62a17d48...`）、0085 patchset `cf4008e3...`、0084 patchset
 `de1824c2...`、启动参数、ICL 块、命名的 root 快照（A/B/C/A'），以及某次
 run 的 kernel/payload/image 工件。CI 构建不是位级一致；patchset hash 是
-源码门禁，Mach-O exec-data hash 是工件门禁（当前参考 `62a17d48...`，0085 参考
-`e4823afb...`）；
-记录该 run 的实际完整 artifact hash。A' 是一次首启快照；新的首启会是一个
-新状态。
+源码门禁，Mach-O exec-data hash 是工件门禁（当前参考 `2e98fd85...`；
+2026-11-01 为 `62a17d48...`；0085 为 `e4823afb...`）；记录该 run 的实际
+完整 artifact hash。A' 是一次首启快照；新的首启会是一个新状态。
 
 易变 / 启动后（不要求相同）：任何启动后的 live root（A' -> A''）、
 UUID/时间戳、日志/缓存、SWEETLOG ring 及其解码文本、UI 像素/时序。契约是
@@ -123,9 +135,10 @@ hash。
 
 ## 保证
 
-- Patchset 和 recipe：workflow 只有在 recipe 还原出 `9f7b41cf...`（141 个
-  文件）时才编译；当前 CI run `41229568807` 已成功，exec-data 与记录的
-  基线 `62a17d48...` 一致。
+- Patchset 和 recipe：workflow 只有在 recipe 还原出 `da13b6df...`（151 个
+  文件）时才编译；CI `41354317810` 已成功，exec-data 与记录的基线
+  `2e98fd85...` 一致；gate rerun `41355922057` 成功。2026-11-01 探针线保持
+  `9f7b41cf...`/`62a17d48...`。
 - 早期里程碑保留各自的身份：0085 patchset `cf4008e3...`（88 个文件）与 run
   `39694456200`，其 exec-data 与实机内核一致。
 - 离线工具：host 检查、合成与真实 ICL 块往返。

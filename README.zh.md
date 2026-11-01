@@ -5,6 +5,19 @@
 **在 MediaTek MT6877 手机上运行 XNU 8796 + iPhone X iOS 16.7.16 用户态。**
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
+> **状态 2026-11-02：** 当前线是 0155：P1 板级控制（0146a/0147 EP0
+> 命令通道、0148 pwrap PMIF v3）、P2 输入/电源（0150 音量/电源键、
+> 0152/0152b 复位触发、0154 MT6360 电池只读）和 P3 触摸接回（0155；
+> 0085 GT9916R 驱动与电池/probe 共用 I2C5 IOLock）。内核 CI 名
+> `xnu-0155`；patchset `da13b6df...`（151 文件）、kernel full
+> `491f2373...`、exec-data `2e98fd85...`、镜像 `3b44c0e2...`
+> （`x16-0155-a00dd751.img`，payload `a00dd751...`），`boot_a` 0155；
+> CI `41354317810`、gate rerun `41355922057`、host-checks 全绿。
+> 设备：GT9916R 真实 HID 触摸；音量/电源键；电池 4311 mV、
+> `external=1/full=1`；8/8 I2C5 仲裁；19/19 探针；无 panic。
+> 已知限制：电池 UI 30 s 轮询（P2.4：滞后、拔电 100→98）、Type-C
+> 只读、软件 fastboot/组合键 parked、USB 整根拔插仍需重启、P3 目标待选。
+>
 > **状态 2026-11-01：** 构建迁移到托管的 `macos-15` 镜像 + Xcode 16.0；
 > 内核源码未变，接口编译步骤仍正常生成。这条线新增一个只读板级探针
 > （pwrap、受限的 I2C 扫描、GPIO/时钟/KPD/WDT 状态、分段快照）走 USB
@@ -62,11 +75,12 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | CPU | 6× Cortex-A55，16K 页，GICv3，定时器 |
 | 显示 | IOSurface/IOMFB → LK framebuffer，1080×2400 |
 | 用户态 | launchd → lsd → backboardd → SpringBoard |
-| 输入 | **真实 Goodix GT9916R**，bit-bang SPI3；解锁、双指 contact 上报、edge；0084 合成上滑仍保留 |
+| 输入 | **真实 Goodix GT9916R**，bit-bang SPI3；解锁、双指 contact 上报、edge；音量/电源键经 HID；0084 合成上滑仍保留 |
+| 电源 | MT6360 电池/充电只读：4311 mV、`external=1/full=1`；Type-C read-only；无充电控制/OTG |
 | 存储 | UFS LUN 2，`iosroot` 上读写 HFS+；4 MB HFS 救援根走 LK ramdisk 槽 |
-| 最新 runs（分开记录） | 2026-10-30 USB 0143（512 MPS/511 B；稳定性 13/7/23 帧，一次掉链）；2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动（harness 与 main-CI 重建）；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
-| 未闭环 | 第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
-| 未通 | 按键、Wi-Fi、GPU、RTC；USB 仍是探针/日志通道 |
+| 最新 runs（分开记录） | 2026-11-02 0155（P1/P2/P3：探针、按键、电池、触摸；19/19、8/8 I2C5、0 panic）；2026-10-30 USB 0143（512 MPS/511 B；稳定性 13/7/23 帧，一次掉链）；2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动（harness 与 main-CI 重建）；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
+| 未闭环 | P2.4 电池 UI 滞后（30 s 轮询；拔电 100→98）；P3 目标（USB host/音频/传感器）；第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
+| 未通 | Wi-Fi、Bluetooth、蜂窝、音频、相机、GPU、RTC；USB host/OTG；sleep/wake；充电控制；Type-C role |
 | 安全 | AMFI/sandbox/签名关闭；可能丢数据 |
 
 ## 这个里程碑的意义
@@ -84,10 +98,10 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | `ACKNOWLEDGEMENTS.zh.md`、`LEGAL.zh.md` | 致谢与法律风险声明 |
 | `docs/en/`、`docs/zh/` | 英文与中文章节 |
 | `touch/` | probe 阶梯、硬件契约与脱敏实验记录 |
-| `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0143 USB、0140/0141 ramdisk；历史 0081-0084 |
+| `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0155 USB/探针/按键/电池/触摸、0140/0141 ramdisk；历史 0081-0084 |
 | `ci/` | 基线清单/recipe、固定 patchset 哈希、内核分段哈希与来源 |
-| `config/` | 0143 USB pin（0140/0131b/0142 为历史）；0085 真实触摸和 0084 为历史 |
-| `.github/workflows/xnu.yml` | 复现当前内核并校验 patchset/exec-data 哈希 |
+| `config/` | 0155 当前线（0143/0144 为历史）；0085 真实触摸和 0084 为历史 |
+| `.github/workflows/xnu.yml` | 复现当前内核并校验 patchset/exec-data 哈希；workflow 名 `xnu-0155` |
 | `src/bringup/` | 早期启动 payload、shim、镜像打包 |
 | `src/ufs-probe/` | MT6877 UFS 只读探针 |
 | `tools/image/` | ICL 补丁、dyld 扫描、boot 校验 |

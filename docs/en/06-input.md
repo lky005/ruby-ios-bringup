@@ -1,4 +1,4 @@
-# 06 — Input: Goodix touch and autoswipe
+# 06 — Input: Goodix touch, keys and autoswipe
 
 **English** · [中文](../zh/06-input.md)
 
@@ -48,6 +48,22 @@ SweetHIDTouch::touch()
 
 The real driver and the synthetic timer share this entry. `touch()` expects
 panel pixels (0..1079 × 0..2399); `raw/10` is the correct mapping.
+
+## Keys (0150)
+
+The 0150 driver polls the MTK KPD and the MT6359 `TOPSTATUS` register:
+
+- volume down: KPD `KP_MEM1` bit0 (0 = down);
+- power: `TOPSTATUS 0x2a` bit1; volume up: bit3 (active-low, debounced);
+- 20 ms poll with a two-sample confirm; `sweet_hid_key(0/1/2)` -> HID
+  `0xe9`/`0xea`/`0x30`;
+- zero PMIC writes; `0x910` stays `0x0025`. The 0155 device run exercised the
+  keys in the 19-step probe;
+- volume-down+power is parked; long-power and volume-up+power work.
+
+In 0155 the touch LDO section takes the shared I2C5 IOLock used by the
+battery and probe; `sweetgt=1` re-enables the 0085 driver. The P2 test images
+used `sweetgt=0`.
 
 ## Edge tip
 

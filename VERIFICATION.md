@@ -38,6 +38,19 @@ must not appear in the public tree:
 | Config-mode layout | pass without golden; 11 pinned checks |
 | Linux host CI | pass before the final docs/template-only amendment; see Actions |
 
+## CI-verified (2026-11-02)
+
+| Check | Result |
+|---|---|
+| Baseline manifest | 82 files, root `829d7598...`, manifest matches |
+| Patchset (0155) | `da13b6df...` (151 files) |
+| Kernel (0155) | full `491f2373...`, exec-data `2e98fd85...`; CI `41354317810`; gate rerun `41355922057` |
+| Image (0155) | `3b44c0e2...`; payload `a00dd751...`; cmdline `config/0155-boot.cmdline` (`sweetgt=1`, `rubybatt=1`, `rubyprobe=1`, `rubkeys=1`) |
+| Toolchain | `macos-15` arm64, Xcode 16.0, SDK 15.0, clang 16.0.0; workflow `xnu-0155` |
+| Device | 0155 boots; GT9916R touch; volume/power keys; battery 4311 mV, `external=1/full=1`; 8/8 I2C5 arbiter; 19/19 probe; no panic |
+| Known limits | P2.4 battery UI 30 s lag / 100→98; Type-C read-only; software fastboot/combo parked; USB replug needs reboot; USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep not implemented; P3 target open |
+| Host checks | `scripts/verify-local.py --ci-config config/0155.env` passes, including the toolchain-pin, document-parity, commit-message and denied-identifier scans |
+
 ## CI-verified (2026-11-01)
 
 | Check | Result |
@@ -182,9 +195,17 @@ paths or device identifiers.
   kernel `9eb9acac...` then booted with real Goodix touch; a real bottom-edge
   swipe unlocked the screen; 206 down/206 up records, two-contact HID dispatch
   and edge (user-visible pinch not separately instrumented).
+- **G4 — 2026-11-02:** 0155 (P1/P2/P3) was built at patchset
+  `da13b6df...`, exec-data `2e98fd85...` (CI `41354317810`; gate rerun
+  `41355922057`) and booted on the author's unit: GT9916R touch, volume/power
+  keys, battery 4311 mV `external=1/full=1`, 8/8 I2C5 arbiter, 19/19 probe,
+  no panic. Known limits: P2.4 battery UI latency, Type-C read-only,
+  software fastboot/combo parked, USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep
+  not implemented, P3 target open.
 - **Deferred:** second-unit boot, Linux clean-room CI, strict pinned payload
   rebuild (the test used ref `33852e3`), root/shim/ADT builders as clean-room
-  tools, original ICL block regression, keys/USB, long-run stability.
+  tools, original ICL block regression, USB host/OTG, Wi-Fi/BT/audio/camera/
+  GPU/RTC/sleep, long-run stability.
 - Device-baseline hashes are intentionally not published.
 
 The scope, hashes and non-guarantees are in [`GUARANTEE.md`](GUARANTEE.md).

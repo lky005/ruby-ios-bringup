@@ -7,6 +7,13 @@
 > This page describes how to operate the channel; it is not a fix for the
 > open host-side XACT.
 
+## What is verified (2026-11-02) [measured]
+
+- Kernel 0155 (patchset `da13b6df...`, 151 files; CI `41354317810`;
+  exec-data `2e98fd85...`) runs USB 2.0 device mode and the EP0 command
+  channel/probe. Keys, battery and touch are outside this chapter; the
+  0143 EP2 log/HS/XACT evidence below is the host-side history.
+
 ## What is verified (2026-10-30) [measured]
 
 - Kernel 0144+0145 (patchset `9f7b41cf...`, 141 files; CI `41229568807`;
@@ -234,6 +241,9 @@ read with `0x2C` until a kernel mapping is added.
 
 ## Evidence and limits
 
+- 2026-11-02 build: CI `41354317810`; patchset `da13b6df...` (151 files);
+  kernel full `491f2373...`, exec-data `2e98fd85...`; image `3b44c0e2...`
+  (`config/0155.env`); EP0 command channel/probe.
 - Build: CI `41229568807`; patchset `9f7b41cf...` (141 files); kernel full
   `d2eae74d...`, exec-data `6fa65088...`; image `5b6b8411...`
   (`config/0143.env`).

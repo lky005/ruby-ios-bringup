@@ -48,7 +48,7 @@ main（2026-10-29 集成，由 `merge-ramdisk-usb-2026-10-29` 压缩）构建 ra
 | 固定 topaz 删除清单 | 公开回退路径的补丁残留 |
 | recipe 失败即停 | 文件缺失或 0010/0012 上下文变化 |
 | LF 归一化 | Windows/macOS 换行漂移 |
-| `PATCHSET_SHA256`（按分支） | patchset 内容变化；当前 `9f7b41cf…`（141 文件），USB `f47f4c19…`（139） |
+| `PATCHSET_SHA256`（按分支） | patchset 内容变化；当前 `da13b6df…`（151 文件），2026-11-01 `9f7b41cf…`（141），USB `f47f4c19…`（139） |
 | `ci/baseline-changes.patch` SHA | 基线改动漂移 |
 | `check-bundle.py` | kernel/boot/root/ICL/cmdline 不对 |
 | Actions 按 SHA 固定 | CI 供应链漂移 |

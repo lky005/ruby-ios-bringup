@@ -5,6 +5,22 @@
 **XNU 8796 + iPhone X iOS 16.7.16 userland on a MediaTek MT6877 phone.**
 A research bring-up, packaged as an independent, sanitized delta.
 
+> **Status 2026-11-02:** the current line is 0155: P1 board control
+> (0146a/0147 EP0 command channel, 0148 pwrap PMIF v3), P2 input/power
+> (0150 volume/power keys, 0152/0152b reboot triggers, 0154 MT6360
+> battery read-back) and P3 touch re-enable (0155; the 0085 GT9916R
+> driver now shares the I2C5 IOLock with the battery and probe). The
+> kernel CI is `xnu-0155`; patchset `da13b6df...` (151 files), kernel
+> full `491f2373...`, exec-data `2e98fd85...`, image `3b44c0e2...`
+> (`x16-0155-a00dd751.img`, payload `a00dd751...`), `boot_a` 0155;
+> CI `41354317810`, gate rerun `41355922057` and host-checks green.
+> Device: GT9916R touch with real HID events; volume/power keys;
+> battery 4311 mV, `external=1/full=1`; 8/8 I2C5 arbiter steps; 19/19
+> probe steps; no panic. Known limits: the battery UI polls every 30 s
+> (P2.4: 30 s lag and 100→98 on unplug), Type-C is read-only, software
+> fastboot/combo keys are parked, a full USB replug still needs a
+> reboot, and the P3 target is open.
+>
 > **Status 2026-11-01:** the build moved to a hosted `macos-15` image with
 > Xcode 16.0; the kernel source is unchanged and the interface-compiler step
 > still generates cleanly. The line adds a read-only board probe (pwrap,
@@ -75,11 +91,12 @@ before building.
 | CPU | 6× Cortex-A55, 16K pages, GICv3, timers |
 | Display | IOSurface/IOMFB → LK framebuffer, 1080×2400 |
 | Userland | launchd → lsd → backboardd → SpringBoard |
-| Input | **real Goodix GT9916R** over bit-bang SPI3; unlock, two-contact HID dispatch, edge; 0084 synthetic swipe still available |
+| Input | **real Goodix GT9916R** over bit-bang SPI3; unlock, two-contact HID dispatch, edge; volume/power keys via HID; 0084 synthetic swipe still available |
+| Power | MT6360 battery/charger read-only: 4311 mV, `external=1/full=1`; Type-C read-only; no charger control/OTG |
 | Storage | UFS LUN 2, read/write HFS+ on `iosroot`; 4 MB HFS rescue root via the LK ramdisk slot |
-| Latest runs (separate) | 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
-| Open | second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
-| Not yet | keys, Wi-Fi, GPU, RTC; USB remains a probe/log channel |
+| Latest runs (separate) | 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
+| Open | P2.4 battery UI latency (30 s poll; 100→98 on unplug); P3 target (USB host, audio, sensors); second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
+| Not yet | Wi-Fi, Bluetooth, cellular, audio, camera, GPU, RTC; USB host/OTG; sleep/wake; charger control; Type-C role |
 | Safety | AMFI/sandbox/code signing off; data may be lost |
 
 ## Why this milestone matters
@@ -98,10 +115,10 @@ evidence and the wrong turns.
 | `ACKNOWLEDGEMENTS.md`, `LEGAL.md` | credits and legal risk notice |
 | `docs/en/`, `docs/zh/` | English and Chinese chapters |
 | `touch/` | probe ladder, hardware contract and sanitized lab notes |
-| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0143 USB, 0140/0141 ramdisk; historical 0081-0084 |
+| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0155 USB/probe/keys/battery/touch, 0140/0141 ramdisk; historical 0081-0084 |
 | `ci/` | baseline manifest/recipe, canonical patchset hash, kernel segment hash and provenance |
-| `config/` | 0143 USB pin (0140/0131b/0142 history); 0085 real-touch and 0084 as history |
-| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash |
+| `config/` | 0155 current line (0143/0144 history); 0085 real-touch and 0084 as history |
+| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash; workflow name `xnu-0155` |
 | `src/bringup/` | early boot payloads, shim, image packers |
 | `src/ufs-probe/` | read-only MT6877 UFS probe |
 | `tools/image/` | ICL patch, dyld scanner, boot verifier |

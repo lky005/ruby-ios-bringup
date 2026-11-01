@@ -42,15 +42,28 @@ order.
 | `0112b-ruby-ep2-rx-diag.patch` | WIP | `bsd/dev/ruby_usb.c` | RX diagnostics only: a raw current/prev/next GPD request (`0xC0/0x24`), an RX reset for clean per-length tests (`0xC0/0x26`), CLEAR_FEATURE for EP2 OUT, RX2CSR0 stall and ZLP-error visibility; no buffer, GPD-layout, queue or TX change |
 | `0144-ruby-probe-repl.patch` | verified (P0) | `bsd/dev/ruby_probe.c`, `bsd/dev/ruby_probe.h`, `bsd/dev/ruby_usb.c`, `bsd/conf/files` | read-only board probe/REPL: pwrap, bounded bit-bang I2C (pin takeover/line/scan/recover), GPIO/keyscan, clock status, KPD, WDT read/pet, segmented snap; writes only the I2C pin fields and WDT emergency registers |
 | `0145-ruby-usb-enum-window.patch` | verified | `bsd/dev/ruby_usb.c` | enumeration window: the attach budget gave the host 4 s per attempt and only three attempts, after which the device stopped attaching and the host never saw it again; the window is 12 s with six attempts, so the host now configures the device on the first try |
+| `0146a-obs-ruby-ep2-log-off.patch` | current | `bsd/dev/ruby_usb.c` | turn the EP2 log QMU off and rate-limit stuck diagnostics |
+| `0146a-qmu-ruby-usb-rearm-rx.patch` | current | `bsd/dev/ruby_usb.c` | stop-wait TX/RX rearm and RX recovery |
+| `0147-ruby-ep0-cmd.patch` | current | `bsd/dev/ruby_usb.c` | EP0 `0x2E` command channel and `0x2B` caps; 32-bit FIFO reads |
+| `0148-ruby-pwrap-init.patch` | current | `bsd/dev/ruby_probe.c` | pwrap PMIF v3 `INIT_DONE` gate; no-op when already set |
+| `0149-ruby-keywatch.patch` | current | `bsd/dev/ruby_probe.c` | read-only key watcher (KPD/PSC/TOPSTATUS) |
+| `0150-ruby-keys.patch` | current | `bsd/dev/ruby_keys.c`, `bsd/conf/files`, `bsd/dev/sweet_ufs.c` | volume-down KPD + power/volume-up `TOPSTATUS 0x2a`; zero PMIC writes |
+| `0152-ruby-reboot.patch` | current (parked) | `bsd/dev/ruby_probe.c` | TOPRGU/NONRST2 + WDT SWRST reset trigger |
+| `0152b-ruby-reboot-psci.patch` | current (parked) | `bsd/dev/ruby_probe.c` | PSCI `SYSTEM_RESET` reset trigger |
+| `0154-ruby-battery.patch` | current | `bsd/dev/ruby_battery.c`, `ruby_battery.h`, `iokit/Kernel/arm/SweetBattery.cpp`, `bsd/dev/ruby_probe.c` | MT6360 read-only battery/charger backend, I2C5 IOLock, last-valid fallback |
+| `0155-ruby-i2c5-share.patch` | current | `bsd/dev/ruby_battery.c/h`, `bsd/dev/sweet_goodix_spi.c` | shared I2C5 arbiter; Goodix LDO section holds the lock; touch re-enabled |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
 topaz `sweet_usb.c` DWC3 driver. `0144` adds the read-only board probe behind
 the same USB command channel; `sweetgt=0` lets it own I2C5 for the run. `0145`
-only widens the attach window; it changes no command, write or clock path. `0084` is the previous synthetic-swipe
-milestone and is not required when real touch is enabled. `0081`-`0083` are
-kept as evidence of the path; `0082`/`0083` were superseded by the ICL NOP
-bypass. Applying a historical patch is not required for a new build.
+only widens the attach window; it changes no command, write or clock path.
+`0146a`-`0155` form the 2026-11-02 line: EP0 command channel, pwrap init,
+keys, reboot triggers, MT6360 battery and the shared I2C5 lock that
+re-enables touch. `0084` is the previous synthetic-swipe milestone and is not
+required when real touch is enabled. `0081`-`0083` are kept as evidence of the
+path; `0082`/`0083` were superseded by the ICL NOP bypass. Applying a
+historical patch is not required for a new build.
 
 Check before applying:
 
