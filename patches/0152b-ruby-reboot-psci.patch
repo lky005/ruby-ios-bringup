@@ -1,0 +1,40 @@
+diff --git a/bsd/dev/ruby_probe.c b/bsd/dev/ruby_probe.c
+index 8e3c540..2b85a6f 100644
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -967,10 +967,22 @@ pr_wdt_off(void)
+ 
+ /*
+  * The bootloader reads TOPRGU+0x24 (NONRST2, low four bits) after a reset;
+- * 3 is BOOT_BOOTLOADER.  Use the LK SWRST sequence: restart key, then
+- * KEY|EXTEN|AUTO_RESTART, then the SWRST key.  Without the MODE write the
+- * SWRST only raises an interrupt and the CPU hangs.
++ * 3 is BOOT_BOOTLOADER.  Prefer PSCI SYSTEM_RESET through SMC (the vendor
++ * DTS method): a warm reset keeps the RGU scratch.  The LK WDT SWRST
++ * sequence stays as a fallback; without its MODE write SWRST only raises
++ * an interrupt and the CPU hangs.
+  */
++static void
++pr_psci_system_reset(void)
++{
++	register uint64_t x0 __asm__("x0") = 0x84000009ull;
++
++	__asm__ volatile("dsb sy" ::: "memory");
++	__asm__ volatile("smc #0" : "+r"(x0) : :
++	    "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
++	    "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++}
++
+ static int
+ pr_reboot_bootloader(void)
+ {
+@@ -989,6 +1001,9 @@ pr_reboot_bootloader(void)
+ 	pr_wr32(pr.wdt, PR_WDT_NONRST2, new);
+ 	printf("RUBY WDT: boot mode old=%08x new=%08x read=%08x\n",
+ 	    old, new, pr_rd32(pr.wdt, PR_WDT_NONRST2));
++	printf("RUBY WDT: psci system reset\n");
++	pr_psci_system_reset();
++	printf("RUBY WDT: psci returned; swrst fallback\n");
+ 	pr_wr32(pr.wdt, PR_WDT_RST, PR_WDT_RST_ALT);
+ 	mode = PR_WDT_MODE_KEY | PR_WDT_MODE_EXTEN | PR_WDT_MODE_AUTO;
+ 	pr_wr32(pr.wdt, PR_WDT_MODE, mode);
