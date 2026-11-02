@@ -2,58 +2,27 @@
 
 [English](README.md) · **中文**
 
+[![xnu-0155](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
+[![tag v0.4.0](https://img.shields.io/badge/tag-v0.4.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.4.0)
+
 **在 MediaTek MT6877 手机上运行 XNU 8796 + iPhone X iOS 16.7.16 用户态。**
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
-> **状态 2026-11-02：** 当前线是 0155：P1 板级控制（0146a/0147 EP0
-> 命令通道、0148 pwrap PMIF v3）、P2 输入/电源（0150 音量/电源键、
-> 0152/0152b 复位触发、0154 MT6360 电池只读）和 P3 触摸接回（0155；
-> 0085 GT9916R 驱动与电池/probe 共用 I2C5 IOLock）。内核 CI 名
-> `xnu-0155`；patchset `da13b6df...`（151 文件）、kernel full
-> `491f2373...`、exec-data `2e98fd85...`、镜像 `3b44c0e2...`
-> （`x16-0155-a00dd751.img`，payload `a00dd751...`），`boot_a` 0155；
-> CI `41354317810`、gate rerun `41355922057`、host-checks 全绿。
-> 设备：GT9916R 真实 HID 触摸；音量/电源键；电池 4311 mV、
-> `external=1/full=1`；8/8 I2C5 仲裁；19/19 探针；无 panic。
-> 已知限制：电池 UI 30 s 轮询（P2.4：滞后、拔电 100→98）、Type-C
-> 只读、软件 fastboot/组合键 parked、USB 整根拔插仍需重启、P3 目标待选。
->
-> **状态 2026-11-01：** 构建迁移到托管的 `macos-15` 镜像 + Xcode 16.0；
-> 内核源码未变，接口编译步骤仍正常生成。这条线新增一个只读板级探针
-> （pwrap、受限的 I2C 扫描、GPIO/时钟/KPD/WDT 状态、分段快照）走 USB
-> 控制台，并修掉枚举窗口：主机现在第一次尝试就能完成配置。
-> CI `41229568807` 与 patchset `9f7b41cf...`（141 文件）、exec-data
-> `62a17d48...` 一致。探针在一次真机运行里拿到板级数据（看门狗未使能、
-> I2C5 四个 ACK、MT6360 可经 I2C5 读取），10 分钟只读空转检查无 panic；
-> 两条 pwrap 读数要等 pwrap 初始化落地才会有。
->
-> **状态 2026-10-30：** USB 线更新到 0143：EP2 IN bulk MPS 512、511 B
-> 日志帧（16 B 头 + 最多 495 B 文本）、64 GPD TX 环（最多 63 个在飞）、
-> rearm 时重置 TX 环。CI `41022192026` 与 patchset `f47f4c19...`
-> （139 文件）、exec-data `6fa65088...` 一致。枚举/配置/HS 全绿；
-> host 侧首会话 XACT **仍未闭环**（0–54 帧可变；EP0 也可能 XACT，
-> 设备可能掉链）。参考上位机工具与实测条件（AMD USB4 CC 与 A-C 线、
-> WinUSB 绑定、安全调试）见 `docs/zh/12-usb-host.md`。
->
-> **状态 2026-10-29：** 内核 CI 改为从内容固定的 82 文件基线（清单根
-> `829d7598...`）拼装，基线由私有内容寻址镜像提供，0001-0079 不再是活的
-> 上游依赖。ramdisk 线增加 LK ramdisk 救援根（`md0`，PID 1 进程内运行，
-> 8/8 救援 `/etc/rc` 自检，USB `1209:0002` 枚举约 35 秒）；ramdisk 与 USB 两条线合并在
-> `main` 上（由 `merge-ramdisk-usb-2026-10-29` 压缩合并）。
-> `usb-0131b-probe-write` 保留厂商
-> USB 探针；EP2 主机侧 XACT 仍未闭环。真实触摸（0085）仍是最后一个 UI
-> 里程碑；本次 CI 改动没有刷入新的设备镜像。
->
-> **状态 2026-10-22：真实触摸已通。** 0085 内核通过 GPIO bit-bang SPI3
-> 驱动 Goodix GT9916R，能用真实底边上滑解锁，并把两个同时按下的 contact
-> 和 edge 事件分发到 HID 层（内核 IOLog 证据；用户态 pinch 未单独加日志
-> 验证）。0084 镜像和 CI 内核也都能到达锁屏并合成上滑进桌面。**计时从出现 Apple
-> logo 开始：** B+NOP 首启观察到 22 秒到锁屏、30 秒 autoswipe；历史首启
-> 约 58 秒，热重启约 22 秒。按键、USB、Wi-Fi、GPU、RTC 仍未通。
->
-> **设备回归：** B+NOP 首启 -> A' 和 CI kernel 启动已在 2026-10-22 于作者设备
-> 上跑过。第二台/干净室，以及从 IPSW 造 root/shim/ADT 的 builder 仍未完成。
-> 见 [`GUARANTEE.zh.md`](GUARANTEE.zh.md)。
+> [!IMPORTANT]
+> **状态 2026-11-02 — 0155 线。** `main e81510f`、`v0.4.0`；patchset
+> `da13b6df…`（151 文件）、exec-data `2e98fd85…`、镜像 `3b44c0e2…`；
+> `boot_a` 0155。已通：UFS root、显示、真实 GT9916R 触摸、音量/电源键、
+> 电池只读（4311 mV，external=1/full=1）、USB 探针。
+> 限制：P2.4 电池 UI 30 s 滞后（100→98）、Type-C 只读、无 USB host/
+> audio/Wi-Fi/BT/camera/GPU/RTC/sleep；软件 fastboot/组合键 parked。
+> 见 [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [docs](docs/README.md)。
+
+## 从这里开始
+
+| 5 分钟 | 30 分钟 | 深入 |
+|---|---|---|
+| [README](README.zh.md) + [STATUS](STATUS.md) | [08-recovery](docs/zh/08-recovery.md)、[09-reproduce](docs/zh/09-reproduce.md)、[10-scripts](docs/zh/10-scripts.md) | [01–07](docs/zh/README.md)、[11](docs/zh/11-ci-baseline.md)、[12](docs/zh/12-usb-host.md) |
 
 ## 演示
 
@@ -145,7 +114,7 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: 9f7b41cf...（main，141 文件；历史 f47f4c19... 139、27894e7b... 137、29449e32... 135）
+patchset: da13b6df...（main，151 文件；历史 9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -155,8 +124,21 @@ patchset 哈希不匹配就停止。boot 镜像本身**不在**仓库里；`tool
 提供离线校验和补丁工具。详见 `docs/zh/11-ci-baseline.md`。
 
 Host 管线（不碰设备、不碰 root）：`scripts/test-pipeline.sh`，输入 base
-boot、kernel、ADT、shim 和 0084 golden；生成 payload、确定性 boot 镜像并
-校验布局；见 `docs/zh/09-reproduce.md`。
+boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0155 用
+`config/0155.env`）；生成 payload、确定性 boot 镜像并校验布局；见
+`docs/zh/09-reproduce.md`。
+
+## 当前线与验证
+
+| Pin | 值 |
+|---|---|
+| Patchset | `da13b6df…`（151 文件） |
+| 内核 | full `491f2373…`，exec-data `2e98fd85…` |
+| 镜像 | `3b44c0e2…`（`x16-0155-a00dd751.img`，payload `a00dd751…`） |
+| CI | `xnu-0155` `41362698995`；host-checks `41362698921` |
+| Tags | `v0.4.0` → `e81510f`；`p3-touch-0155-final` → `44824e2` |
+| `boot_a` | 0155 |
+| 证据 | [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [GUARANTEE.zh.md](GUARANTEE.zh.md) |
 
 ## 设备情况
 
@@ -165,10 +147,10 @@ boot、kernel、ADT、shim 和 0084 golden；生成 payload、确定性 boot 镜
 | 设备 | Redmi Note 12 Pro 5G，`ruby` / MT6877，8 GB + 256 GB |
 | 系统 | Android 12 / MIUI 13.0.4，已解锁，Magisk，slot `_a` |
 | 布局 | `userdata` 208.4 GiB + `iosroot` 17 GiB；`boot_a` 128 MiB；`super` 约 9.1 GB |
-| 当前状态 | 工件：真实触摸 0085 镜像/内核、0084 镜像、root A/A' 快照、ICL 块、boot cmdline；设备不在本仓库内 |
-| 成功工件 | 0085 镜像、内核、root A/A' 快照、ICL 块、boot cmdline |
+| 当前状态 | 0155 镜像/内核；0085/0084 为历史；root A/A' 快照、ICL 块、boot cmdline；设备不在本仓库内 |
+| 成功工件 | 0155 镜像、内核、root A/A' 快照、ICL 块、boot cmdline |
 | 需匹配 | 固件/GPT、root hash、boot 镜像、启动参数、面板/显示 |
-| 不需要 | 触摸固件、Wi-Fi、USB、GPU、RTC |
+| 不需要 | 触摸固件、Wi-Fi/BT、音频、相机/GPU、RTC |
 
 root 状态（外部；pin 在 `config/0085.env`）：
 
@@ -194,16 +176,64 @@ hash 在 `config/0085.env`。见 [`docs/zh/device.md`](docs/zh/device.md)。
 
 ## 保证
 
-成功路径——启动到锁屏、合成上滑到桌面——现在有**单台设备证据**（B+NOP 首启
--> A'、CI kernel 启动）和文档化配方。它不是第二台/干净室保证。启动前工件
-hash 对命名文件是固定的；启动后的 live-root/ring/日志 hash 易变。从 IPSW
-造 root/shim/ADT 的 builder 和严格 pin 的 payload 仍未完成。见
-[`GUARANTEE.zh.md`](GUARANTEE.zh.md)。
+成功路径——启动到锁屏、真实 GT9916R 触摸、按键和电池读数（0155）——有
+**单台设备证据**（B+NOP 首启 -> A'、CI kernel 启动、0155 真机）和文档化
+配方。它不是第二台/干净室保证。启动前工件 hash 对命名文件是固定的；启动后
+的 live-root/ring/日志 hash 易变。从 IPSW 造 root/shim/ADT 的 builder 和严格
+pin 的 payload 仍未完成。见 [`GUARANTEE.zh.md`](GUARANTEE.zh.md)。
 
 ## 文档
 
-从 [`docs/README.md`](docs/README.md) 开始，或直接进入
-[English chapters](docs/en/README.md) / [中文章节](docs/zh/README.md)。
+从 [docs 索引](docs/README.md) 开始（[English](docs/en/README.md) / [中文](docs/zh/README.md)）。
+
+| 入门 | 参考 | 证据 |
+|---|---|---|
+| [09-reproduce](docs/zh/09-reproduce.md)、[08-recovery](docs/zh/08-recovery.md) | [11-ci-baseline](docs/zh/11-ci-baseline.md)、[12-usb-host](docs/zh/12-usb-host.md) | [STATUS](STATUS.md)、[VERIFICATION](VERIFICATION.md)、[GUARANTEE.zh.md](GUARANTEE.zh.md) |
+
+## 历史
+
+见 [STATUS](STATUS.md) 和 [07-experiments](docs/zh/07-experiments.md)。
+
+<details>
+<summary>项目历史（2026-10-22 → 2026-11-01）</summary>
+
+> **状态 2026-11-01：** 构建迁移到托管的 `macos-15` 镜像 + Xcode 16.0；
+> 内核源码未变，接口编译步骤仍正常生成。这条线新增一个只读板级探针
+> （pwrap、受限的 I2C 扫描、GPIO/时钟/KPD/WDT 状态、分段快照）走 USB
+> 控制台，并修掉枚举窗口：主机现在第一次尝试就能完成配置。
+> CI `41229568807` 与 patchset `9f7b41cf...`（141 文件）、exec-data
+> `62a17d48...` 一致。探针在一次真机运行里拿到板级数据（看门狗未使能、
+> I2C5 四个 ACK、MT6360 可经 I2C5 读取），10 分钟只读空转检查无 panic；
+> 两条 pwrap 读数要等 pwrap 初始化落地才会有。
+>
+> **状态 2026-10-30：** USB 线更新到 0143：EP2 IN bulk MPS 512、511 B
+> 日志帧（16 B 头 + 最多 495 B 文本）、64 GPD TX 环（最多 63 个在飞）、
+> rearm 时重置 TX 环。CI `41022192026` 与 patchset `f47f4c19...`
+> （139 文件）、exec-data `6fa65088...` 一致。枚举/配置/HS 全绿；
+> host 侧首会话 XACT **仍未闭环**（0–54 帧可变；EP0 也可能 XACT，
+> 设备可能掉链）。参考上位机工具与实测条件（AMD USB4 CC 与 A-C 线、
+> WinUSB 绑定、安全调试）见 `docs/zh/12-usb-host.md`。
+>
+> **状态 2026-10-29：** 内核 CI 改为从内容固定的 82 文件基线（清单根
+> `829d7598...`）拼装，基线由私有内容寻址镜像提供，0001-0079 不再是活的
+> 上游依赖。ramdisk 线增加 LK ramdisk 救援根（`md0`，PID 1 进程内运行，
+> 8/8 救援 `/etc/rc` 自检，USB `1209:0002` 枚举约 35 秒）；ramdisk 与 USB 两条线合并在
+> `main` 上（由 `merge-ramdisk-usb-2026-10-29` 压缩合并）。
+> `usb-0131b-probe-write` 保留厂商
+> USB 探针；EP2 主机侧 XACT 仍未闭环。真实触摸（0085）仍是最后一个 UI
+> 里程碑；本次 CI 改动没有刷入新的设备镜像。
+>
+> **状态 2026-10-22：真实触摸已通。** 0085 内核通过 GPIO bit-bang SPI3
+> 驱动 Goodix GT9916R，能用真实底边上滑解锁，并把两个同时按下的 contact
+> 和 edge 事件分发到 HID 层（内核 IOLog 证据；用户态 pinch 未单独加日志
+> 验证）。0084 镜像和 CI 内核也都能到达锁屏并合成上滑进桌面。**计时从出现 Apple
+> logo 开始：** B+NOP 首启观察到 22 秒到锁屏、30 秒 autoswipe；历史首启
+> 约 58 秒，热重启约 22 秒。按键、USB、Wi-Fi、GPU、RTC 仍未通。
+>
+> **设备回归：** B+NOP 首启 -> A' 和 CI kernel 启动已在 2026-10-22 于作者设备
+> 上跑过。第二台/干净室，以及从 IPSW 造 root/shim/ADT 的 builder 仍未完成。
+> 见 [`GUARANTEE.zh.md`](GUARANTEE.zh.md)。
+</details>
 
 ## 致谢与法律
 
