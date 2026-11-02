@@ -1,0 +1,816 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/ruby_keys.c			standard
+ bsd/dev/ruby_hal.c			standard
++bsd/dev/ruby_eint.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
+ bsd/dev/ruby_usb.c			standard
+--- /dev/null
++++ b/bsd/dev/ruby_eint.c
+@@ -0,0 +1,376 @@
++/*
++ * Shared EINT0 controller for the Ruby (MT6877) board.
++ *
++ * The register offsets and trigger semantics come from the vendor
++ * mtk-eint.c.  The HAL only writes the EINT0 MASK/SENS/POL/ACK
++ * registers; it never writes GICD, PMIC, rails, clocks or the WDT.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/locks.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++
++#include "ruby_eint.h"
++#include "ruby_hal.h"
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++
++#define RUBY_EINT0_PA        0x1000b000u
++#define RUBY_EINT_GICD_PA    0x0c000000u
++#define RUBY_EINT_REG_SIZE   0x1000u
++#define RUBY_EINT_LINES      32u
++#define RUBY_EINT_PORTS      7u
++
++#define RUBY_EINT_STA        0x000u
++#define RUBY_EINT_ACK        0x040u
++#define RUBY_EINT_MASK       0x080u
++#define RUBY_EINT_MASK_SET   0x0c0u
++#define RUBY_EINT_MASK_CLR   0x100u
++#define RUBY_EINT_SENS       0x140u
++#define RUBY_EINT_SENS_SET   0x180u
++#define RUBY_EINT_SENS_CLR   0x1c0u
++#define RUBY_EINT_POL        0x300u
++#define RUBY_EINT_POL_SET    0x340u
++#define RUBY_EINT_POL_CLR    0x380u
++
++#define RUBY_EINT_GICD_CTLR  0x000u
++/* GIC_SPI 256 is SPI 256 -> INTID 288 -> ISENABLER[9] bit 0. */
++#define RUBY_EINT_GIC_SPI256_INTID 288u
++#define RUBY_EINT_GICD_ISENABLER_SPI256 0x124u
++#define RUBY_EINT_GICD_ISPENDR_SPI256 0x224u
++#define RUBY_EINT_GIC_SPI256_BIT \
++	(1u << (RUBY_EINT_GIC_SPI256_INTID % 32u))
++
++struct ruby_eint {
++	uint32_t line;
++	uint32_t trigger;
++	uint32_t saved_mask;
++	uint32_t saved_sens;
++	uint32_t saved_pol;
++	uint32_t pending_count;
++	uint32_t ack_count;
++	bool used;
++};
++
++static struct ruby_eint g_eint_slots[RUBY_EINT_LINES];
++static vm_offset_t g_eint_base, g_gicd_base;
++static lck_grp_t g_eint_lck_grp;
++static lck_spinlock_t g_eint_lock;
++static volatile int g_eint_state; /* 0 uninit, 1 init, 2 ready, 3 failed */
++static bool g_eint_enabled;
++
++static void
++ruby_eint_gic_read(uint32_t *ctl, uint32_t *isen, uint32_t *pnd)
++{
++	*ctl = 0;
++	*isen = 0;
++	*pnd = 0;
++	if (!g_gicd_base)
++		return;
++	*ctl = ruby_rd32(g_gicd_base, RUBY_EINT_GICD_CTLR);
++	*isen = ruby_rd32(g_gicd_base, RUBY_EINT_GICD_ISENABLER_SPI256);
++	*pnd = ruby_rd32(g_gicd_base, RUBY_EINT_GICD_ISPENDR_SPI256);
++}
++
++void
++ruby_eint_init(void)
++{
++	vm_offset_t eint, gicd;
++	int expected = 0;
++	int v = 0;
++
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) == 2)
++		return;
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) == 3)
++		return;
++	if (!__atomic_compare_exchange_n(&g_eint_state, &expected, 1, false,
++	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		while (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) == 1)
++			delay(100);
++		return;
++	}
++
++	lck_grp_init(&g_eint_lck_grp, "ruby_eint", LCK_GRP_ATTR_NULL);
++	lck_spin_init(&g_eint_lock, &g_eint_lck_grp, LCK_ATTR_NULL);
++
++	eint = ml_io_map(RUBY_EINT0_PA, RUBY_EINT_REG_SIZE);
++	gicd = ml_io_map(RUBY_EINT_GICD_PA, RUBY_EINT_REG_SIZE);
++	g_eint_base = eint;
++	g_gicd_base = gicd;
++	if (PE_parse_boot_argn("rubyeint", &v, sizeof(v)) && v == 1)
++		g_eint_enabled = true;
++
++	printf("RUBY EINT: init eint=%d gicd=%d enabled=%d\n",
++	    g_eint_base != 0, g_gicd_base != 0, g_eint_enabled);
++	__atomic_store_n(&g_eint_state,
++	    (g_eint_base != 0 && g_gicd_base != 0) ? 2 : 3, __ATOMIC_RELEASE);
++}
++
++static void
++ruby_eint_apply_trigger(struct ruby_eint *e, uint32_t bit)
++{
++	switch (e->trigger) {
++	case RUBY_EINT_EDGE_FALLING:
++		ruby_wr32(g_eint_base, RUBY_EINT_SENS_CLR, bit);
++		ruby_wr32(g_eint_base, RUBY_EINT_POL_CLR, bit);
++		break;
++	case RUBY_EINT_EDGE_RISING:
++		ruby_wr32(g_eint_base, RUBY_EINT_SENS_CLR, bit);
++		ruby_wr32(g_eint_base, RUBY_EINT_POL_SET, bit);
++		break;
++	case RUBY_EINT_LEVEL_LOW:
++		ruby_wr32(g_eint_base, RUBY_EINT_SENS_SET, bit);
++		ruby_wr32(g_eint_base, RUBY_EINT_POL_CLR, bit);
++		break;
++	case RUBY_EINT_LEVEL_HIGH:
++		ruby_wr32(g_eint_base, RUBY_EINT_SENS_SET, bit);
++		ruby_wr32(g_eint_base, RUBY_EINT_POL_SET, bit);
++		break;
++	default:
++		break;
++	}
++}
++
++struct ruby_eint *
++ruby_eint_acquire(uint32_t line, enum ruby_eint_trigger trig)
++{
++	struct ruby_eint *e;
++	uint32_t bit, mask, ctl, isen, pnd;
++	uint32_t saved_mask, saved_sens, saved_pol;
++
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_enabled || !g_eint_base || !g_gicd_base)
++		return NULL;
++	if (line >= RUBY_EINT_LINES ||
++	    trig > RUBY_EINT_LEVEL_HIGH)
++		return NULL;
++
++	bit = 1u << line;
++	ruby_eint_gic_read(&ctl, &isen, &pnd);
++	if (ctl == 0 || ctl == 0xffffffffu || isen == 0xffffffffu ||
++	    (isen & RUBY_EINT_GIC_SPI256_BIT)) {
++		printf("RUBY EINT: line=%u refused gic ctlr=%08x isen=%08x pnd=%08x\n",
++		    line, ctl, isen, pnd);
++		return NULL;
++	}
++
++	lck_spin_lock(&g_eint_lock);
++	e = &g_eint_slots[line];
++	if (e->used) {
++		lck_spin_unlock(&g_eint_lock);
++		return NULL;
++	}
++	e->line = line;
++	e->trigger = (uint32_t)trig;
++	saved_mask = (ruby_rd32(g_eint_base, RUBY_EINT_MASK) & bit) ? 1 : 0;
++	saved_sens = (ruby_rd32(g_eint_base, RUBY_EINT_SENS) & bit) ? 1 : 0;
++	saved_pol = (ruby_rd32(g_eint_base, RUBY_EINT_POL) & bit) ? 1 : 0;
++	e->saved_mask = saved_mask;
++	e->saved_sens = saved_sens;
++	e->saved_pol = saved_pol;
++	e->pending_count = 0;
++	e->ack_count = 0;
++
++	ruby_eint_apply_trigger(e, bit);
++	ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
++	ruby_wr32(g_eint_base, RUBY_EINT_MASK_CLR, bit);
++	e->used = true;
++	mask = ruby_rd32(g_eint_base, RUBY_EINT_MASK);
++	lck_spin_unlock(&g_eint_lock);
++
++	printf("RUBY EINT: line=%u armed trigger=%u saved=%u/%u/%u mask=%08x\n",
++	    line, (unsigned)trig, saved_mask, saved_sens, saved_pol, mask);
++	return e;
++}
++
++void
++ruby_eint_release(struct ruby_eint *e)
++{
++	uint32_t bit;
++
++	if (!e)
++		return;
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base || e->line >= RUBY_EINT_LINES)
++		return;
++	bit = 1u << e->line;
++
++	lck_spin_lock(&g_eint_lock);
++	if (!e->used) {
++		lck_spin_unlock(&g_eint_lock);
++		return;
++	}
++	if (e->saved_mask & 1u)
++		ruby_wr32(g_eint_base, RUBY_EINT_MASK_SET, bit);
++	else
++		ruby_wr32(g_eint_base, RUBY_EINT_MASK_CLR, bit);
++	if (e->saved_sens & 1u)
++		ruby_wr32(g_eint_base, RUBY_EINT_SENS_SET, bit);
++	else
++		ruby_wr32(g_eint_base, RUBY_EINT_SENS_CLR, bit);
++	if (e->saved_pol & 1u)
++		ruby_wr32(g_eint_base, RUBY_EINT_POL_SET, bit);
++	else
++		ruby_wr32(g_eint_base, RUBY_EINT_POL_CLR, bit);
++	ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
++	e->used = false;
++	lck_spin_unlock(&g_eint_lock);
++	printf("RUBY EINT: line=%u released\n", e->line);
++}
++
++int
++ruby_eint_pending(struct ruby_eint *e)
++{
++	uint32_t bit, sta;
++	int hit = 0;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return 0;
++	bit = 1u << e->line;
++	lck_spin_lock(&g_eint_lock);
++	if (e->used) {
++		sta = ruby_rd32(g_eint_base, RUBY_EINT_STA);
++		if (sta & bit) {
++			e->pending_count++;
++			hit = 1;
++		}
++	}
++	lck_spin_unlock(&g_eint_lock);
++	return hit;
++}
++
++void
++ruby_eint_ack(struct ruby_eint *e)
++{
++	uint32_t bit;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return;
++	bit = 1u << e->line;
++	lck_spin_lock(&g_eint_lock);
++	if (e->used) {
++		ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
++		e->ack_count++;
++	}
++	lck_spin_unlock(&g_eint_lock);
++}
++
++int
++ruby_eint_safe(void)
++{
++	uint32_t ctl, isen, pnd;
++
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_gicd_base)
++		return 0;
++	ruby_eint_gic_read(&ctl, &isen, &pnd);
++	if (ctl == 0 || ctl == 0xffffffffu || isen == 0xffffffffu)
++		return 0;
++	return (isen & RUBY_EINT_GIC_SPI256_BIT) == 0;
++}
++
++int
++ruby_eint_read_port(uint32_t port, struct ruby_eint_port *out)
++{
++	if (!out || port >= RUBY_EINT_PORTS)
++		return EINVAL;
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return ENODEV;
++	lck_spin_lock(&g_eint_lock);
++	out->sta = ruby_rd32(g_eint_base, RUBY_EINT_STA + port * 4u);
++	out->mask = ruby_rd32(g_eint_base, RUBY_EINT_MASK + port * 4u);
++	out->sens = ruby_rd32(g_eint_base, RUBY_EINT_SENS + port * 4u);
++	out->pol = ruby_rd32(g_eint_base, RUBY_EINT_POL + port * 4u);
++	lck_spin_unlock(&g_eint_lock);
++	return 0;
++}
++
++void
++ruby_eint_status(void)
++{
++	struct {
++		uint32_t line, trigger, pending, ack;
++	} snap[RUBY_EINT_LINES];
++	uint32_t ctl, isen, pnd;
++	uint32_t sta, mask, sens, pol;
++	uint32_t i, n = 0;
++
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base) {
++		printf("RUBY EINT: unavailable\n");
++		return;
++	}
++	lck_spin_lock(&g_eint_lock);
++	sta = ruby_rd32(g_eint_base, RUBY_EINT_STA);
++	mask = ruby_rd32(g_eint_base, RUBY_EINT_MASK);
++	sens = ruby_rd32(g_eint_base, RUBY_EINT_SENS);
++	pol = ruby_rd32(g_eint_base, RUBY_EINT_POL);
++	for (i = 0; i < RUBY_EINT_LINES; i++) {
++		if (!g_eint_slots[i].used)
++			continue;
++		snap[n].line = g_eint_slots[i].line;
++		snap[n].trigger = g_eint_slots[i].trigger;
++		snap[n].pending = g_eint_slots[i].pending_count;
++		snap[n].ack = g_eint_slots[i].ack_count;
++		n++;
++	}
++	lck_spin_unlock(&g_eint_lock);
++	ruby_eint_gic_read(&ctl, &isen, &pnd);
++
++	printf("RUBY EINT: enabled=%d safe=%d raw sta=%08x mask=%08x sens=%08x pol=%08x\n",
++	    g_eint_enabled, ruby_eint_safe(), sta, mask, sens, pol);
++	printf("RUBY EINT: gic ctlr=%08x isen=%08x pnd=%08x spi256=%u\n",
++	    ctl, isen, pnd,
++	    (isen & RUBY_EINT_GIC_SPI256_BIT) != 0);
++	if (n == 0) {
++		printf("RUBY EINT: used=none\n");
++		return;
++	}
++	for (i = 0; i < n; i++)
++		printf("RUBY EINT: used line=%u trigger=%u pending=%u ack=%u\n",
++		    snap[i].line, snap[i].trigger, snap[i].pending, snap[i].ack);
++}
++
++int
++ruby_eint_selftest(uint32_t line, uint32_t ms)
++{
++	struct ruby_eint *e;
++	uint32_t i, events = 0;
++
++	if (ms < 100)
++		ms = 100;
++	if (ms > 3000)
++		ms = 3000;
++	e = ruby_eint_acquire(line, RUBY_EINT_EDGE_FALLING);
++	if (!e) {
++		printf("RUBY EINT: selftest line=%u unavailable (busy/disabled/unsafe)\n",
++		    line);
++		return 1;
++	}
++	printf("RUBY EINT: selftest line=%u start\n", line);
++	for (i = 0; i < ms; i++) {
++		if (ruby_eint_pending(e)) {
++			printf("RUBY EINT: selftest t=%ums ack=1\n", i);
++			ruby_eint_ack(e);
++			events++;
++			if (events >= 8)
++				break;
++		}
++		delay(1);
++	}
++	ruby_eint_release(e);
++	printf("RUBY EINT: selftest line=%u events=%u\n", line, events);
++	return 1;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- /dev/null
++++ b/bsd/dev/ruby_eint.h
+@@ -0,0 +1,33 @@
++#ifndef RUBY_EINT_H
++#define RUBY_EINT_H
++
++#include <stdint.h>
++
++enum ruby_eint_trigger {
++	RUBY_EINT_EDGE_FALLING = 0,
++	RUBY_EINT_EDGE_RISING,
++	RUBY_EINT_LEVEL_LOW,
++	RUBY_EINT_LEVEL_HIGH,
++};
++
++struct ruby_eint;
++
++struct ruby_eint_port {
++	uint32_t sta;
++	uint32_t mask;
++	uint32_t sens;
++	uint32_t pol;
++};
++
++void ruby_eint_init(void);
++struct ruby_eint *ruby_eint_acquire(uint32_t line,
++    enum ruby_eint_trigger trig);
++void ruby_eint_release(struct ruby_eint *e);
++int ruby_eint_pending(struct ruby_eint *e);
++void ruby_eint_ack(struct ruby_eint *e);
++int ruby_eint_safe(void);
++int ruby_eint_read_port(uint32_t port, struct ruby_eint_port *out);
++void ruby_eint_status(void);
++int ruby_eint_selftest(uint32_t line, uint32_t ms);
++
++#endif /* RUBY_EINT_H */
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -25,13 +25,13 @@
+ #include "ruby_probe.h"
+ #include "ruby_battery.h"
+ #include "ruby_hal.h"
++#include "ruby_eint.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+ #define PR_GPIO_PA       0x10005000u
+ #define PR_PWRAP_PA      0x10026000u
+ #define PR_KPD_PA        0x10010000u
+-#define PR_EINT_PA       0x1000b000u
+ #define PR_WDT_PA        0x10007000u
+ #define PR_IFRAO_PA      0x10001000u
+ #define PR_IMP_S_PA      0x11d04000u
+@@ -100,9 +100,9 @@
+ /*
+  * R0 read-only map.  These offsets are taken from the vendor drivers:
+  * i2c-mtk.h (CONTROL/TIMING/HS/CLOCK_DIV only; never DATA_PORT or FIFO),
+- * spi-mt65xx.c (CFG/STATUS only; never TX/RX DATA), mtk-eint.h (STAT read;
+- * ACK is a write to +0x040), and clk-mt6877-pg.c (MT6877 SPM status words).
+- * The WDT count/feed registers are deliberately absent.
++ * spi-mt65xx.c (CFG/STATUS only; never TX/RX DATA), and
++ * clk-mt6877-pg.c (MT6877 SPM status words).  The EINT block lives in
++ * ruby_eint.c.  The WDT count/feed registers are deliberately absent.
+  */
+ #define PR_I2C_CTRL      0x10u
+ #define PR_I2C_TIMING    0x20u
+@@ -113,26 +113,6 @@
+ #define PR_SPI_CFG2      0x28u
+ #define PR_SPI_STA0      0x1cu
+ #define PR_SPI_STA1      0x20u
+-#define PR_EINT_STA      0x000u
+-#define PR_EINT_ACK      0x040u
+-#define PR_EINT_MASK     0x080u
+-#define PR_EINT_MASK_SET 0x0c0u
+-#define PR_EINT_MASK_CLR 0x100u
+-#define PR_EINT_SENS     0x140u
+-#define PR_EINT_SENS_SET 0x180u
+-#define PR_EINT_SENS_CLR 0x1c0u
+-#define PR_EINT_POL      0x300u
+-#define PR_EINT_POL_SET  0x340u
+-#define PR_EINT_POL_CLR  0x380u
+-#define PR_EINT_TOUCH_BIT (1u << 14)
+-#define PR_GICD_PA       0x0c000000u
+-#define PR_GICD_SIZE     0x1000u
+-#define PR_GICD_CTLR     0x000u
+-/* GIC_SPI 256 is SPI 256 -> INTID 288 -> ISENABLER[9] bit 0. */
+-#define PR_GIC_SPI256_INTID 288u
+-#define PR_GICD_ISENABLER_SPI256 0x124u
+-#define PR_GICD_ISPENDR_SPI256 0x224u
+-#define PR_GIC_SPI256_BIT (1u << (PR_GIC_SPI256_INTID % 32))
+ #define PR_SPM_PWR_STA   0x0ef0u
+ #define PR_SPM_PWR_STA2  0x0ef4u
+ #define PR_SPM_XPU_STA   0x0ef8u
+@@ -146,7 +126,7 @@
+ };
+ 
+ struct pr_state {
+-	vm_offset_t gpio, pwrap, kpd, eint, gicd, wdt;
++	vm_offset_t gpio, pwrap, kpd, wdt;
+ 	vm_offset_t ifrao, imp_s, imp_n;
+ 	vm_offset_t i2c5, i2c6, spi3, scpsys;
+ 	vm_offset_t iocfg[8];
+@@ -157,7 +137,6 @@
+ 	bool wrap_init_allowed;
+ 	bool wrap_init_attempted;
+ 	bool reboot_allowed;
+-	bool eint_allowed;
+ };
+ 
+ static struct pr_state pr;
+@@ -1144,160 +1123,17 @@
+ static void
+ pr_snap_eint(void)
+ {
++	struct ruby_eint_port p;
+ 	uint32_t i;
+ 
+-	if (!pr.eint) {
+-		PR_LINE("RUBY SNAP: eint not mapped\n");
+-		return;
+-	}
+-	for (i = 0; i < 7; i++)
++	for (i = 0; i < 7; i++) {
++		if (ruby_eint_read_port(i, &p) != 0) {
++			PR_LINE("RUBY SNAP: eint%u unavailable\n", i);
++			continue;
++		}
+ 		PR_LINE("RUBY SNAP: eint%u sta=%08x mask=%08x sens=%08x pol=%08x\n",
+-		    i, pr_rd32(pr.eint, PR_EINT_STA + i * 4),
+-		    pr_rd32(pr.eint, PR_EINT_MASK + i * 4),
+-		    pr_rd32(pr.eint, PR_EINT_SENS + i * 4),
+-		    pr_rd32(pr.eint, PR_EINT_POL + i * 4));
+-}
+-
+-static void
+-pr_eint_status(void)
+-{
+-	const uint32_t bit = PR_EINT_TOUCH_BIT;
+-	uint32_t mask, sens, pol, sta;
+-	uint32_t gic_ctl = 0, gic_isen = 0, gic_pnd = 0;
+-
+-	if (!pr.eint) {
+-		printf("RUBY EINT: eint not mapped\n");
+-		return;
+-	}
+-	mask = pr_rd32(pr.eint, PR_EINT_MASK);
+-	sens = pr_rd32(pr.eint, PR_EINT_SENS);
+-	pol = pr_rd32(pr.eint, PR_EINT_POL);
+-	sta = pr_rd32(pr.eint, PR_EINT_STA);
+-	if (pr.gicd) {
+-		gic_ctl = pr_rd32(pr.gicd, PR_GICD_CTLR);
+-		gic_isen = pr_rd32(pr.gicd, PR_GICD_ISENABLER_SPI256);
+-		gic_pnd = pr_rd32(pr.gicd, PR_GICD_ISPENDR_SPI256);
+-	}
+-	printf("RUBY EINT: eint14 sta=%u mask=%u sens=%u pol=%u\n",
+-	    (sta & bit) != 0, (mask & bit) != 0,
+-	    (sens & bit) != 0, (pol & bit) != 0);
+-	printf("RUBY EINT: raw sta=%08x mask=%08x sens=%08x pol=%08x\n",
+-	    sta, mask, sens, pol);
+-	if (pr.gicd)
+-		printf("RUBY EINT: gic ctlr=%08x isen=%08x pnd=%08x spi256=%u\n",
+-		    gic_ctl, gic_isen, gic_pnd,
+-		    (gic_isen & PR_GIC_SPI256_BIT) != 0);
+-	else
+-		printf("RUBY EINT: gicd not mapped\n");
+-}
+-
+-static int
+-pr_eint_touch(uint32_t ms)
+-{
+-	const uint32_t bit = PR_EINT_TOUCH_BIT;
+-	uint32_t saved_mask, saved_sens, saved_pol;
+-	uint32_t mask, sens, pol, sta;
+-	uint32_t gic_ctl, gic_isen, gic_pnd;
+-	uint32_t i, events = 0;
+-
+-	if (!pr.eint_allowed) {
+-		printf("RUBY EINT: disabled (rubyeint=0)\n");
+-		return 1;
++		    i, p.sta, p.mask, p.sens, p.pol);
+ 	}
+-	if (!pr.eint) {
+-		printf("RUBY EINT: eint not mapped\n");
+-		return 1;
+-	}
+-	if (!pr.gicd) {
+-		printf("RUBY EINT: gicd not mapped; refusing to arm\n");
+-		return 1;
+-	}
+-	if (ms < 100)
+-		ms = 100;
+-	if (ms > 3000)
+-		ms = 3000;
+-
+-	gic_ctl = pr_rd32(pr.gicd, PR_GICD_CTLR);
+-	gic_isen = pr_rd32(pr.gicd, PR_GICD_ISENABLER_SPI256);
+-	gic_pnd = pr_rd32(pr.gicd, PR_GICD_ISPENDR_SPI256);
+-	printf("RUBY EINT: gic ctlr=%08x isen=%08x pnd=%08x spi256=%u\n",
+-	    gic_ctl, gic_isen, gic_pnd,
+-	    (gic_isen & PR_GIC_SPI256_BIT) != 0);
+-	if (gic_ctl == 0 || gic_ctl == 0xffffffffu) {
+-		printf("RUBY EINT: abort: GICD CTLR untrusted\n");
+-		return 1;
+-	}
+-	if (gic_isen == 0xffffffffu) {
+-		printf("RUBY EINT: abort: GICD ISENABLER untrusted\n");
+-		return 1;
+-	}
+-	if (gic_isen & PR_GIC_SPI256_BIT) {
+-		printf("RUBY EINT: abort: GIC SPI256 enabled\n");
+-		return 1;
+-	}
+-	if (gic_pnd & PR_GIC_SPI256_BIT)
+-		printf("RUBY EINT: note: GIC SPI256 pending while disabled\n");
+-
+-	saved_mask = pr_rd32(pr.eint, PR_EINT_MASK);
+-	saved_sens = pr_rd32(pr.eint, PR_EINT_SENS);
+-	saved_pol = pr_rd32(pr.eint, PR_EINT_POL);
+-	printf("RUBY EINT: saved mask=%08x sens=%08x pol=%08x\n",
+-	    saved_mask, saved_sens, saved_pol);
+-
+-	pr_wr32(pr.eint, PR_EINT_SENS_CLR, bit);
+-	pr_wr32(pr.eint, PR_EINT_POL_CLR, bit);
+-	pr_wr32(pr.eint, PR_EINT_ACK, bit);
+-	pr_wr32(pr.eint, PR_EINT_MASK_CLR, bit);
+-	delay(1);
+-
+-	mask = pr_rd32(pr.eint, PR_EINT_MASK);
+-	sens = pr_rd32(pr.eint, PR_EINT_SENS);
+-	pol = pr_rd32(pr.eint, PR_EINT_POL);
+-	sta = pr_rd32(pr.eint, PR_EINT_STA);
+-	printf("RUBY EINT: arm mask=%08x sens=%08x pol=%08x sta=%08x\n",
+-	    mask, sens, pol, sta);
+-
+-	for (i = 0; i < ms; i++) {
+-		sta = pr_rd32(pr.eint, PR_EINT_STA);
+-		if (sta & bit) {
+-			printf("RUBY EINT: t=%ums sta=%08x ack=1\n", i, sta);
+-			pr_wr32(pr.eint, PR_EINT_ACK, bit);
+-			events++;
+-			if (events >= 8)
+-				break;
+-		}
+-		delay(1);
+-	}
+-
+-	pr_wr32(pr.eint, PR_EINT_ACK, bit);
+-	if (saved_mask & bit)
+-		pr_wr32(pr.eint, PR_EINT_MASK_SET, bit);
+-	else
+-		pr_wr32(pr.eint, PR_EINT_MASK_CLR, bit);
+-	if (saved_sens & bit)
+-		pr_wr32(pr.eint, PR_EINT_SENS_SET, bit);
+-	else
+-		pr_wr32(pr.eint, PR_EINT_SENS_CLR, bit);
+-	if (saved_pol & bit)
+-		pr_wr32(pr.eint, PR_EINT_POL_SET, bit);
+-	else
+-		pr_wr32(pr.eint, PR_EINT_POL_CLR, bit);
+-	pr_wr32(pr.eint, PR_EINT_ACK, bit);
+-	delay(1);
+-
+-	mask = pr_rd32(pr.eint, PR_EINT_MASK);
+-	sens = pr_rd32(pr.eint, PR_EINT_SENS);
+-	pol = pr_rd32(pr.eint, PR_EINT_POL);
+-	sta = pr_rd32(pr.eint, PR_EINT_STA);
+-	printf("RUBY EINT: restore mask=%08x sens=%08x pol=%08x sta=%08x events=%u\n",
+-	    mask, sens, pol, sta, events);
+-	if ((mask & bit) != (saved_mask & bit) ||
+-	    (sens & bit) != (saved_sens & bit) ||
+-	    (pol & bit) != (saved_pol & bit))
+-		printf("RUBY EINT: restore MISMATCH\n");
+-	else
+-		printf("RUBY EINT: restore ok\n");
+-	return 1;
+ }
+ 
+ static void
+@@ -1534,7 +1370,7 @@
+ 	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|found|all]\n");
+ 	printf("RUBY CMD: reboot bootloader (rubyreboot)\n");
+ 	printf("RUBY CMD: battery status\n");
+-	printf("RUBY CMD: eint status | eint touch [ms] (rubyeint)\n");
++	printf("RUBY CMD: eint status | eint selftest <line> [ms] (rubyeint)\n");
+ }
+ 
+ static int
+@@ -1830,21 +1666,25 @@
+ 	}
+ 	if (!strncmp(p, "eint ", 5)) {
+ 		const char *q = pr_skip(p + 5);
+-		uint32_t ms = 3000;
++		uint32_t line = 14, ms = 3000;
+ 
+ 		if (!strcmp(q, "status")) {
+-			pr_eint_status();
++			ruby_eint_status();
+ 			return 1;
+ 		}
+-		if (pr_sub(&q, "touch")) {
++		if (pr_sub(&q, "selftest")) {
++			if (*q == '\0' || !pr_parse_u32(&q, &line)) {
++				printf("RUBY CMD: err: eint selftest <line> [ms]\n");
++				return 1;
++			}
+ 			if (*q != '\0' &&
+ 			    (!pr_parse_u32(&q, &ms) || *pr_skip(q) != '\0')) {
+-				printf("RUBY CMD: err: eint touch [ms]\n");
++				printf("RUBY CMD: err: eint selftest <line> [ms]\n");
+ 				return 1;
+ 			}
+-			return pr_eint_touch(ms);
++			return ruby_eint_selftest(line, ms);
+ 		}
+-		printf("RUBY CMD: err: eint status|touch [ms]\n");
++		printf("RUBY CMD: err: eint status|selftest <line> [ms]\n");
+ 		return 1;
+ 	}
+ 	if (!strncmp(p, "reboot", 6)) {
+@@ -1899,15 +1739,9 @@
+ 	v = 0;
+ 	if (PE_parse_boot_argn("rubyreboot", &v, sizeof(v)) && v == 1)
+ 		pr.reboot_allowed = true;
+-	v = 0;
+-	if (PE_parse_boot_argn("rubyeint", &v, sizeof(v)) && v == 1)
+-		pr.eint_allowed = true;
+-
+ 	pr.gpio = ml_io_map(PR_GPIO_PA, PR_GPIO_SIZE);
+ 	pr.pwrap = ml_io_map(PR_PWRAP_PA, PR_REG_SIZE);
+ 	pr.kpd = ml_io_map(PR_KPD_PA, PR_REG_SIZE);
+-	pr.eint = ml_io_map(PR_EINT_PA, PR_REG_SIZE);
+-	pr.gicd = ml_io_map(PR_GICD_PA, PR_GICD_SIZE);
+ 	pr.wdt = ml_io_map(PR_WDT_PA, PR_REG_SIZE);
+ 	pr.ifrao = ml_io_map(PR_IFRAO_PA, PR_REG_SIZE);
+ 	pr.imp_s = ml_io_map(PR_IMP_S_PA, PR_REG_SIZE);
+@@ -1921,15 +1755,15 @@
+ 
+ 	ruby_i2c_bus_init(&pr.i2c[0], 5, pr.gpio, pr.iocfg[4], "RUBY PROBE");
+ 	ruby_i2c_bus_init(&pr.i2c[1], 6, pr.gpio, pr.iocfg[7], "RUBY PROBE");
++	ruby_eint_init();
+ 	pr.ready = (pr.gpio != 0 && pr.pwrap != 0);
+-	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d wrapinit=%d reboot=%d eint=%d\n",
++	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d wrapinit=%d reboot=%d\n",
+ 	    pr.gpio != 0, pr.pwrap != 0, pr.kpd != 0, pr.wdt != 0,
+ 	    pr.iocfg[4] != 0, pr.iocfg[7] != 0,
+ 	    pr.probe_writes, pr.pmic_writes, pr.wrap_init_allowed,
+-	    pr.reboot_allowed, pr.eint_allowed);
+-	printf("RUBY PROBE: R0 map i2c5=%d i2c6=%d spi3=%d scpsys=%d gicd=%d\n",
+-	    pr.i2c5 != 0, pr.i2c6 != 0, pr.spi3 != 0, pr.scpsys != 0,
+-	    pr.gicd != 0);
++	    pr.reboot_allowed);
++	printf("RUBY PROBE: R0 map i2c5=%d i2c6=%d spi3=%d scpsys=%d\n",
++	    pr.i2c5 != 0, pr.i2c6 != 0, pr.spi3 != 0, pr.scpsys != 0);
+ 	return pr.ready ? 0 : ENODEV;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -21,6 +21,7 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include "ruby_battery.h"
++#include "ruby_eint.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -72,6 +73,7 @@
+ 	bool started;
+ 	uint32_t active;
+ 	int x[GT_MAX], y[GT_MAX];
++	struct ruby_eint *eint;
+ } gt;
+ 
+ static int gt_sleep_chan;
+@@ -686,6 +688,7 @@
+ gt_thread(void *arg, wait_result_t wr)
+ {
+ 	int bad = 0;
++	uint32_t idle = 8;
+ 
+ 	(void)arg;
+ 	(void)wr;
+@@ -693,19 +696,38 @@
+ 	if (!gt_hw_init()) {
+ 		goto out;
+ 	}
++	gt.eint = ruby_eint_acquire(14, RUBY_EINT_EDGE_FALLING);
++	printf("SWEET GT: EINT14 %s\n",
++	    gt.eint ? "armed" : "unavailable; 8 ms polling");
+ 	for (;;) {
+-		if (gt_frame() != 0) {
+-			if (++bad >= 50) {
+-				gt_release_all();
++		bool ev = gt.eint && ruby_eint_pending(gt.eint);
++
++		if (ev || idle >= 8) {
++			if (gt_frame() != 0) {
++				if (++bad >= 50) {
++					gt_release_all();
++					bad = 0;
++				}
++			} else {
+ 				bad = 0;
++				if (ev)
++					ruby_eint_ack(gt.eint);
+ 			}
+-		} else {
+-			bad = 0;
++			idle = 0;
+ 		}
+-		gt_wait(8);
++		if (!gt.eint) {
++			gt_wait(8);
++			idle = 8;
++			continue;
++		}
++		gt_wait(1);
++		if (idle < 8)
++			idle++;
+ 	}
+ 
+ out:
++	ruby_eint_release(gt.eint);
++	gt.eint = NULL;
+ 	printf("SWEET GT: stopped\n");
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
