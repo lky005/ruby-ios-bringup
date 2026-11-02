@@ -146,6 +146,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0156-ruby-found-ro.patch" \
     "$ROOT/patches/0156b-ruby-p24-battery.patch" \
     "$ROOT/patches/0157-ruby-hal.patch" \
+    "$ROOT/patches/0158-ruby-i2c-hal.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

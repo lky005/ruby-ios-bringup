@@ -1,0 +1,1498 @@
+--- a/bsd/dev/ruby_battery.c
++++ b/bsd/dev/ruby_battery.c
+@@ -12,7 +12,8 @@
+  * Goodix touch driver also holds it across its whole boot-time LDO
+  * sequence.  The probe's manual "i2c 5 take" sets ruby_battery_taken(1);
+  * a poll during that hold fails and SweetBattery keeps its last valid
+- * sample.
++ * sample.  The bit-bang primitives are shared with ruby_probe via
++ * ruby_hal.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -22,6 +23,7 @@
+ #include <IOKit/IOLocks.h>
+ #include <libkern/libkern.h>
+ #include "ruby_battery.h"
++#include "ruby_hal.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+@@ -35,406 +37,11 @@
+ #define RB_REG_FOD       0xe7u
+ #define RB_REG_USB       0x27u
+ 
+-#define RB_I2C_BUDGET    4000u
+-
+-struct rb_i2c_bus {
+-	uint8_t bus;
+-	uint32_t dir_off, do_off, di_off;
+-	uint32_t mode_off, mode_scl_shift, mode_sda_shift;
+-	uint32_t ies_off, ies_scl_shift, ies_sda_shift;
+-	uint32_t pu_off, pu_scl_shift, pu_sda_shift;
+-	uint32_t pd_off, pd_scl_shift, pd_sda_shift;
+-	uint32_t smt_off, smt_scl_shift, smt_sda_shift;
+-	uint32_t drv_scl_off, drv_scl_shift;
+-	uint32_t drv_sda_off, drv_sda_shift;
+-	bool taken;
+-	uint32_t s_mode_scl, s_mode_sda;
+-	uint32_t s_dir_scl, s_dir_sda;
+-	uint32_t s_do_scl, s_do_sda;
+-	uint32_t s_ies_scl, s_ies_sda;
+-	uint32_t s_pu_scl, s_pu_sda;
+-	uint32_t s_pd_scl, s_pd_sda;
+-	uint32_t s_smt_scl, s_smt_sda;
+-	uint32_t s_drv_scl, s_drv_sda;
+-};
+-
+ static vm_offset_t rb_gpio, rb_cfg;
+-static struct rb_i2c_bus rb_bus;
++static struct ruby_i2c_bus rb_bus;
+ static IOLock *rb_lock;
+ static volatile int rb_lock_state; /* 0 uninit, 1 allocating, 2 ready, 3 failed */
+ static bool rb_ready, rb_init_attempted, rb_probe_taken;
+-static uint32_t rb_budget;
+-
+-static uint32_t
+-rb_rd32(vm_offset_t base, uint32_t off)
+-{
+-	uint32_t v = *(volatile uint32_t *)(base + off);
+-	__asm__ volatile("dmb oshld" ::: "memory");
+-	return v;
+-}
+-
+-static void
+-rb_wr32(vm_offset_t base, uint32_t off, uint32_t val)
+-{
+-	__asm__ volatile("dmb oshst" ::: "memory");
+-	*(volatile uint32_t *)(base + off) = val;
+-	__asm__ volatile("dsb osh" ::: "memory");
+-}
+-
+-static uint32_t
+-rb_mask(uint32_t width)
+-{
+-	return (1u << width) - 1u;
+-}
+-
+-static uint32_t
+-rb_field_get(vm_offset_t base, uint32_t off, uint32_t shift, uint32_t width)
+-{
+-	return (rb_rd32(base, off) >> shift) & rb_mask(width);
+-}
+-
+-static void
+-rb_field_set(vm_offset_t base, uint32_t off, uint32_t shift, uint32_t width,
+-    uint32_t val)
+-{
+-	uint32_t mask = rb_mask(width) << shift;
+-	uint32_t v = rb_rd32(base, off);
+-
+-	v = (v & ~mask) | ((val & rb_mask(width)) << shift);
+-	rb_wr32(base, off, v);
+-}
+-
+-static void
+-rb_i2c_delay(void)
+-{
+-	delay(5);
+-	if (rb_budget)
+-		rb_budget--;
+-}
+-
+-static void
+-rb_scl_release(struct rb_i2c_bus *b)
+-{
+-	rb_field_set(rb_gpio, b->do_off, 4, 1, 1);
+-	rb_field_set(rb_gpio, b->dir_off, 4, 1, 0);
+-}
+-
+-static void
+-rb_scl_low(struct rb_i2c_bus *b)
+-{
+-	rb_field_set(rb_gpio, b->do_off, 4, 1, 0);
+-	rb_field_set(rb_gpio, b->dir_off, 4, 1, 1);
+-}
+-
+-static void
+-rb_sda_release(struct rb_i2c_bus *b)
+-{
+-	rb_field_set(rb_gpio, b->do_off, 5, 1, 1);
+-	rb_field_set(rb_gpio, b->dir_off, 5, 1, 0);
+-}
+-
+-static void
+-rb_sda_low(struct rb_i2c_bus *b)
+-{
+-	rb_field_set(rb_gpio, b->do_off, 5, 1, 0);
+-	rb_field_set(rb_gpio, b->dir_off, 5, 1, 1);
+-}
+-
+-static int
+-rb_scl_high(struct rb_i2c_bus *b)
+-{
+-	int i;
+-
+-	rb_scl_release(b);
+-	for (i = 0; i < 1000; i++) {
+-		if (rb_rd32(rb_gpio, b->di_off) & (1u << 4))
+-			return 1;
+-		if (!rb_budget)
+-			return 0;
+-		delay(1);
+-	}
+-	return 0;
+-}
+-
+-static int
+-rb_i2c_start(struct rb_i2c_bus *b)
+-{
+-	rb_budget = RB_I2C_BUDGET;
+-	rb_sda_release(b);
+-	if (!rb_scl_high(b))
+-		return 0;
+-	rb_i2c_delay();
+-	rb_sda_low(b);
+-	rb_i2c_delay();
+-	rb_scl_low(b);
+-	rb_i2c_delay();
+-	return 1;
+-}
+-
+-static void
+-rb_i2c_stop(struct rb_i2c_bus *b)
+-{
+-	rb_sda_low(b);
+-	rb_i2c_delay();
+-	(void)rb_scl_high(b);
+-	rb_i2c_delay();
+-	rb_sda_release(b);
+-	rb_i2c_delay();
+-}
+-
+-static int
+-rb_i2c_write_bit(struct rb_i2c_bus *b, int bit)
+-{
+-	if (bit)
+-		rb_sda_release(b);
+-	else
+-		rb_sda_low(b);
+-	rb_i2c_delay();
+-	if (!rb_scl_high(b))
+-		return 0;
+-	rb_i2c_delay();
+-	rb_scl_low(b);
+-	rb_i2c_delay();
+-	return 1;
+-}
+-
+-static int
+-rb_i2c_read_bit(struct rb_i2c_bus *b)
+-{
+-	int bit;
+-
+-	rb_sda_release(b);
+-	rb_i2c_delay();
+-	if (!rb_scl_high(b))
+-		return -1;
+-	rb_i2c_delay();
+-	bit = (rb_rd32(rb_gpio, b->di_off) & (1u << 5)) != 0;
+-	rb_scl_low(b);
+-	rb_i2c_delay();
+-	return bit;
+-}
+-
+-static int
+-rb_i2c_write_byte(struct rb_i2c_bus *b, uint8_t val)
+-{
+-	int i, ack;
+-
+-	for (i = 7; i >= 0; i--) {
+-		if (!rb_i2c_write_bit(b, (val >> i) & 1))
+-			return -1;
+-	}
+-	rb_sda_release(b);
+-	rb_i2c_delay();
+-	if (!rb_scl_high(b))
+-		return -1;
+-	rb_i2c_delay();
+-	ack = (rb_rd32(rb_gpio, b->di_off) & (1u << 5)) == 0;
+-	rb_scl_low(b);
+-	rb_i2c_delay();
+-	return ack ? 1 : 0;
+-}
+-
+-static int
+-rb_i2c_read_byte(struct rb_i2c_bus *b, int ack)
+-{
+-	uint8_t val = 0;
+-	int i, bit;
+-
+-	for (i = 7; i >= 0; i--) {
+-		bit = rb_i2c_read_bit(b);
+-		if (bit < 0)
+-			return -1;
+-		if (bit)
+-			val |= (uint8_t)(1u << i);
+-	}
+-	if (ack)
+-		rb_sda_low(b);
+-	else
+-		rb_sda_release(b);
+-	rb_i2c_delay();
+-	if (!rb_scl_high(b))
+-		return -1;
+-	rb_i2c_delay();
+-	rb_scl_low(b);
+-	rb_i2c_delay();
+-	rb_sda_release(b);
+-	return val;
+-}
+-
+-static void
+-rb_i2c_recover(struct rb_i2c_bus *b)
+-{
+-	int i;
+-
+-	rb_sda_release(b);
+-	rb_scl_release(b);
+-	delay(10);
+-	for (i = 0; i < 9; i++) {
+-		rb_scl_low(b);
+-		rb_i2c_delay();
+-		rb_scl_release(b);
+-		rb_i2c_delay();
+-	}
+-	rb_sda_low(b);
+-	rb_i2c_delay();
+-	rb_scl_release(b);
+-	rb_i2c_delay();
+-	rb_sda_release(b);
+-	rb_i2c_delay();
+-	printf("RUBY BATTERY: i2c recover DI=%08x\n",
+-	    rb_rd32(rb_gpio, b->di_off));
+-}
+-
+-static int
+-rb_bus_take(void)
+-{
+-	vm_offset_t cfg = rb_cfg;
+-	struct rb_i2c_bus *b = &rb_bus;
+-
+-	if (b->taken)
+-		return 0;
+-	if (!rb_gpio || !cfg)
+-		return ENODEV;
+-	b->s_mode_scl = rb_field_get(rb_gpio, b->mode_off, b->mode_scl_shift, 4);
+-	b->s_mode_sda = rb_field_get(rb_gpio, b->mode_off, b->mode_sda_shift, 4);
+-	b->s_dir_scl = rb_field_get(rb_gpio, b->dir_off, 4, 1);
+-	b->s_dir_sda = rb_field_get(rb_gpio, b->dir_off, 5, 1);
+-	b->s_do_scl = rb_field_get(rb_gpio, b->do_off, 4, 1);
+-	b->s_do_sda = rb_field_get(rb_gpio, b->do_off, 5, 1);
+-	b->s_ies_scl = rb_field_get(cfg, b->ies_off, b->ies_scl_shift, 1);
+-	b->s_ies_sda = rb_field_get(cfg, b->ies_off, b->ies_sda_shift, 1);
+-	b->s_pu_scl = rb_field_get(cfg, b->pu_off, b->pu_scl_shift, 1);
+-	b->s_pu_sda = rb_field_get(cfg, b->pu_off, b->pu_sda_shift, 1);
+-	b->s_pd_scl = rb_field_get(cfg, b->pd_off, b->pd_scl_shift, 1);
+-	b->s_pd_sda = rb_field_get(cfg, b->pd_off, b->pd_sda_shift, 1);
+-	b->s_smt_scl = rb_field_get(cfg, b->smt_off, b->smt_scl_shift, 1);
+-	b->s_smt_sda = rb_field_get(cfg, b->smt_off, b->smt_sda_shift, 1);
+-	b->s_drv_scl = rb_field_get(cfg, b->drv_scl_off, b->drv_scl_shift, 3);
+-	b->s_drv_sda = rb_field_get(cfg, b->drv_sda_off, b->drv_sda_shift, 3);
+-	b->taken = true;
+-
+-	rb_field_set(rb_gpio, b->mode_off, b->mode_scl_shift, 4, 0);
+-	rb_field_set(rb_gpio, b->mode_off, b->mode_sda_shift, 4, 0);
+-	rb_field_set(rb_gpio, b->dir_off, 4, 1, 0);
+-	rb_field_set(rb_gpio, b->dir_off, 5, 1, 0);
+-	rb_field_set(rb_gpio, b->do_off, 4, 1, 1);
+-	rb_field_set(rb_gpio, b->do_off, 5, 1, 1);
+-	rb_field_set(cfg, b->ies_off, b->ies_scl_shift, 1, 1);
+-	rb_field_set(cfg, b->ies_off, b->ies_sda_shift, 1, 1);
+-	rb_field_set(cfg, b->pu_off, b->pu_scl_shift, 1, 1);
+-	rb_field_set(cfg, b->pu_off, b->pu_sda_shift, 1, 1);
+-	rb_field_set(cfg, b->pd_off, b->pd_scl_shift, 1, 0);
+-	rb_field_set(cfg, b->pd_off, b->pd_sda_shift, 1, 0);
+-	delay(20);
+-
+-	if (!(rb_rd32(rb_gpio, b->di_off) & (1u << 4)) ||
+-	    !(rb_rd32(rb_gpio, b->di_off) & (1u << 5))) {
+-		printf("RUBY BATTERY: i2c5 line low (mode=%08x dir=%08x do=%08x DI=%08x)\n",
+-		    rb_rd32(rb_gpio, b->mode_off), rb_rd32(rb_gpio, b->dir_off),
+-		    rb_rd32(rb_gpio, b->do_off), rb_rd32(rb_gpio, b->di_off));
+-		rb_i2c_recover(b);
+-		if (!(rb_rd32(rb_gpio, b->di_off) & (1u << 4)) ||
+-		    !(rb_rd32(rb_gpio, b->di_off) & (1u << 5))) {
+-			printf("RUBY BATTERY: i2c5 line stuck\n");
+-			return EIO;
+-		}
+-	}
+-	return 0;
+-}
+-
+-static void
+-rb_bus_release(void)
+-{
+-	vm_offset_t cfg = rb_cfg;
+-	struct rb_i2c_bus *b = &rb_bus;
+-
+-	if (!b->taken)
+-		return;
+-	rb_field_set(rb_gpio, b->mode_off, b->mode_scl_shift, 4, b->s_mode_scl);
+-	rb_field_set(rb_gpio, b->mode_off, b->mode_sda_shift, 4, b->s_mode_sda);
+-	rb_field_set(rb_gpio, b->dir_off, 4, 1, b->s_dir_scl);
+-	rb_field_set(rb_gpio, b->dir_off, 5, 1, b->s_dir_sda);
+-	rb_field_set(rb_gpio, b->do_off, 4, 1, b->s_do_scl);
+-	rb_field_set(rb_gpio, b->do_off, 5, 1, b->s_do_sda);
+-	rb_field_set(cfg, b->ies_off, b->ies_scl_shift, 1, b->s_ies_scl);
+-	rb_field_set(cfg, b->ies_off, b->ies_sda_shift, 1, b->s_ies_sda);
+-	rb_field_set(cfg, b->pu_off, b->pu_scl_shift, 1, b->s_pu_scl);
+-	rb_field_set(cfg, b->pu_off, b->pu_sda_shift, 1, b->s_pu_sda);
+-	rb_field_set(cfg, b->pd_off, b->pd_scl_shift, 1, b->s_pd_scl);
+-	rb_field_set(cfg, b->pd_off, b->pd_sda_shift, 1, b->s_pd_sda);
+-	rb_field_set(cfg, b->smt_off, b->smt_scl_shift, 1, b->s_smt_scl);
+-	rb_field_set(cfg, b->smt_off, b->smt_sda_shift, 1, b->s_smt_sda);
+-	rb_field_set(cfg, b->drv_scl_off, b->drv_scl_shift, 3, b->s_drv_scl);
+-	rb_field_set(cfg, b->drv_sda_off, b->drv_sda_shift, 3, b->s_drv_sda);
+-	b->taken = false;
+-}
+-
+-static int
+-rb_i2c_read_regs(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t len)
+-{
+-	uint32_t i;
+-	int ack, v;
+-
+-	if (len == 0 || len > 16)
+-		return EINVAL;
+-	if (!rb_i2c_start(&rb_bus))
+-		return ETIMEDOUT;
+-	if ((ack = rb_i2c_write_byte(&rb_bus, (uint8_t)(addr << 1))) != 1)
+-		goto out;
+-	if ((ack = rb_i2c_write_byte(&rb_bus, reg)) != 1)
+-		goto out;
+-	if (!rb_i2c_start(&rb_bus)) {
+-		rb_i2c_stop(&rb_bus);
+-		return ETIMEDOUT;
+-	}
+-	if ((ack = rb_i2c_write_byte(&rb_bus, (uint8_t)((addr << 1) | 1))) != 1)
+-		goto out;
+-	for (i = 0; i < len; i++) {
+-		v = rb_i2c_read_byte(&rb_bus, i + 1 < len);
+-		if (v < 0) {
+-			rb_i2c_stop(&rb_bus);
+-			return ETIMEDOUT;
+-		}
+-		buf[i] = (uint8_t)v;
+-	}
+-	rb_i2c_stop(&rb_bus);
+-	return 0;
+-
+-out:
+-	rb_i2c_stop(&rb_bus);
+-	return ack < 0 ? ETIMEDOUT : ENXIO;
+-}
+-
+-static void
+-rb_bus_init(void)
+-{
+-	struct rb_i2c_bus *b = &rb_bus;
+-
+-	memset(b, 0, sizeof(*b));
+-	b->bus = 5;
+-	b->dir_off = 0x040;
+-	b->do_off = 0x140;
+-	b->di_off = 0x240;
+-	b->mode_off = 0x400;
+-	b->mode_scl_shift = 16;
+-	b->mode_sda_shift = 20;
+-	b->ies_off = 0x080;
+-	b->ies_scl_shift = 0;
+-	b->ies_sda_shift = 3;
+-	b->pu_off = 0x0c0;
+-	b->pu_scl_shift = 0;
+-	b->pu_sda_shift = 3;
+-	b->pd_off = 0x0a0;
+-	b->pd_scl_shift = 0;
+-	b->pd_sda_shift = 3;
+-	b->smt_off = 0x100;
+-	b->smt_scl_shift = 21;
+-	b->smt_sda_shift = 21;
+-	b->drv_scl_off = 0x020;
+-	b->drv_scl_shift = 24;
+-	b->drv_sda_off = 0x030;
+-	b->drv_sda_shift = 3;
+-}
+ 
+ int
+ ruby_i2c5_lock_init(void)
+@@ -481,7 +88,7 @@
+ 		ruby_i2c5_release();
+ 		return -1;
+ 	}
+-	rb_bus_init();
++	ruby_i2c_bus_init(&rb_bus, 5, rb_gpio, rb_cfg, "RUBY BATTERY");
+ 	ruby_i2c5_release();
+ 	rb_ready = true;
+ 	printf("RUBY BATTERY: MT6360 I2C5 read-only ready\n");
+@@ -541,16 +148,16 @@
+ 		return -1;
+ 	if (ruby_i2c5_acquire() != 0)
+ 		return -1;
+-	if (rb_bus_take() != 0) {
+-		rb_bus_release();
++	if (ruby_i2c_take(&rb_bus) != 0) {
++		ruby_i2c_release(&rb_bus);
+ 		ruby_i2c5_release();
+ 		return -1;
+ 	}
+-	e1 = rb_i2c_read_regs(RB_I2C_ADDR, RB_REG_OCV, ocv, 2);
+-	e2 = rb_i2c_read_regs(RB_I2C_ADDR, RB_REG_CHG, &chg, 1);
+-	e3 = rb_i2c_read_regs(RB_I2C_ADDR, RB_REG_FOD, &fod, 1);
+-	e4 = rb_i2c_read_regs(RB_I2C_ADDR, RB_REG_USB, &usb, 1);
+-	rb_bus_release();
++	e1 = ruby_i2c_read_regs(&rb_bus, RB_I2C_ADDR, RB_REG_OCV, ocv, 2);
++	e2 = ruby_i2c_read_regs(&rb_bus, RB_I2C_ADDR, RB_REG_CHG, &chg, 1);
++	e3 = ruby_i2c_read_regs(&rb_bus, RB_I2C_ADDR, RB_REG_FOD, &fod, 1);
++	e4 = ruby_i2c_read_regs(&rb_bus, RB_I2C_ADDR, RB_REG_USB, &usb, 1);
++	ruby_i2c_release(&rb_bus);
+ 	ruby_i2c5_release();
+ 
+ 	if (e1 || e2 || e3)
+--- a/bsd/dev/ruby_hal.c
++++ b/bsd/dev/ruby_hal.c
+@@ -9,6 +9,8 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/errno.h>
++#include <machine/machine_routines.h>
++#include <libkern/libkern.h>
+ 
+ #include "ruby_hal.h"
+ 
+@@ -69,6 +71,371 @@
+ 	ruby_wr32(base, off, v);
+ }
+ 
++/* ---- I2C bit-bang ------------------------------------------------------ */
++
++static void
++ruby_i2c_delay(struct ruby_i2c_bus *b)
++{
++	delay(5);
++	if (b->budget)
++		b->budget--;
++}
++
++static void
++ruby_scl_release(struct ruby_i2c_bus *b)
++{
++	ruby_field_set(b->gpio, b->do_off, 4, 1, 1);
++	ruby_field_set(b->gpio, b->dir_off, 4, 1, 0);
++}
++
++static void
++ruby_scl_low(struct ruby_i2c_bus *b)
++{
++	ruby_field_set(b->gpio, b->do_off, 4, 1, 0);
++	ruby_field_set(b->gpio, b->dir_off, 4, 1, 1);
++}
++
++static void
++ruby_sda_release(struct ruby_i2c_bus *b)
++{
++	ruby_field_set(b->gpio, b->do_off, 5, 1, 1);
++	ruby_field_set(b->gpio, b->dir_off, 5, 1, 0);
++}
++
++static void
++ruby_sda_low(struct ruby_i2c_bus *b)
++{
++	ruby_field_set(b->gpio, b->do_off, 5, 1, 0);
++	ruby_field_set(b->gpio, b->dir_off, 5, 1, 1);
++}
++
++/* Release SCL and wait for a slave to stop stretching it. */
++static int
++ruby_scl_high(struct ruby_i2c_bus *b)
++{
++	int i;
++
++	ruby_scl_release(b);
++	for (i = 0; i < 1000; i++) {
++		if (ruby_rd32(b->gpio, b->di_off) & (1u << 4))
++			return 1;
++		if (!b->budget)
++			return 0;
++		delay(1);
++	}
++	return 0;
++}
++
++int
++ruby_i2c_start(struct ruby_i2c_bus *b)
++{
++	b->budget = RUBY_I2C_BUDGET;
++	ruby_sda_release(b);
++	if (!ruby_scl_high(b))
++		return 0;
++	ruby_i2c_delay(b);
++	ruby_sda_low(b);
++	ruby_i2c_delay(b);
++	ruby_scl_low(b);
++	ruby_i2c_delay(b);
++	return 1;
++}
++
++void
++ruby_i2c_stop(struct ruby_i2c_bus *b)
++{
++	ruby_sda_low(b);
++	ruby_i2c_delay(b);
++	(void)ruby_scl_high(b);
++	ruby_i2c_delay(b);
++	ruby_sda_release(b);
++	ruby_i2c_delay(b);
++}
++
++static int
++ruby_i2c_write_bit(struct ruby_i2c_bus *b, int bit)
++{
++	if (bit)
++		ruby_sda_release(b);
++	else
++		ruby_sda_low(b);
++	ruby_i2c_delay(b);
++	if (!ruby_scl_high(b))
++		return 0;
++	ruby_i2c_delay(b);
++	ruby_scl_low(b);
++	ruby_i2c_delay(b);
++	return 1;
++}
++
++/* Returns the bit, or -1 on a stretched/hung SCL. */
++static int
++ruby_i2c_read_bit(struct ruby_i2c_bus *b)
++{
++	int bit;
++
++	ruby_sda_release(b);
++	ruby_i2c_delay(b);
++	if (!ruby_scl_high(b))
++		return -1;
++	ruby_i2c_delay(b);
++	bit = (ruby_rd32(b->gpio, b->di_off) & (1u << 5)) != 0;
++	ruby_scl_low(b);
++	ruby_i2c_delay(b);
++	return bit;
++}
++
++/* 1 = ACK, 0 = NAK, -1 = timeout/stuck bus. */
++int
++ruby_i2c_write_byte(struct ruby_i2c_bus *b, uint8_t val)
++{
++	int i, ack;
++
++	for (i = 7; i >= 0; i--) {
++		if (!ruby_i2c_write_bit(b, (val >> i) & 1))
++			return -1;
++	}
++	ruby_sda_release(b);
++	ruby_i2c_delay(b);
++	if (!ruby_scl_high(b))
++		return -1;
++	ruby_i2c_delay(b);
++	ack = (ruby_rd32(b->gpio, b->di_off) & (1u << 5)) == 0;
++	ruby_scl_low(b);
++	ruby_i2c_delay(b);
++	return ack ? 1 : 0;
++}
++
++int
++ruby_i2c_read_byte(struct ruby_i2c_bus *b, int ack)
++{
++	uint8_t val = 0;
++	int i, bit;
++
++	for (i = 7; i >= 0; i--) {
++		bit = ruby_i2c_read_bit(b);
++		if (bit < 0)
++			return -1;
++		if (bit)
++			val |= (uint8_t)(1u << i);
++	}
++	if (ack)
++		ruby_sda_low(b);
++	else
++		ruby_sda_release(b);
++	ruby_i2c_delay(b);
++	if (!ruby_scl_high(b))
++		return -1;
++	ruby_i2c_delay(b);
++	ruby_scl_low(b);
++	ruby_i2c_delay(b);
++	ruby_sda_release(b);
++	return val;
++}
++
++void
++ruby_i2c_recover(struct ruby_i2c_bus *b)
++{
++	int i;
++
++	ruby_sda_release(b);
++	ruby_scl_release(b);
++	delay(10);
++	for (i = 0; i < 9; i++) {
++		ruby_scl_low(b);
++		ruby_i2c_delay(b);
++		ruby_scl_release(b);
++		ruby_i2c_delay(b);
++	}
++	ruby_sda_low(b);
++	ruby_i2c_delay(b);
++	ruby_scl_release(b);
++	ruby_i2c_delay(b);
++	ruby_sda_release(b);
++	ruby_i2c_delay(b);
++	printf("%s: i2c%u recover DI=%08x\n", b->tag, (unsigned)b->bus,
++	    ruby_rd32(b->gpio, b->di_off));
++}
++
++int
++ruby_i2c_take(struct ruby_i2c_bus *b)
++{
++	uintptr_t cfg = b->cfg;
++
++	if (b->taken)
++		return 0;
++	if (!b->gpio || !cfg)
++		return ENODEV;
++	b->s_mode_scl = ruby_field_get(b->gpio, b->mode_off, b->mode_scl_shift, 4);
++	b->s_mode_sda = ruby_field_get(b->gpio, b->mode_off, b->mode_sda_shift, 4);
++	b->s_dir_scl = ruby_field_get(b->gpio, b->dir_off, 4, 1);
++	b->s_dir_sda = ruby_field_get(b->gpio, b->dir_off, 5, 1);
++	b->s_do_scl = ruby_field_get(b->gpio, b->do_off, 4, 1);
++	b->s_do_sda = ruby_field_get(b->gpio, b->do_off, 5, 1);
++	b->s_ies_scl = ruby_field_get(cfg, b->ies_off, b->ies_scl_shift, 1);
++	b->s_ies_sda = ruby_field_get(cfg, b->ies_off, b->ies_sda_shift, 1);
++	b->s_pu_scl = ruby_field_get(cfg, b->pu_off, b->pu_scl_shift, 1);
++	b->s_pu_sda = ruby_field_get(cfg, b->pu_off, b->pu_sda_shift, 1);
++	b->s_pd_scl = ruby_field_get(cfg, b->pd_off, b->pd_scl_shift, 1);
++	b->s_pd_sda = ruby_field_get(cfg, b->pd_off, b->pd_sda_shift, 1);
++	b->s_smt_scl = ruby_field_get(cfg, b->smt_off, b->smt_scl_shift, 1);
++	b->s_smt_sda = ruby_field_get(cfg, b->smt_off, b->smt_sda_shift, 1);
++	b->s_drv_scl = ruby_field_get(cfg, b->drv_scl_off, b->drv_scl_shift, 3);
++	b->s_drv_sda = ruby_field_get(cfg, b->drv_sda_off, b->drv_sda_shift, 3);
++	b->taken = 1;
++
++	ruby_field_set(b->gpio, b->mode_off, b->mode_scl_shift, 4, 0);
++	ruby_field_set(b->gpio, b->mode_off, b->mode_sda_shift, 4, 0);
++	ruby_field_set(b->gpio, b->dir_off, 4, 1, 0);
++	ruby_field_set(b->gpio, b->dir_off, 5, 1, 0);
++	ruby_field_set(b->gpio, b->do_off, 4, 1, 1);
++	ruby_field_set(b->gpio, b->do_off, 5, 1, 1);
++	ruby_field_set(cfg, b->ies_off, b->ies_scl_shift, 1, 1);
++	ruby_field_set(cfg, b->ies_off, b->ies_sda_shift, 1, 1);
++	ruby_field_set(cfg, b->pu_off, b->pu_scl_shift, 1, 1);
++	ruby_field_set(cfg, b->pu_off, b->pu_sda_shift, 1, 1);
++	ruby_field_set(cfg, b->pd_off, b->pd_scl_shift, 1, 0);
++	ruby_field_set(cfg, b->pd_off, b->pd_sda_shift, 1, 0);
++	delay(20);
++
++	if (!(ruby_rd32(b->gpio, b->di_off) & (1u << 4)) ||
++	    !(ruby_rd32(b->gpio, b->di_off) & (1u << 5))) {
++		printf("%s: i2c%u line low (mode=%08x dir=%08x do=%08x DI=%08x)\n",
++		    b->tag, (unsigned)b->bus, ruby_rd32(b->gpio, b->mode_off),
++		    ruby_rd32(b->gpio, b->dir_off), ruby_rd32(b->gpio, b->do_off),
++		    ruby_rd32(b->gpio, b->di_off));
++		ruby_i2c_recover(b);
++		if (!(ruby_rd32(b->gpio, b->di_off) & (1u << 4)) ||
++		    !(ruby_rd32(b->gpio, b->di_off) & (1u << 5))) {
++			printf("%s: i2c%u line stuck; check pull-up/pinmux\n",
++			    b->tag, (unsigned)b->bus);
++			return EIO;
++		}
++	}
++	return 0;
++}
++
++void
++ruby_i2c_release(struct ruby_i2c_bus *b)
++{
++	uintptr_t cfg = b->cfg;
++
++	if (!b->taken)
++		return;
++	ruby_field_set(b->gpio, b->mode_off, b->mode_scl_shift, 4, b->s_mode_scl);
++	ruby_field_set(b->gpio, b->mode_off, b->mode_sda_shift, 4, b->s_mode_sda);
++	ruby_field_set(b->gpio, b->dir_off, 4, 1, b->s_dir_scl);
++	ruby_field_set(b->gpio, b->dir_off, 5, 1, b->s_dir_sda);
++	ruby_field_set(b->gpio, b->do_off, 4, 1, b->s_do_scl);
++	ruby_field_set(b->gpio, b->do_off, 5, 1, b->s_do_sda);
++	ruby_field_set(cfg, b->ies_off, b->ies_scl_shift, 1, b->s_ies_scl);
++	ruby_field_set(cfg, b->ies_off, b->ies_sda_shift, 1, b->s_ies_sda);
++	ruby_field_set(cfg, b->pu_off, b->pu_scl_shift, 1, b->s_pu_scl);
++	ruby_field_set(cfg, b->pu_off, b->pu_sda_shift, 1, b->s_pu_sda);
++	ruby_field_set(cfg, b->pd_off, b->pd_scl_shift, 1, b->s_pd_scl);
++	ruby_field_set(cfg, b->pd_off, b->pd_sda_shift, 1, b->s_pd_sda);
++	ruby_field_set(cfg, b->smt_off, b->smt_scl_shift, 1, b->s_smt_scl);
++	ruby_field_set(cfg, b->smt_off, b->smt_sda_shift, 1, b->s_smt_sda);
++	ruby_field_set(cfg, b->drv_scl_off, b->drv_scl_shift, 3, b->s_drv_scl);
++	ruby_field_set(cfg, b->drv_sda_off, b->drv_sda_shift, 3, b->s_drv_sda);
++	b->taken = 0;
++}
++
++void
++ruby_i2c_bus_init(struct ruby_i2c_bus *b, uint8_t bus, uintptr_t gpio,
++    uintptr_t cfg, const char *tag)
++{
++	memset(b, 0, sizeof(*b));
++	b->bus = bus;
++	b->gpio = gpio;
++	b->cfg = cfg;
++	b->tag = tag;
++	if (bus == 5) {
++		b->dir_off = 0x040;
++		b->do_off = 0x140;
++		b->di_off = 0x240;
++		b->mode_off = 0x400;
++		b->mode_scl_shift = 16;
++		b->mode_sda_shift = 20;
++		b->ies_off = 0x080;
++		b->ies_scl_shift = 0;
++		b->ies_sda_shift = 3;
++		b->pu_off = 0x0c0;
++		b->pu_scl_shift = 0;
++		b->pu_sda_shift = 3;
++		b->pd_off = 0x0a0;
++		b->pd_scl_shift = 0;
++		b->pd_sda_shift = 3;
++		b->smt_off = 0x100;
++		b->smt_scl_shift = 21;
++		b->smt_sda_shift = 21;
++		b->drv_scl_off = 0x020;
++		b->drv_scl_shift = 24;
++		b->drv_sda_off = 0x030;
++		b->drv_sda_shift = 3;
++	} else {
++		b->dir_off = 0x010;
++		b->do_off = 0x110;
++		b->di_off = 0x210;
++		b->mode_off = 0x340;
++		b->mode_scl_shift = 16;
++		b->mode_sda_shift = 20;
++		b->ies_off = 0x050;
++		b->ies_scl_shift = 17;
++		b->ies_sda_shift = 18;
++		b->pu_off = 0x080;
++		b->pu_scl_shift = 5;
++		b->pu_sda_shift = 6;
++		b->pd_off = 0x060;
++		b->pd_scl_shift = 5;
++		b->pd_sda_shift = 6;
++		b->smt_off = 0x0f0;
++		b->smt_scl_shift = 14;
++		b->smt_sda_shift = 15;
++		b->drv_scl_off = 0x010;
++		b->drv_scl_shift = 12;
++		b->drv_sda_off = 0x010;
++		b->drv_sda_shift = 15;
++	}
++}
++
++int
++ruby_i2c_read_regs(struct ruby_i2c_bus *b, uint8_t addr, uint8_t reg,
++    uint8_t *buf, uint32_t len)
++{
++	uint32_t i;
++	int ack, v;
++
++	if (len == 0 || len > 16)
++		return EINVAL;
++	if (!ruby_i2c_start(b))
++		return ETIMEDOUT;
++	if ((ack = ruby_i2c_write_byte(b, (uint8_t)(addr << 1))) != 1)
++		goto out;
++	if ((ack = ruby_i2c_write_byte(b, reg)) != 1)
++		goto out;
++	if (!ruby_i2c_start(b)) {
++		ruby_i2c_stop(b);
++		return ETIMEDOUT;
++	}
++	if ((ack = ruby_i2c_write_byte(b, (uint8_t)((addr << 1) | 1))) != 1)
++		goto out;
++	for (i = 0; i < len; i++) {
++		v = ruby_i2c_read_byte(b, i + 1 < len);
++		if (v < 0) {
++			ruby_i2c_stop(b);
++			return ETIMEDOUT;
++		}
++		buf[i] = (uint8_t)v;
++	}
++	ruby_i2c_stop(b);
++	return 0;
++
++out:
++	ruby_i2c_stop(b);
++	return ack < 0 ? ETIMEDOUT : ENXIO;
++}
++
+ int
+ ruby_pwrap_read(uintptr_t pwrap, uint16_t reg, uint16_t *val)
+ {
+--- a/bsd/dev/ruby_hal.h
++++ b/bsd/dev/ruby_hal.h
+@@ -3,6 +3,44 @@
+ 
+ #include <stdint.h>
+ 
++#define RUBY_I2C_BUDGET 4000u
++
++struct ruby_i2c_bus {
++	uint8_t bus;
++	uintptr_t gpio, cfg;
++	uint32_t dir_off, do_off, di_off;
++	uint32_t mode_off, mode_scl_shift, mode_sda_shift;
++	uint32_t ies_off, ies_scl_shift, ies_sda_shift;
++	uint32_t pu_off, pu_scl_shift, pu_sda_shift;
++	uint32_t pd_off, pd_scl_shift, pd_sda_shift;
++	uint32_t smt_off, smt_scl_shift, smt_sda_shift;
++	uint32_t drv_scl_off, drv_scl_shift;
++	uint32_t drv_sda_off, drv_sda_shift;
++	uint32_t taken;
++	uint32_t s_mode_scl, s_mode_sda;
++	uint32_t s_dir_scl, s_dir_sda;
++	uint32_t s_do_scl, s_do_sda;
++	uint32_t s_ies_scl, s_ies_sda;
++	uint32_t s_pu_scl, s_pu_sda;
++	uint32_t s_pd_scl, s_pd_sda;
++	uint32_t s_smt_scl, s_smt_sda;
++	uint32_t s_drv_scl, s_drv_sda;
++	uint32_t budget;
++	const char *tag;
++};
++
++void ruby_i2c_bus_init(struct ruby_i2c_bus *b, uint8_t bus, uintptr_t gpio,
++    uintptr_t cfg, const char *tag);
++int ruby_i2c_take(struct ruby_i2c_bus *b);
++void ruby_i2c_release(struct ruby_i2c_bus *b);
++int ruby_i2c_start(struct ruby_i2c_bus *b);
++void ruby_i2c_stop(struct ruby_i2c_bus *b);
++int ruby_i2c_write_byte(struct ruby_i2c_bus *b, uint8_t val);
++int ruby_i2c_read_byte(struct ruby_i2c_bus *b, int ack);
++int ruby_i2c_read_regs(struct ruby_i2c_bus *b, uint8_t addr, uint8_t reg,
++    uint8_t *buf, uint32_t len);
++void ruby_i2c_recover(struct ruby_i2c_bus *b);
++
+ uint32_t ruby_rd32(uintptr_t base, uint32_t off);
+ void ruby_wr32(uintptr_t base, uint32_t off, uint32_t val);
+ uint16_t ruby_rd16(uintptr_t base, uint32_t off);
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -24,6 +24,7 @@
+ 
+ #include "ruby_probe.h"
+ #include "ruby_battery.h"
++#include "ruby_hal.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+@@ -96,8 +97,6 @@
+ #define PR_WDT_SWRST_KEY 0x1209u
+ #define PR_BOOT_BOOTLOADER 3u
+ 
+-#define PR_I2C_BUDGET    4000u   /* 5 us phases: about 20 ms per transaction */
+-
+ /*
+  * R0 read-only map.  These offsets are taken from the vendor drivers:
+  * i2c-mtk.h (CONTROL/TIMING/HS/CLOCK_DIV only; never DATA_PORT or FIFO),
+@@ -124,29 +123,6 @@
+ #define PR_SPM_XPU_STA2  0x0efcu
+ #define PR_SPM_OTHER_STA 0x0178u
+ 
+-struct pr_i2c_bus {
+-	uint8_t  bus;
+-	uint32_t dir_off, do_off, di_off;
+-	uint32_t mode_off;
+-	uint32_t mode_scl_shift, mode_sda_shift;
+-	uint32_t iocfg_idx;
+-	uint32_t ies_off, ies_scl_shift, ies_sda_shift;
+-	uint32_t pu_off, pu_scl_shift, pu_sda_shift;
+-	uint32_t pd_off, pd_scl_shift, pd_sda_shift;
+-	uint32_t smt_off, smt_scl_shift, smt_sda_shift;
+-	uint32_t drv_scl_off, drv_scl_shift;
+-	uint32_t drv_sda_off, drv_sda_shift;
+-	bool     taken;
+-	uint32_t s_mode_scl, s_mode_sda;
+-	uint32_t s_dir_scl, s_dir_sda;
+-	uint32_t s_do_scl, s_do_sda;
+-	uint32_t s_ies_scl, s_ies_sda;
+-	uint32_t s_pu_scl, s_pu_sda;
+-	uint32_t s_pd_scl, s_pd_sda;
+-	uint32_t s_smt_scl, s_smt_sda;
+-	uint32_t s_drv_scl, s_drv_sda;
+-};
+-
+ struct pr_gate {
+ 	const char *name;
+ 	int which;              /* 0 = IFRAO, 1 = imp_iic_s, 2 = imp_iic_n */
+@@ -158,7 +134,7 @@
+ 	vm_offset_t ifrao, imp_s, imp_n;
+ 	vm_offset_t i2c5, i2c6, spi3, scpsys;
+ 	vm_offset_t iocfg[8];
+-	struct pr_i2c_bus i2c[2];
++	struct ruby_i2c_bus i2c[2];
+ 	bool ready;
+ 	bool probe_writes;
+ 	bool pmic_writes;
+@@ -184,7 +160,6 @@
+ 	{ "imp_iic_n", 2, 0xe08u, 0xe04u, 0xe00u },
+ };
+ 
+-static uint32_t pr_i2c_budget;
+ static uint32_t pr_snap_lines;
+ static bool pr_snap_trunc;
+ 
+@@ -343,166 +318,6 @@
+ 
+ /* ---- I2C bit-bang ------------------------------------------------------ */
+ 
+-static void
+-pr_i2c_delay(void)
+-{
+-	delay(5);
+-	if (pr_i2c_budget)
+-		pr_i2c_budget--;
+-}
+-
+-static void
+-pr_scl_release(struct pr_i2c_bus *b)
+-{
+-	pr_field_set(pr.gpio, b->do_off, 4, 1, 1);
+-	pr_field_set(pr.gpio, b->dir_off, 4, 1, 0);
+-}
+-
+-static void
+-pr_scl_low(struct pr_i2c_bus *b)
+-{
+-	pr_field_set(pr.gpio, b->do_off, 4, 1, 0);
+-	pr_field_set(pr.gpio, b->dir_off, 4, 1, 1);
+-}
+-
+-static void
+-pr_sda_release(struct pr_i2c_bus *b)
+-{
+-	pr_field_set(pr.gpio, b->do_off, 5, 1, 1);
+-	pr_field_set(pr.gpio, b->dir_off, 5, 1, 0);
+-}
+-
+-static void
+-pr_sda_low(struct pr_i2c_bus *b)
+-{
+-	pr_field_set(pr.gpio, b->do_off, 5, 1, 0);
+-	pr_field_set(pr.gpio, b->dir_off, 5, 1, 1);
+-}
+-
+-/* Release SCL and wait for a slave to stop stretching it. */
+-static int
+-pr_scl_high(struct pr_i2c_bus *b)
+-{
+-	int i;
+-
+-	pr_scl_release(b);
+-	for (i = 0; i < 1000; i++) {
+-		if (pr_rd32(pr.gpio, b->di_off) & (1u << 4))
+-			return 1;
+-		if (!pr_i2c_budget)
+-			return 0;
+-		delay(1);
+-	}
+-	return 0;
+-}
+-
+-static int
+-pr_i2c_start(struct pr_i2c_bus *b)
+-{
+-	pr_i2c_budget = PR_I2C_BUDGET;
+-	pr_sda_release(b);
+-	if (!pr_scl_high(b))
+-		return 0;
+-	pr_i2c_delay();
+-	pr_sda_low(b);
+-	pr_i2c_delay();
+-	pr_scl_low(b);
+-	pr_i2c_delay();
+-	return 1;
+-}
+-
+-static void
+-pr_i2c_stop(struct pr_i2c_bus *b)
+-{
+-	pr_sda_low(b);
+-	pr_i2c_delay();
+-	(void)pr_scl_high(b);
+-	pr_i2c_delay();
+-	pr_sda_release(b);
+-	pr_i2c_delay();
+-}
+-
+-static int
+-pr_i2c_write_bit(struct pr_i2c_bus *b, int bit)
+-{
+-	if (bit)
+-		pr_sda_release(b);
+-	else
+-		pr_sda_low(b);
+-	pr_i2c_delay();
+-	if (!pr_scl_high(b))
+-		return 0;
+-	pr_i2c_delay();
+-	pr_scl_low(b);
+-	pr_i2c_delay();
+-	return 1;
+-}
+-
+-/* Returns the bit, or -1 on a stretched/hung SCL. */
+-static int
+-pr_i2c_read_bit(struct pr_i2c_bus *b)
+-{
+-	int bit;
+-
+-	pr_sda_release(b);
+-	pr_i2c_delay();
+-	if (!pr_scl_high(b))
+-		return -1;
+-	pr_i2c_delay();
+-	bit = (pr_rd32(pr.gpio, b->di_off) & (1u << 5)) != 0;
+-	pr_scl_low(b);
+-	pr_i2c_delay();
+-	return bit;
+-}
+-
+-/* 1 = ACK, 0 = NAK, -1 = timeout/stuck bus. */
+-static int
+-pr_i2c_write_byte(struct pr_i2c_bus *b, uint8_t val)
+-{
+-	int i, ack;
+-
+-	for (i = 7; i >= 0; i--) {
+-		if (!pr_i2c_write_bit(b, (val >> i) & 1))
+-			return -1;
+-	}
+-	pr_sda_release(b);
+-	pr_i2c_delay();
+-	if (!pr_scl_high(b))
+-		return -1;
+-	pr_i2c_delay();
+-	ack = (pr_rd32(pr.gpio, b->di_off) & (1u << 5)) == 0;
+-	pr_scl_low(b);
+-	pr_i2c_delay();
+-	return ack ? 1 : 0;
+-}
+-
+-static int
+-pr_i2c_read_byte(struct pr_i2c_bus *b, int ack)
+-{
+-	uint8_t val = 0;
+-	int i, bit;
+-
+-	for (i = 7; i >= 0; i--) {
+-		bit = pr_i2c_read_bit(b);
+-		if (bit < 0)
+-			return -1;
+-		if (bit)
+-			val |= (uint8_t)(1u << i);
+-	}
+-	if (ack)
+-		pr_sda_low(b);
+-	else
+-		pr_sda_release(b);
+-	pr_i2c_delay();
+-	if (!pr_scl_high(b))
+-		return -1;
+-	pr_i2c_delay();
+-	pr_scl_low(b);
+-	pr_i2c_delay();
+-	pr_sda_release(b);
+-	return val;
+-}
+-
+ static uint8_t
+ pr_crc8(const uint8_t *p, int n)
+ {
+@@ -520,34 +335,16 @@
+ }
+ 
+ static void
+-pr_i2c_recover(struct pr_i2c_bus *b)
++pr_i2c_recover(struct ruby_i2c_bus *b)
+ {
+-	int i;
+-
+-	pr_sda_release(b);
+-	pr_scl_release(b);
+-	delay(10);
+-	for (i = 0; i < 9; i++) {
+-		pr_scl_low(b);
+-		pr_i2c_delay();
+-		pr_scl_release(b);
+-		pr_i2c_delay();
+-	}
+-	pr_sda_low(b);
+-	pr_i2c_delay();
+-	pr_scl_release(b);
+-	pr_i2c_delay();
+-	pr_sda_release(b);
+-	pr_i2c_delay();
+-	printf("RUBY PROBE: i2c%u recover DI=%08x\n", (unsigned)b->bus,
+-	    pr_rd32(pr.gpio, b->di_off));
++	ruby_i2c_recover(b);
+ }
+ 
+ static int
+-pr_i2c_take(struct pr_i2c_bus *b)
++pr_i2c_take(struct ruby_i2c_bus *b)
+ {
+-	vm_offset_t cfg;
+ 	bool locked = false;
++	int err;
+ 
+ 	if (b->bus == 5) {
+ 		ruby_battery_lock();
+@@ -558,60 +355,11 @@
+ 			ruby_battery_unlock();
+ 		return 0;
+ 	}
+-	if (!pr.gpio || !b->iocfg_idx || !pr.iocfg[b->iocfg_idx]) {
++	err = ruby_i2c_take(b);
++	if (err != 0) {
+ 		if (locked)
+ 			ruby_battery_unlock();
+-		return ENODEV;
+-	}
+-	cfg = pr.iocfg[b->iocfg_idx];
+-
+-	b->s_mode_scl = pr_field_get(pr.gpio, b->mode_off, b->mode_scl_shift, 4);
+-	b->s_mode_sda = pr_field_get(pr.gpio, b->mode_off, b->mode_sda_shift, 4);
+-	b->s_dir_scl = pr_field_get(pr.gpio, b->dir_off, 4, 1);
+-	b->s_dir_sda = pr_field_get(pr.gpio, b->dir_off, 5, 1);
+-	b->s_do_scl = pr_field_get(pr.gpio, b->do_off, 4, 1);
+-	b->s_do_sda = pr_field_get(pr.gpio, b->do_off, 5, 1);
+-	b->s_ies_scl = pr_field_get(cfg, b->ies_off, b->ies_scl_shift, 1);
+-	b->s_ies_sda = pr_field_get(cfg, b->ies_off, b->ies_sda_shift, 1);
+-	b->s_pu_scl = pr_field_get(cfg, b->pu_off, b->pu_scl_shift, 1);
+-	b->s_pu_sda = pr_field_get(cfg, b->pu_off, b->pu_sda_shift, 1);
+-	b->s_pd_scl = pr_field_get(cfg, b->pd_off, b->pd_scl_shift, 1);
+-	b->s_pd_sda = pr_field_get(cfg, b->pd_off, b->pd_sda_shift, 1);
+-	b->s_smt_scl = pr_field_get(cfg, b->smt_off, b->smt_scl_shift, 1);
+-	b->s_smt_sda = pr_field_get(cfg, b->smt_off, b->smt_sda_shift, 1);
+-	b->s_drv_scl = pr_field_get(cfg, b->drv_scl_off, b->drv_scl_shift, 3);
+-	b->s_drv_sda = pr_field_get(cfg, b->drv_sda_off, b->drv_sda_shift, 3);
+-	b->taken = true;
+-
+-	pr_field_set(pr.gpio, b->mode_off, b->mode_scl_shift, 4, 0);
+-	pr_field_set(pr.gpio, b->mode_off, b->mode_sda_shift, 4, 0);
+-	pr_field_set(pr.gpio, b->dir_off, 4, 1, 0);
+-	pr_field_set(pr.gpio, b->dir_off, 5, 1, 0);
+-	pr_field_set(pr.gpio, b->do_off, 4, 1, 1);
+-	pr_field_set(pr.gpio, b->do_off, 5, 1, 1);
+-	pr_field_set(cfg, b->ies_off, b->ies_scl_shift, 1, 1);
+-	pr_field_set(cfg, b->ies_off, b->ies_sda_shift, 1, 1);
+-	pr_field_set(cfg, b->pu_off, b->pu_scl_shift, 1, 1);
+-	pr_field_set(cfg, b->pu_off, b->pu_sda_shift, 1, 1);
+-	pr_field_set(cfg, b->pd_off, b->pd_scl_shift, 1, 0);
+-	pr_field_set(cfg, b->pd_off, b->pd_sda_shift, 1, 0);
+-	delay(20);
+-
+-	if (!(pr_rd32(pr.gpio, b->di_off) & (1u << 4)) ||
+-	    !(pr_rd32(pr.gpio, b->di_off) & (1u << 5))) {
+-		printf("RUBY PROBE: i2c%u line low (mode=%08x dir=%08x do=%08x DI=%08x)\n",
+-		    (unsigned)b->bus, pr_rd32(pr.gpio, b->mode_off),
+-		    pr_rd32(pr.gpio, b->dir_off), pr_rd32(pr.gpio, b->do_off),
+-		    pr_rd32(pr.gpio, b->di_off));
+-		pr_i2c_recover(b);
+-		if (!(pr_rd32(pr.gpio, b->di_off) & (1u << 4)) ||
+-		    !(pr_rd32(pr.gpio, b->di_off) & (1u << 5))) {
+-			printf("RUBY PROBE: i2c%u line stuck; check pull-up/pinmux\n",
+-			    (unsigned)b->bus);
+-			if (locked)
+-				ruby_battery_unlock();
+-			return EIO;
+-		}
++		return err;
+ 	}
+ 	if (b->bus == 5)
+ 		ruby_battery_taken(1);
+@@ -622,34 +370,15 @@
+ }
+ 
+ static int
+-pr_i2c_release(struct pr_i2c_bus *b)
++pr_i2c_release(struct ruby_i2c_bus *b)
+ {
+-	vm_offset_t cfg;
+-
+ 	if (!b->taken)
+ 		return 0;
+ 	if (b->bus == 5) {
+ 		ruby_battery_lock();
+ 		ruby_battery_taken(0);
+ 	}
+-	cfg = pr.iocfg[b->iocfg_idx];
+-	pr_field_set(pr.gpio, b->mode_off, b->mode_scl_shift, 4, b->s_mode_scl);
+-	pr_field_set(pr.gpio, b->mode_off, b->mode_sda_shift, 4, b->s_mode_sda);
+-	pr_field_set(pr.gpio, b->dir_off, 4, 1, b->s_dir_scl);
+-	pr_field_set(pr.gpio, b->dir_off, 5, 1, b->s_dir_sda);
+-	pr_field_set(pr.gpio, b->do_off, 4, 1, b->s_do_scl);
+-	pr_field_set(pr.gpio, b->do_off, 5, 1, b->s_do_sda);
+-	pr_field_set(cfg, b->ies_off, b->ies_scl_shift, 1, b->s_ies_scl);
+-	pr_field_set(cfg, b->ies_off, b->ies_sda_shift, 1, b->s_ies_sda);
+-	pr_field_set(cfg, b->pu_off, b->pu_scl_shift, 1, b->s_pu_scl);
+-	pr_field_set(cfg, b->pu_off, b->pu_sda_shift, 1, b->s_pu_sda);
+-	pr_field_set(cfg, b->pd_off, b->pd_scl_shift, 1, b->s_pd_scl);
+-	pr_field_set(cfg, b->pd_off, b->pd_sda_shift, 1, b->s_pd_sda);
+-	pr_field_set(cfg, b->smt_off, b->smt_scl_shift, 1, b->s_smt_scl);
+-	pr_field_set(cfg, b->smt_off, b->smt_sda_shift, 1, b->s_smt_sda);
+-	pr_field_set(cfg, b->drv_scl_off, b->drv_scl_shift, 3, b->s_drv_scl);
+-	pr_field_set(cfg, b->drv_sda_off, b->drv_sda_shift, 3, b->s_drv_sda);
+-	b->taken = false;
++	ruby_i2c_release(b);
+ 	if (b->bus == 5)
+ 		ruby_battery_unlock();
+ 	printf("RUBY PROBE: i2c%u released\n", (unsigned)b->bus);
+@@ -657,28 +386,28 @@
+ }
+ 
+ static void
+-pr_i2c_line(struct pr_i2c_bus *b)
++pr_i2c_line(struct ruby_i2c_bus *b)
+ {
+-	vm_offset_t cfg;
++	uintptr_t cfg;
+ 	bool locked = false;
+ 
+ 	if (b->bus == 5) {
+ 		ruby_battery_lock();
+ 		locked = true;
+ 	}
+-	if (!pr.gpio || !b->iocfg_idx || !pr.iocfg[b->iocfg_idx]) {
++	if (!b->gpio || !b->cfg) {
+ 		printf("RUBY PROBE: i2c%u iocfg/gpio not mapped\n", (unsigned)b->bus);
+ 		if (locked)
+ 			ruby_battery_unlock();
+ 		return;
+ 	}
+-	cfg = pr.iocfg[b->iocfg_idx];
++	cfg = b->cfg;
+ 	printf("RUBY PROBE: i2c%u DI=%08x SCL=%u SDA=%u mode=%08x dir=%08x do=%08x\n",
+-	    (unsigned)b->bus, pr_rd32(pr.gpio, b->di_off),
+-	    (pr_rd32(pr.gpio, b->di_off) >> 4) & 1,
+-	    (pr_rd32(pr.gpio, b->di_off) >> 5) & 1,
+-	    pr_rd32(pr.gpio, b->mode_off), pr_rd32(pr.gpio, b->dir_off),
+-	    pr_rd32(pr.gpio, b->do_off));
++	    (unsigned)b->bus, pr_rd32(b->gpio, b->di_off),
++	    (pr_rd32(b->gpio, b->di_off) >> 4) & 1,
++	    (pr_rd32(b->gpio, b->di_off) >> 5) & 1,
++	    pr_rd32(b->gpio, b->mode_off), pr_rd32(b->gpio, b->dir_off),
++	    pr_rd32(b->gpio, b->do_off));
+ 	printf("RUBY PROBE: i2c%u ies=%08x pu=%08x pd=%08x smt=%08x drv=%08x/%08x\n",
+ 	    (unsigned)b->bus, pr_rd32(cfg, b->ies_off), pr_rd32(cfg, b->pu_off),
+ 	    pr_rd32(cfg, b->pd_off), pr_rd32(cfg, b->smt_off),
+@@ -688,19 +417,19 @@
+ }
+ 
+ static int
+-pr_i2c_scan_bus(struct pr_i2c_bus *b)
++pr_i2c_scan_bus(struct ruby_i2c_bus *b)
+ {
+ 	uint32_t addr;
+ 	int found = 0, ack;
+ 
+ 	for (addr = 0x08; addr <= 0x77; addr++) {
+-		if (!pr_i2c_start(b)) {
++		if (!ruby_i2c_start(b)) {
+ 			printf("RUBY PROBE: i2c%u scan start failed at 0x%02x\n",
+ 			    (unsigned)b->bus, addr);
+ 			return ETIMEDOUT;
+ 		}
+-		ack = pr_i2c_write_byte(b, (uint8_t)(addr << 1));
+-		pr_i2c_stop(b);
++		ack = ruby_i2c_write_byte(b, (uint8_t)(addr << 1));
++		ruby_i2c_stop(b);
+ 		if (ack == 1) {
+ 			printf("RUBY PROBE: i2c%u ack 0x%02x\n", (unsigned)b->bus, addr);
+ 			found++;
+@@ -715,67 +444,37 @@
+ }
+ 
+ static int
+-pr_i2c_read_regs(struct pr_i2c_bus *b, uint8_t addr, uint8_t reg,
++pr_i2c_read_regs(struct ruby_i2c_bus *b, uint8_t addr, uint8_t reg,
+     uint8_t *buf, uint32_t len)
+ {
+-	uint32_t i;
+-	int ack, v;
+-
+-	if (len == 0 || len > 16)
+-		return EINVAL;
+-	if (!pr_i2c_start(b))
+-		return ETIMEDOUT;
+-	if ((ack = pr_i2c_write_byte(b, (uint8_t)(addr << 1))) != 1)
+-		goto out;
+-	if ((ack = pr_i2c_write_byte(b, reg)) != 1)
+-		goto out;
+-	if (!pr_i2c_start(b)) {
+-		pr_i2c_stop(b);
+-		return ETIMEDOUT;
+-	}
+-	if ((ack = pr_i2c_write_byte(b, (uint8_t)((addr << 1) | 1))) != 1)
+-		goto out;
+-	for (i = 0; i < len; i++) {
+-		v = pr_i2c_read_byte(b, i + 1 < len);
+-		if (v < 0) {
+-			pr_i2c_stop(b);
+-			return ETIMEDOUT;
+-		}
+-		buf[i] = (uint8_t)v;
+-	}
+-	pr_i2c_stop(b);
+-	return 0;
+-
+-out:
+-	pr_i2c_stop(b);
+-	return ack < 0 ? ETIMEDOUT : ENXIO;
++	return ruby_i2c_read_regs(b, addr, reg, buf, len);
+ }
+ 
+ static int
+-pr_smb_read(struct pr_i2c_bus *b, uint8_t addr, uint8_t reg, uint8_t *val)
++pr_smb_read(struct ruby_i2c_bus *b, uint8_t addr, uint8_t reg, uint8_t *val)
+ {
+ 	uint8_t d[2], c[3];
+ 	int ack;
+ 
+-	if (!pr_i2c_start(b))
++	if (!ruby_i2c_start(b))
+ 		return ETIMEDOUT;
+-	if ((ack = pr_i2c_write_byte(b, (uint8_t)(addr << 1))) != 1)
++	if ((ack = ruby_i2c_write_byte(b, (uint8_t)(addr << 1))) != 1)
+ 		goto out;
+-	if ((ack = pr_i2c_write_byte(b, (uint8_t)(reg & 0x3f))) != 1)
++	if ((ack = ruby_i2c_write_byte(b, (uint8_t)(reg & 0x3f))) != 1)
+ 		goto out;
+-	if (!pr_i2c_start(b)) {
+-		pr_i2c_stop(b);
++	if (!ruby_i2c_start(b)) {
++		ruby_i2c_stop(b);
+ 		return ETIMEDOUT;
+ 	}
+-	if ((ack = pr_i2c_write_byte(b, (uint8_t)((addr << 1) | 1))) != 1)
++	if ((ack = ruby_i2c_write_byte(b, (uint8_t)((addr << 1) | 1))) != 1)
+ 		goto out;
+-	if ((ack = pr_i2c_read_byte(b, 1)) < 0)
++	if ((ack = ruby_i2c_read_byte(b, 1)) < 0)
+ 		goto out;
+ 	d[0] = (uint8_t)ack;
+-	if ((ack = pr_i2c_read_byte(b, 0)) < 0)
++	if ((ack = ruby_i2c_read_byte(b, 0)) < 0)
+ 		goto out;
+ 	d[1] = (uint8_t)ack;
+-	pr_i2c_stop(b);
++	ruby_i2c_stop(b);
+ 	c[0] = (uint8_t)((addr << 1) | 1);
+ 	c[1] = (uint8_t)(reg & 0x3f);
+ 	c[2] = d[0];
+@@ -785,7 +484,7 @@
+ 	return 0;
+ 
+ out:
+-	pr_i2c_stop(b);
++	ruby_i2c_stop(b);
+ 	return ack < 0 ? ETIMEDOUT : ENXIO;
+ }
+ 
+@@ -1751,7 +1450,7 @@
+ {
+ 	const char *p = pr_skip(line + 4);
+ 	uint32_t bus, addr, reg, len, i;
+-	struct pr_i2c_bus *b;
++	struct ruby_i2c_bus *b;
+ 	uint8_t buf[16], v;
+ 	int err;
+ 
+@@ -2013,62 +1712,6 @@
+ 
+ /* ---- init -------------------------------------------------------------- */
+ 
+-static void
+-pr_i2c_bus_init(struct pr_i2c_bus *b, int bus)
+-{
+-	b->bus = (uint8_t)bus;
+-	b->taken = false;
+-	if (bus == 5) {
+-		b->dir_off = 0x040;
+-		b->do_off = 0x140;
+-		b->di_off = 0x240;
+-		b->mode_off = 0x400;
+-		b->mode_scl_shift = 16;
+-		b->mode_sda_shift = 20;
+-		b->iocfg_idx = 4;
+-		b->ies_off = 0x080;
+-		b->ies_scl_shift = 0;
+-		b->ies_sda_shift = 3;
+-		b->pu_off = 0x0c0;
+-		b->pu_scl_shift = 0;
+-		b->pu_sda_shift = 3;
+-		b->pd_off = 0x0a0;
+-		b->pd_scl_shift = 0;
+-		b->pd_sda_shift = 3;
+-		b->smt_off = 0x100;
+-		b->smt_scl_shift = 21;
+-		b->smt_sda_shift = 21;
+-		b->drv_scl_off = 0x020;
+-		b->drv_scl_shift = 24;
+-		b->drv_sda_off = 0x030;
+-		b->drv_sda_shift = 3;
+-	} else {
+-		b->dir_off = 0x010;
+-		b->do_off = 0x110;
+-		b->di_off = 0x210;
+-		b->mode_off = 0x340;
+-		b->mode_scl_shift = 16;
+-		b->mode_sda_shift = 20;
+-		b->iocfg_idx = 7;
+-		b->ies_off = 0x050;
+-		b->ies_scl_shift = 17;
+-		b->ies_sda_shift = 18;
+-		b->pu_off = 0x080;
+-		b->pu_scl_shift = 5;
+-		b->pu_sda_shift = 6;
+-		b->pd_off = 0x060;
+-		b->pd_scl_shift = 5;
+-		b->pd_sda_shift = 6;
+-		b->smt_off = 0x0f0;
+-		b->smt_scl_shift = 14;
+-		b->smt_sda_shift = 15;
+-		b->drv_scl_off = 0x010;
+-		b->drv_scl_shift = 12;
+-		b->drv_sda_off = 0x010;
+-		b->drv_sda_shift = 15;
+-	}
+-}
+-
+ int
+ ruby_probe_init(void)
+ {
+@@ -2104,8 +1747,8 @@
+ 	for (i = 0; i < 8; i++)
+ 		pr.iocfg[i] = ml_io_map(pr_iocfg_pa[i], PR_REG_SIZE);
+ 
+-	pr_i2c_bus_init(&pr.i2c[0], 5);
+-	pr_i2c_bus_init(&pr.i2c[1], 6);
++	ruby_i2c_bus_init(&pr.i2c[0], 5, pr.gpio, pr.iocfg[4], "RUBY PROBE");
++	ruby_i2c_bus_init(&pr.i2c[1], 6, pr.gpio, pr.iocfg[7], "RUBY PROBE");
+ 	pr.ready = (pr.gpio != 0 && pr.pwrap != 0);
+ 	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d wrapinit=%d reboot=%d\n",
+ 	    pr.gpio != 0, pr.pwrap != 0, pr.kpd != 0, pr.wdt != 0,
