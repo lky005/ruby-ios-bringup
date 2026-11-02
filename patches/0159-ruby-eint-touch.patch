@@ -43,7 +43,7 @@
  };
  
  static struct pr_state pr;
-@@ -1142,6 +1159,140 @@
+@@ -1142,6 +1159,148 @@
  }
  
  static void
@@ -111,6 +111,14 @@
 +	printf("RUBY EINT: gic ctlr=%08x isen=%08x pnd=%08x spi256=%u\n",
 +	    gic_ctl, gic_isen, gic_pnd,
 +	    (gic_isen & PR_GIC_SPI256_BIT) != 0);
++	if (gic_ctl == 0 || gic_ctl == 0xffffffffu) {
++		printf("RUBY EINT: abort: GICD CTLR untrusted\n");
++		return 1;
++	}
++	if (gic_isen == 0xffffffffu) {
++		printf("RUBY EINT: abort: GICD ISENABLER untrusted\n");
++		return 1;
++	}
 +	if (gic_isen & PR_GIC_SPI256_BIT) {
 +		printf("RUBY EINT: abort: GIC SPI256 enabled\n");
 +		return 1;
@@ -184,7 +192,7 @@
  pr_snap_i2c_ctrl(void)
  {
  	uint32_t i;
-@@ -1375,6 +1526,7 @@
+@@ -1375,6 +1534,7 @@
  	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|found|all]\n");
  	printf("RUBY CMD: reboot bootloader (rubyreboot)\n");
  	printf("RUBY CMD: battery status\n");
@@ -192,7 +200,7 @@
  }
  
  static int
-@@ -1668,6 +1820,25 @@
+@@ -1668,6 +1828,25 @@
  		pr_cmd_battery();
  		return 1;
  	}
@@ -218,7 +226,7 @@
  	if (!strncmp(p, "reboot", 6)) {
  		if (!strcmp(p, "reboot bootloader"))
  			return pr_reboot_bootloader();
-@@ -1720,11 +1891,15 @@
+@@ -1720,11 +1899,15 @@
  	v = 0;
  	if (PE_parse_boot_argn("rubyreboot", &v, sizeof(v)) && v == 1)
  		pr.reboot_allowed = true;
@@ -234,7 +242,7 @@
  	pr.wdt = ml_io_map(PR_WDT_PA, PR_REG_SIZE);
  	pr.ifrao = ml_io_map(PR_IFRAO_PA, PR_REG_SIZE);
  	pr.imp_s = ml_io_map(PR_IMP_S_PA, PR_REG_SIZE);
-@@ -1739,13 +1914,14 @@
+@@ -1739,13 +1922,14 @@
  	ruby_i2c_bus_init(&pr.i2c[0], 5, pr.gpio, pr.iocfg[4], "RUBY PROBE");
  	ruby_i2c_bus_init(&pr.i2c[1], 6, pr.gpio, pr.iocfg[7], "RUBY PROBE");
  	pr.ready = (pr.gpio != 0 && pr.pwrap != 0);
