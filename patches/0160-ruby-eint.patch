@@ -73,7 +73,7 @@
 +static struct ruby_eint g_eint_slots[RUBY_EINT_LINES];
 +static vm_offset_t g_eint_base, g_gicd_base;
 +static lck_grp_t g_eint_lck_grp;
-+static lck_spinlock_t g_eint_lock;
++static lck_spin_t g_eint_lock;
 +static volatile int g_eint_state; /* 0 uninit, 1 init, 2 ready, 3 failed */
 +static bool g_eint_enabled;
 +
