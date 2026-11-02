@@ -461,16 +461,17 @@
  	if (e1 || e2 || e3)
 --- a/bsd/dev/ruby_hal.c
 +++ b/bsd/dev/ruby_hal.c
-@@ -9,6 +9,8 @@
+@@ -9,6 +9,9 @@
  #include <sys/param.h>
  #include <sys/systm.h>
  #include <sys/errno.h>
++#include <kern/clock.h>
 +#include <machine/machine_routines.h>
 +#include <libkern/libkern.h>
  
  #include "ruby_hal.h"
  
-@@ -69,6 +71,371 @@
+@@ -69,6 +72,371 @@
  	ruby_wr32(base, off, v);
  }
  
