@@ -553,7 +553,7 @@
  
  #define GT_GPIO_PA	0x10005000u
  #define GT_DIR(n)	(0x000u + ((n) * 0x10u))
-@@ -76,16 +106,36 @@
+@@ -76,16 +106,40 @@
  	uint32_t active;
  	int x[GT_MAX], y[GT_MAX];
  	struct ruby_eint *eint;
@@ -562,10 +562,14 @@
 +	int version_ok;
 +	uint8_t version[36];
 +	uint32_t bb_delay_us;
++	uint32_t bb_barrier;
 +	uint32_t hw_speed_khz;
 +	uint32_t boot_mode;
 +	uint32_t mode_request;
 +	uint32_t speed_request;
++	uint32_t recover_request;
++	uint32_t recover_count;
++	uint32_t fail_streak;
 +	uint32_t stop_requested;
 +	uint32_t hw_fail;
 +	uint32_t fail_next;
@@ -588,11 +592,11 @@
 +	uint32_t head_retry_ok, head_retry_fail;
 +	uint32_t ngt2_ok, ngt2_read_fail;
 +	uint32_t hw_selftest_ok, hw_selftest_fail;
-+	uint32_t hw_fail, path_switch;
++	uint32_t hw_fail, path_switch, recover;
  	uint32_t status[16];
  	uint32_t n[16];
  	uint32_t reads, us_sum, us_max;
-@@ -370,7 +420,7 @@
+@@ -370,7 +424,7 @@
  }
  
  static void
@@ -601,7 +605,7 @@
  {
  	unsigned i;
  	int b;
-@@ -394,12 +444,114 @@
+@@ -394,12 +448,127 @@
  	spi_pin(GT_CS, true);
  }
  
@@ -626,14 +630,23 @@
 +	} else {
 +		gt_do_shadow &= ~mask;
 +	}
++	if (gt.bb_barrier & 1u) {
++		__asm__ volatile("dmb oshst" ::: "memory");
++	}
 +	bb_fast_flush();
++	if (gt.bb_barrier & 2u) {
++		__asm__ volatile("dsb osh" ::: "memory");
++	}
 +}
 +
 +static bool
 +bb_fast_mi(void)
 +{
 +	uint32_t v = *(volatile uint32_t *)(gt.gpio + GT_SPI_DI);
-+	__asm__ volatile("" ::: "memory");
++
++	if (gt.bb_barrier & 4u) {
++		__asm__ volatile("dmb oshld" ::: "memory");
++	}
 +	return (v & GT_MI) != 0;
 +}
 +
@@ -643,11 +656,10 @@
 +	gt_do_shadow = *(volatile uint32_t *)(gt.gpio + GT_SPI_DO);
 +}
 +
- static void
--spi_read_req(uint8_t *tx, uint32_t addr)
++static void
 +bb_xfer_fast(const uint8_t *tx, uint8_t *rx, unsigned len)
- {
- 	unsigned i;
++{
++	unsigned i;
 +	int b;
 +	uint32_t d = __atomic_load_n(&gt.bb_delay_us, __ATOMIC_RELAXED);
 +
@@ -657,8 +669,7 @@
 +	if (d > 20) {
 +		d = 20;
 +	}
- 
--	for (i = 0; i < 40; i++) {
++
 +	bb_fast_pin(GT_CS, false);
 +	__asm__ volatile("dsb osh" ::: "memory");
 +	delay(d);
@@ -679,9 +690,13 @@
 +		if (rx) {
 +			rx[i] = r;
 +		}
++		if (gt.bb_barrier & 8u) {
++			__asm__ volatile("dsb osh" ::: "memory");
++		}
 +	}
 +	bb_fast_pin(GT_CS, true);
 +	__asm__ volatile("dsb osh" ::: "memory");
++	delay(d);
 +}
 +
 +static int
@@ -709,16 +724,18 @@
 +	}
 +}
 +
-+static void
+ static void
+-spi_read_req(uint8_t *tx, uint32_t addr)
 +spi_read_req(uint8_t *tx, uint32_t addr, unsigned total)
-+{
-+	unsigned i;
-+
+ {
+ 	unsigned i;
+ 
+-	for (i = 0; i < 40; i++) {
 +	for (i = 0; i < total; i++) {
  		tx[i] = 0;
  	}
  	tx[0] = 0xf1;
-@@ -412,12 +564,51 @@
+@@ -412,12 +581,51 @@
  	tx[7] = 0xff;
  }
  
@@ -772,7 +789,7 @@
  }
  
  static bool
-@@ -435,11 +626,11 @@
+@@ -435,11 +643,11 @@
  		for (i = 0; i < 8; i++) {
  			tx[5 + i] = 0xaa;
  		}
@@ -787,7 +804,7 @@
  		for (i = 0; i < 8; i++) {
  			if (rx[8 + i] != 0xaa) {
  				break;
-@@ -460,16 +651,23 @@
+@@ -460,16 +668,23 @@
  	uint32_t sum = 0;
  	int i;
  
@@ -815,7 +832,29 @@
  }
  
  static bool
-@@ -564,14 +762,11 @@
+@@ -510,13 +725,19 @@
+ 	printf("SWEET GT: LDO3 en=%02x vout=%02x, LDO2 en=%02x vout=%02x\n",
+ 	    en3, v3, en2, v2);
+ 
+-	/* Power-cycle both rails before changing VOUT. */
++	/* Power-cycle both rails before changing VOUT.  Drive reset and the
++	 * IOVDD switch low while the rails are off so a stuck SPI state is
++	 * actually cleared, not just SoC-reset. */
+ 	if (!pmic_write(GT_LDO3_EN, en3 & ~0x40) ||
+ 	    !pmic_write(GT_LDO2_EN, en2 & ~0x40)) {
+ 		printf("SWEET GT: PMIC disable failed; abort\n");
+ 		goto fail;
+ 	}
+-	gt_wait(20);
++	gt_wr(GT_RESET_DIR, gt_rd(GT_RESET_DIR) | GT_RESET);
++	gt_wr(GT_RESET_DO, gt_rd(GT_RESET_DO) & ~GT_RESET);
++	gt_wr(GT_IOVDD_DIR, gt_rd(GT_IOVDD_DIR) | GT_IOVDD);
++	gt_wr(GT_IOVDD_DO, gt_rd(GT_IOVDD_DO) & ~GT_IOVDD);
++	gt_wait(100);
+ 
+ 	if (v3 < 0x3a || v3 > 0x40) {
+ 		if (!pmic_write(GT_LDO3_VOUT, 0x3a)) {
+@@ -564,14 +785,11 @@
  	return false;
  }
  
@@ -832,7 +871,7 @@
  	/* reset 15 / IOVDD 110 pinmux back to GPIO */
  	v = gt_rd(GT_MODE(1));
  	gt_wr(GT_MODE(1), v & ~(0xfu << 28));
-@@ -586,6 +781,15 @@
+@@ -586,6 +804,15 @@
  	v = gt_rd(GT_SPI_DO);
  	gt_wr(GT_SPI_DO, (v & ~0x0fu) | GT_CS);
  	delay(20);
@@ -848,7 +887,7 @@
  
  	/* Reset GPIO15 low 10 ms, high 100 ms. */
  	gt_wr(GT_RESET_DIR, gt_rd(GT_RESET_DIR) | GT_RESET);
-@@ -632,47 +836,118 @@
+@@ -632,47 +859,122 @@
  }
  
  static int
@@ -943,6 +982,10 @@
 +		if (attempt + 1 >= GT_HEAD_RETRY) {
 +			gt_diag.reads++;
 +			gt_diag.head_retry_fail++;
++			/* The EDGE line will not re-fire by itself.  Drop the
++			 * stale buffer so polling can recover instead of
++			 * spinning on the same torn header forever. */
++			(void)gt_clear_sync();
 +			return GT_FRAME_RETRY;
 +		}
 +	}
@@ -991,7 +1034,7 @@
  	}
  
  	if (n) {
-@@ -682,8 +957,12 @@
+@@ -682,8 +984,12 @@
  		if ((sum & 0xffff) !=
  		    (uint32_t)(d[8 + n * 8] | (d[8 + n * 8 + 1] << 8))) {
  			gt_diag.err_dcsum++;
@@ -1006,7 +1049,7 @@
  		}
  		for (i = 0; i < (int)n; i++) {
  			const uint8_t *p = d + 8 + i * 8;
-@@ -694,8 +973,7 @@
+@@ -694,8 +1000,7 @@
  			if (id >= GT_MAX || (mask & (1u << id)) ||
  			    type == 1 || type == 3) {
  				gt_diag.err_point++;
@@ -1016,7 +1059,7 @@
  			}
  			x = ((uint32_t)p[2] | ((uint32_t)p[3] << 8)) / 10;
  			y = ((uint32_t)p[4] | ((uint32_t)p[5] << 8)) / 10;
-@@ -710,7 +988,12 @@
+@@ -710,7 +1015,12 @@
  			gt.y[id] = (int)y;
  		}
  	}
@@ -1030,7 +1073,7 @@
  
  	for (i = 0; i < GT_MAX; i++) {
  		if (mask & (1u << i)) {
-@@ -721,11 +1004,12 @@
+@@ -721,11 +1031,12 @@
  	}
  	gt.active = mask;
  	gt_diag.ok++;
@@ -1047,7 +1090,7 @@
  }
  
  void
-@@ -733,10 +1017,17 @@
+@@ -733,10 +1044,18 @@
  {
  	int i;
  
@@ -1055,9 +1098,10 @@
 -	    gt_diag.ok, gt_diag.release, gt_diag.touch, gt_diag.err_zero,
 -	    gt_diag.err_head, gt_diag.err_noevent, gt_diag.err_ngt2,
 -	    gt_diag.err_dcsum, gt_diag.err_point);
-+	printf("SWEET GT DIAG: bus=%u hw=%d selftest=%u/%u hwfail=%u switch=%u\n",
++	printf("SWEET GT DIAG: bus=%u hw=%d selftest=%u/%u hwfail=%u switch=%u recover=%u\n",
 +	    (unsigned)gt.bus, gt.hw_ready, gt_diag.hw_selftest_ok,
-+	    gt_diag.hw_selftest_fail, gt_diag.hw_fail, gt_diag.path_switch);
++	    gt_diag.hw_selftest_fail, gt_diag.hw_fail, gt_diag.path_switch,
++	    gt_diag.recover);
 +	printf("SWEET GT DIAG: ok=%u none=%u rel=%u touch=%u zero=%u head=%u noev=%u ngt2=%u dcsum=%u point=%u buserr=%u\n",
 +	    gt_diag.ok, gt_diag.none, gt_diag.release, gt_diag.touch,
 +	    gt_diag.err_zero, gt_diag.err_head, gt_diag.err_noevent,
@@ -1069,7 +1113,7 @@
  	printf("SWEET GT DIAG: status hi:");
  	for (i = 0; i < 16; i++)
  		printf(" %x:%u", i, gt_diag.status[i]);
-@@ -749,6 +1040,178 @@
+@@ -749,6 +1068,229 @@
  		    gt_diag.reads, gt_diag.us_sum / gt_diag.reads,
  		    gt_diag.us_max);
  	}
@@ -1219,10 +1263,58 @@
 +	printf("SWEET GT: touch disabled\n");
 +}
 +
++static void
++gt_recover(void)
++{
++	enum gt_bus_mode old = gt.bus;
++	int was_hw = (old == GT_BUS_SPI3);
++
++	gt_release_all();
++	if (gt.hw_ready || was_hw) {
++		ruby_spi3_shutdown();
++	}
++	gt.hw_ready = 0;
++	gt.bus = GT_BUS_BB_LEGACY;
++	gt_pins_gpio_init();
++
++	gt_wr(GT_RESET_DIR, gt_rd(GT_RESET_DIR) | GT_RESET);
++	gt_wr(GT_RESET_DO, gt_rd(GT_RESET_DO) & ~GT_RESET);
++	gt_wait(10);
++	gt_wr(GT_RESET_DO, gt_rd(GT_RESET_DO) | GT_RESET);
++	gt_wait(100);
++
++	if (!gt_dev_confirm() || !gt_version_ok()) {
++		printf("SWEET GT: recover failed; stay bb-legacy\n");
++		return;
++	}
++	gt.recover_count++;
++	gt_diag.recover++;
++	printf("SWEET GT: recover ok (%u)\n", gt.recover_count);
++
++	if (was_hw && gt_try_hw() == 0) {
++		return;
++	}
++	if (was_hw && gt.force_hw) {
++		gt.stop_requested = 1;
++		return;
++	}
++	if (old == GT_BUS_BB_LEGACY) {
++		gt_switch_bb(GT_BUS_BB_LEGACY);
++	} else {
++		gt_switch_bb(GT_BUS_BB_FAST);
++	}
++}
++
 +static int
 +gt_service_frame(void)
 +{
 +	int rc = gt_frame();
++
++	if (rc == GT_FRAME_OK || rc == GT_FRAME_NONE) {
++		gt.hw_fail = 0;
++		gt.fail_streak = 0;
++		return 1;
++	}
 +
 +	if (rc == GT_FRAME_BUS_ERROR) {
 +		gt.hw_fail++;
@@ -1232,23 +1324,26 @@
 +		} else if (gt.hw_fail == 1) {
 +			printf("SWEET GT: frame bus error\n");
 +		}
-+		return 0;
-+	}
-+	if (gt.bus == GT_BUS_SPI3 &&
-+	    (rc == GT_FRAME_RETRY || rc == GT_FRAME_ERROR)) {
++	} else if (gt.bus == GT_BUS_SPI3) {
 +		gt.hw_fail++;
 +		gt_diag.hw_fail = gt.hw_fail;
 +		if (gt.hw_fail >= GT_HW_FAIL_MAX) {
 +			gt_fallback_bb();
 +		}
-+		return 0;
 +	}
-+	gt.hw_fail = 0;
-+	return rc == GT_FRAME_OK || rc == GT_FRAME_NONE;
++
++	if (++gt.fail_streak >= 10) {
++		uint32_t n = gt.fail_streak;
++
++		gt.fail_streak = 0;
++		printf("SWEET GT: %u frame errors; recover\n", n);
++		gt_recover();
++	}
++	return 0;
  }
  
  static void
-@@ -762,9 +1225,35 @@
+@@ -762,9 +1304,35 @@
  	(void)arg;
  	(void)wr;
  
@@ -1284,7 +1379,7 @@
  	gt.eint = ruby_eint_attach(14, RUBY_EINT_EDGE_FALLING,
  	    &gt_eint_child);
  	if (gt.eint && ruby_eint_activate(gt.eint) == 0)
-@@ -776,11 +1265,29 @@
+@@ -776,11 +1344,33 @@
  
  	for (;;) {
  		bool ev;
@@ -1298,6 +1393,10 @@
 +		}
 +		if (__atomic_load_n(&gt.stop_requested, __ATOMIC_ACQUIRE)) {
 +			break;
++		}
++		if (__atomic_exchange_n(&gt.recover_request, 0,
++		    __ATOMIC_ACQ_REL)) {
++			gt_recover();
 +		}
 +		sp = __atomic_exchange_n(&gt.speed_request, 0, __ATOMIC_ACQ_REL);
 +		if (sp && gt.bus == GT_BUS_SPI3) {
@@ -1315,7 +1414,7 @@
  
  				if (ok) {
  					bad = 0;
-@@ -816,7 +1323,8 @@
+@@ -816,7 +1406,8 @@
  		ev = gt.eint && ruby_eint_pending(gt.eint);
  
  		if (ev || idle >= 8) {
@@ -1325,7 +1424,7 @@
  				if (++bad >= 50) {
  					gt_release_all();
  					bad = 0;
-@@ -848,6 +1356,9 @@
+@@ -848,6 +1439,9 @@
  	}
  
  out:
@@ -1335,7 +1434,7 @@
  	ruby_eint_detach(gt.eint);
  	gt.eint = NULL;
  	printf("SWEET GT: stopped\n");
-@@ -855,10 +1366,145 @@
+@@ -855,10 +1449,159 @@
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1400,6 +1499,11 @@
 +		    gt_bus_name(gt.bus), gt.hw_ready, gt.version_ok);
 +		return 1;
 +	}
++	if (!strcmp(p, "recover")) {
++		__atomic_store_n(&gt.recover_request, 1, __ATOMIC_RELEASE);
++		printf("SWEET GT: recover requested\n");
++		return 1;
++	}
 +	if (!strncmp(p, "bus ", 4)) {
 +		p += 4;
 +		while (*p == ' ') {
@@ -1436,6 +1540,15 @@
 +		printf("SWEET GT: bb delay=%u us\n", v);
 +		return 1;
 +	}
++	if (!strncmp(p, "bb bar ", 7)) {
++		if (gt_parse_uint(p + 7, &v) != 0 || v > 15) {
++			printf("SWEET GT: bb bar 0..15\n");
++			return 1;
++		}
++		__atomic_store_n(&gt.bb_barrier, v, __ATOMIC_RELEASE);
++		printf("SWEET GT: bb bar=%u\n", v);
++		return 1;
++	}
 +	if (!strncmp(p, "spi speed ", 10)) {
 +		if (gt_parse_uint(p + 10, &v) != 0 || v < 100 || v > 5000) {
 +			printf("SWEET GT: spi speed 100..5000 kHz\n");
@@ -1469,7 +1582,7 @@
 +		printf("SWEET GT: failtest=%s\n", p);
 +		return 1;
 +	}
-+	printf("SWEET GT: gt diag | bus [bb|legacy|hw|auto|off] | bb delay <us> | spi speed <khz>\n");
++	printf("SWEET GT: gt diag | bus [bb|legacy|hw|auto|off] | recover | bb delay <us> | bb bar <0..15> | spi speed <khz>\n");
 +	return 1;
 +}
 +
@@ -1481,7 +1594,7 @@
  	thread_t thread;
  	kern_return_t kr;
  
-@@ -867,10 +1513,34 @@
+@@ -867,10 +1610,40 @@
  	}
  	gt.started = true;
  
@@ -1499,10 +1612,15 @@
  	}
 +	gt.boot_mode = (uint32_t)enabled;
 +	gt.bb_delay_us = 2;
++	gt.bb_barrier = 0;
 +	gt.hw_speed_khz = 2000;
 +	if (PE_parse_boot_argn("sweetgtbbdelay", &val, sizeof(val)) &&
 +	    val >= 1 && val <= 20) {
 +		gt.bb_delay_us = (uint32_t)val;
++	}
++	if (PE_parse_boot_argn("sweetgtbbbar", &val, sizeof(val)) &&
++	    val >= 0 && val <= 15) {
++		gt.bb_barrier = (uint32_t)val;
 +	}
 +	if (PE_parse_boot_argn("sweetgtspispeed", &val, sizeof(val)) &&
 +	    val >= 100 && val <= 5000) {
@@ -1514,6 +1632,7 @@
 +	gt.bus = GT_BUS_BB_LEGACY;
 +	gt.mode_request = GT_REQ_NONE;
 +	gt.speed_request = 0;
++	gt.recover_request = 0;
 +	gt.stop_requested = 0;
 +
  	if (ruby_i2c5_lock_init() != 0) {
