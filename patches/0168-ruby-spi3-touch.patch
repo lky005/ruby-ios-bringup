@@ -1,0 +1,1521 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/ruby_hal.c			standard
+ bsd/dev/ruby_eint.c			standard
+ bsd/dev/ruby_irq.c			standard
++bsd/dev/ruby_spi3.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
+ bsd/dev/ruby_usb.c			standard
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -29,7 +29,7 @@
+ #include "ruby_irq.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+-extern void sweet_goodix_diag(void);
++extern int sweet_goodix_cmd(char *cmd);
+ 
+ #define PR_GPIO_PA       0x10005000u
+ #define PR_PWRAP_PA      0x10026000u
+@@ -1400,7 +1400,7 @@
+ 	printf("RUBY CMD: eint status | eint selftest <line> [ms] (rubyeint)\n");
+ 	printf("RUBY CMD: irq status|arm|disarm (rubyirq)\n");
+ 	printf("RUBY CMD: mt6360 status|ack (rubymt6360)\n");
+-	printf("RUBY CMD: gt diag (read-only gt_frame counters)\n");
++	printf("RUBY CMD: gt diag | bus [bb|legacy|hw|auto|off] | bb delay <us> | spi speed <khz>\n");
+ }
+ 
+ static void
+@@ -1837,9 +1837,8 @@
+ 		}
+ 		return pr_key_watch(ms);
+ 	}
+-	if (!strcmp(p, "gt diag")) {
+-		sweet_goodix_diag();
+-		return 1;
++	if (!strncmp(p, "gt", 2) && (p[2] == 0 || p[2] == ' ')) {
++		return sweet_goodix_cmd(p[2] ? p + 3 : p + 2);
+ 	}
+ 	if (!strcmp(p, "battery status")) {
+ 		pr_cmd_battery();
+--- /dev/null
++++ b/bsd/dev/ruby_spi3.h
+@@ -0,0 +1,23 @@
++#ifndef RUBY_SPI3_H
++#define RUBY_SPI3_H
++
++#include <stdint.h>
++
++#define RUBY_SPI3_MAX_XFER 32u
++
++int ruby_spi3_init(uint32_t target_khz);
++int ruby_spi3_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len);
++int ruby_spi3_set_speed(uint32_t target_khz);
++void ruby_spi3_shutdown(void);
++
++int ruby_spi3_ready(void);
++int ruby_spi3_gate_on(void);
++uint32_t ruby_spi3_mux(void);
++uint32_t ruby_spi3_div(void);
++uint32_t ruby_spi3_sck_khz(void);
++uint32_t ruby_spi3_last_status0(void);
++uint32_t ruby_spi3_last_status1(void);
++uint32_t ruby_spi3_xfers(void);
++uint32_t ruby_spi3_errors(void);
++
++#endif /* RUBY_SPI3_H */
+--- /dev/null
++++ b/bsd/dev/ruby_spi3.c
+@@ -0,0 +1,433 @@
++/*
++ * Minimal polled MTK SPI3 controller for the ruby (MT6877) touch panel.
++ *
++ * The controller is used in single-shot FIFO mode only: every transfer is
++ * at most 32 bytes, which is the TX/RX FIFO depth.  The Goodix frame reader
++ * splits larger reads into random-access sub-reads, so no DMA and no
++ * pause/resume choreography is needed.
++ *
++ * Read-only preconditions (no clock or power writes):
++ *   - IFRAO2 STA bit10 must be 0 (SPI3 gate already enabled by LK).
++ *   - TOPCKGEN spi_sel pdn bit must be 0 (mux gate already enabled).
++ * Any precondition failure returns ENODEV before touching a pin or a
++ * controller register.
++ */
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <mach/mach_time.h>
++#include <machine/machine_routines.h>
++#include "ruby_spi3.h"
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++
++#define S3_SPI_PA	0x11013000u
++#define S3_GPIO_PA	0x10005000u
++#define S3_IFRAO_PA	0x10001000u
++#define S3_TOP_PA	0x10000000u
++#define S3_MAP_SIZE	0x1000u
++
++/* GPIO bank 5: pins 160-163; mode group 20 = pins 160-167. */
++#define S3_GPIO_DIR5	0x050u
++#define S3_GPIO_DO5	0x150u
++#define S3_GPIO_MODE20	0x440u
++#define S3_SPI_FUNC	0x2222u		/* pins 160-163 = function 2 */
++
++/* MTK SPI registers (vendor spi-mt65xx.c). */
++#define S3_CFG0		0x00u
++#define S3_CFG1		0x04u
++#define S3_TX_DATA	0x10u
++#define S3_RX_DATA	0x14u
++#define S3_CMD		0x18u
++#define S3_STATUS0	0x1cu
++#define S3_STATUS1	0x20u
++#define S3_PAD_SEL	0x24u
++#define S3_CFG2		0x28u
++
++#define S3_CMD_ACT	(1u << 0)
++#define S3_CMD_RST	(1u << 2)
++#define S3_CMD_PAUSE_EN	(1u << 4)
++#define S3_CMD_TXMSBF	(1u << 12)
++#define S3_CMD_RXMSBF	(1u << 13)
++
++#define S3_ST0_FINISH	(1u << 0)
++#define S3_ST1_IDLE	(1u << 0)
++
++#define S3_IFRAO_CG2_STA	0xacu
++#define S3_SPI3_GATE_BIT	10u
++#define S3_TOP_CFG6		0x70u
++#define S3_TOP_SPI_MUX_SHIFT	8u
++#define S3_TOP_SPI_PDN_SHIFT	15u
++
++static struct {
++	vm_offset_t spi;
++	vm_offset_t gpio;
++	vm_offset_t ifrao;
++	vm_offset_t top;
++	uint32_t cfg0, cfg1, cfg2, cmd, pad;
++	uint32_t mode_orig, dir_orig, do_orig;
++	uint32_t mux, pdn, div, target_khz, sck_khz;
++	uint32_t last_st0, last_st1;
++	uint32_t xfers, errors;
++	int gate_on;
++	int saved;
++	int ready;
++} s3;
++
++static inline uint32_t
++s3_rd(vm_offset_t base, uint32_t off)
++{
++	return *(volatile uint32_t *)(base + off);
++}
++
++static inline void
++s3_wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++}
++
++static inline void
++s3_barrier(void)
++{
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++s3_reset(void)
++{
++	if (!s3.spi) {
++		return;
++	}
++	s3_wr(s3.spi, S3_CMD, S3_CMD_RST);
++	s3_barrier();
++	s3_wr(s3.spi, S3_CMD, 0);
++	s3_barrier();
++}
++
++/* PAUSE_EN=1 is the deasserted/idle CS state in the vendor driver. */
++static void
++s3_idle(void)
++{
++	if (!s3.spi) {
++		return;
++	}
++	s3_wr(s3.spi, S3_CMD,
++	    S3_CMD_TXMSBF | S3_CMD_RXMSBF | S3_CMD_PAUSE_EN);
++	s3_barrier();
++}
++
++static void
++s3_calc_div(uint32_t target_khz)
++{
++	uint32_t parent, div;
++
++	if (target_khz == 0) {
++		target_khz = 2000;
++	}
++	/* mux 0 = 26 MHz; mux 1 = mainpll/20 (~55 MHz); others conservative. */
++	if (s3.mux == 0) {
++		parent = 26000u;
++	} else if (s3.mux == 1) {
++		parent = 55000u;
++	} else {
++		parent = 60000u;
++	}
++	div = (parent + target_khz - 1) / target_khz;
++	if (div == 0) {
++		div = 1;
++	}
++	if (div > 255) {
++		div = 255;
++	}
++	s3.target_khz = target_khz;
++	s3.div = div;
++	s3.sck_khz = parent / div;
++}
++
++static void
++s3_apply_timing(void)
++{
++	uint32_t sck, cs, v;
++
++	sck = (s3.div + 1) / 2;
++	if (sck == 0) {
++		sck = 1;
++	}
++	if (sck > 0xffffu) {
++		sck = 0xffffu;
++	}
++	cs = sck * 2;
++	if (cs > 0xffffu) {
++		cs = 0xffffu;
++	}
++
++	v = ((sck - 1) & 0xffffu) | (((sck - 1) & 0xffffu) << 16);
++	s3_wr(s3.spi, S3_CFG2, v);
++	v = ((cs - 1) & 0xffffu) | (((cs - 1) & 0xffffu) << 16);
++	s3_wr(s3.spi, S3_CFG0, v);
++	v = s3_rd(s3.spi, S3_CFG1);
++	v &= ~0xffu;
++	if (cs != 0) {
++		v |= (cs - 1) & 0xffu;
++	}
++	s3_wr(s3.spi, S3_CFG1, v);
++}
++
++static void
++s3_set_packet(uint32_t len)
++{
++	uint32_t v;
++
++	v = s3_rd(s3.spi, S3_CFG1);
++	v &= ~(0xff00u | 0x3ff0000u);
++	v |= ((len - 1) & 0x3ffu) << 16;
++	s3_wr(s3.spi, S3_CFG1, v);
++}
++
++static void
++s3_write_fifo(const uint8_t *tx, uint32_t len)
++{
++	uint32_t i = 0, j, w;
++
++	while (i + 4 <= len) {
++		w = (uint32_t)tx[i] | ((uint32_t)tx[i + 1] << 8) |
++		    ((uint32_t)tx[i + 2] << 16) | ((uint32_t)tx[i + 3] << 24);
++		s3_wr(s3.spi, S3_TX_DATA, w);
++		i += 4;
++	}
++	if (i < len) {
++		w = 0;
++		for (j = 0; i + j < len; j++) {
++			w |= (uint32_t)tx[i + j] << (8 * j);
++		}
++		s3_wr(s3.spi, S3_TX_DATA, w);
++	}
++}
++
++static void
++s3_read_fifo(uint8_t *rx, uint32_t len)
++{
++	uint32_t i = 0, j, w;
++
++	while (i + 4 <= len) {
++		w = s3_rd(s3.spi, S3_RX_DATA);
++		rx[i] = (uint8_t)w;
++		rx[i + 1] = (uint8_t)(w >> 8);
++		rx[i + 2] = (uint8_t)(w >> 16);
++		rx[i + 3] = (uint8_t)(w >> 24);
++		i += 4;
++	}
++	if (i < len) {
++		w = s3_rd(s3.spi, S3_RX_DATA);
++		for (j = 0; i + j < len; j++) {
++			rx[i + j] = (uint8_t)(w >> (8 * j));
++		}
++	}
++}
++
++int
++ruby_spi3_init(uint32_t target_khz)
++{
++	uint32_t v;
++
++	if (s3.ready) {
++		return 0;
++	}
++	if (!s3.spi) {
++		s3.spi = ml_io_map(S3_SPI_PA, S3_MAP_SIZE);
++		s3.gpio = ml_io_map(S3_GPIO_PA, S3_MAP_SIZE);
++		s3.ifrao = ml_io_map(S3_IFRAO_PA, S3_MAP_SIZE);
++		s3.top = ml_io_map(S3_TOP_PA, S3_MAP_SIZE);
++	}
++	if (!s3.spi || !s3.gpio || !s3.ifrao || !s3.top) {
++		return ENODEV;
++	}
++
++	v = s3_rd(s3.ifrao, S3_IFRAO_CG2_STA);
++	s3.gate_on = ((v & (1u << S3_SPI3_GATE_BIT)) == 0);
++	if (!s3.gate_on) {
++		return ENODEV;
++	}
++	v = s3_rd(s3.top, S3_TOP_CFG6);
++	s3.mux = (v >> S3_TOP_SPI_MUX_SHIFT) & 3u;
++	s3.pdn = (v >> S3_TOP_SPI_PDN_SHIFT) & 1u;
++	if (s3.pdn) {
++		return ENODEV;
++	}
++	s3_calc_div(target_khz);
++
++	s3.cfg0 = s3_rd(s3.spi, S3_CFG0);
++	s3.cfg1 = s3_rd(s3.spi, S3_CFG1);
++	s3.cfg2 = s3_rd(s3.spi, S3_CFG2);
++	s3.cmd = s3_rd(s3.spi, S3_CMD);
++	s3.pad = s3_rd(s3.spi, S3_PAD_SEL);
++	s3.mode_orig = s3_rd(s3.gpio, S3_GPIO_MODE20);
++	s3.dir_orig = s3_rd(s3.gpio, S3_GPIO_DIR5);
++	s3.do_orig = s3_rd(s3.gpio, S3_GPIO_DO5);
++	s3.saved = 1;
++
++	s3_reset();
++	s3_wr(s3.spi, S3_PAD_SEL, 0);
++	s3_wr(s3.spi, S3_CMD, S3_CMD_TXMSBF | S3_CMD_RXMSBF);
++	s3_apply_timing();
++	s3_idle();
++	s3_barrier();
++
++	/* Configure the controller before handing the pins to it. */
++	v = (s3.mode_orig & ~0xffffu) | S3_SPI_FUNC;
++	s3_wr(s3.gpio, S3_GPIO_MODE20, v);
++	s3_barrier();
++	if ((s3_rd(s3.gpio, S3_GPIO_MODE20) & 0xffffu) != S3_SPI_FUNC) {
++		ruby_spi3_shutdown();
++		return EIO;
++	}
++
++	s3.ready = 1;
++	return 0;
++}
++
++int
++ruby_spi3_set_speed(uint32_t target_khz)
++{
++	if (target_khz == 0) {
++		return EINVAL;
++	}
++	s3_calc_div(target_khz);
++	if (s3.ready) {
++		s3_apply_timing();
++		s3_barrier();
++	}
++	return 0;
++}
++
++int
++ruby_spi3_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
++{
++	uint64_t deadline;
++	uint32_t cmd, st;
++
++	if (!s3.ready) {
++		return ENODEV;
++	}
++	if (!tx || len == 0 || len > RUBY_SPI3_MAX_XFER) {
++		return EINVAL;
++	}
++
++	s3.xfers++;
++	s3_reset();
++	cmd = S3_CMD_TXMSBF | S3_CMD_RXMSBF;
++	s3_wr(s3.spi, S3_CMD, cmd);
++	s3_wr(s3.spi, S3_PAD_SEL, 0);
++	s3_set_packet(len);
++	s3_write_fifo(tx, len);
++	s3_barrier();
++	s3_wr(s3.spi, S3_CMD, cmd | S3_CMD_ACT);
++
++	clock_interval_to_deadline(10, NSEC_PER_MSEC, &deadline);
++	for (;;) {
++		st = s3_rd(s3.spi, S3_STATUS0);
++		s3.last_st0 = st;
++		if (st & S3_ST0_FINISH) {
++			break;
++		}
++		if (mach_absolute_time() >= deadline) {
++			s3.errors++;
++			s3_reset();
++			s3_idle();
++			return ETIMEDOUT;
++		}
++		delay(1);
++	}
++
++	s3.last_st1 = s3_rd(s3.spi, S3_STATUS1);
++	if (rx) {
++		s3_read_fifo(rx, len);
++	}
++	s3_idle();
++	return 0;
++}
++
++void
++ruby_spi3_shutdown(void)
++{
++	s3.ready = 0;
++	if (!s3.saved) {
++		return;
++	}
++	if (s3.spi) {
++		s3_idle();
++	}
++	if (s3.gpio) {
++		s3_wr(s3.gpio, S3_GPIO_MODE20, s3.mode_orig);
++		s3_wr(s3.gpio, S3_GPIO_DIR5, s3.dir_orig);
++		s3_wr(s3.gpio, S3_GPIO_DO5, s3.do_orig);
++		s3_barrier();
++	}
++	if (s3.spi) {
++		s3_reset();
++		s3_wr(s3.spi, S3_CFG0, s3.cfg0);
++		s3_wr(s3.spi, S3_CFG1, s3.cfg1);
++		s3_wr(s3.spi, S3_CFG2, s3.cfg2);
++		s3_wr(s3.spi, S3_CMD, s3.cmd);
++		s3_wr(s3.spi, S3_PAD_SEL, s3.pad);
++		s3_barrier();
++	}
++	s3.saved = 0;
++}
++
++int
++ruby_spi3_ready(void)
++{
++	return s3.ready;
++}
++
++int
++ruby_spi3_gate_on(void)
++{
++	return s3.gate_on;
++}
++
++uint32_t
++ruby_spi3_mux(void)
++{
++	return s3.mux;
++}
++
++uint32_t
++ruby_spi3_div(void)
++{
++	return s3.div;
++}
++
++uint32_t
++ruby_spi3_sck_khz(void)
++{
++	return s3.sck_khz;
++}
++
++uint32_t
++ruby_spi3_last_status0(void)
++{
++	return s3.last_st0;
++}
++
++uint32_t
++ruby_spi3_last_status1(void)
++{
++	return s3.last_st1;
++}
++
++uint32_t
++ruby_spi3_xfers(void)
++{
++	return s3.xfers;
++}
++
++uint32_t
++ruby_spi3_errors(void)
++{
++	return s3.errors;
++}
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -18,18 +18,48 @@
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+ #include <kern/sched_prim.h>
++#include <libkern/libkern.h>
+ #include <mach/mach_time.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include "ruby_battery.h"
+ #include "ruby_eint.h"
+ #include "ruby_irq.h"
++#include "ruby_spi3.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
+ 
+ #define GT_MAX		10
++#define GT_FRAME_DATA_MAX	(8 + GT_MAX * 8 + 2 + 8)
++#define GT_SEG_DATA	24u
++#define GT_HEAD_RETRY	3
++#define GT_HW_FAIL_MAX	3
++
++enum gt_bus_mode {
++	GT_BUS_OFF = 0,
++	GT_BUS_BB_LEGACY,
++	GT_BUS_BB_FAST,
++	GT_BUS_SPI3,
++};
++
++enum gt_mode_req {
++	GT_REQ_NONE = 0,
++	GT_REQ_BB_FAST,
++	GT_REQ_BB_LEGACY,
++	GT_REQ_HW,
++	GT_REQ_AUTO,
++	GT_REQ_OFF,
++};
++
++enum gt_frame_rc {
++	GT_FRAME_OK = 0,
++	GT_FRAME_NONE,
++	GT_FRAME_RETRY,
++	GT_FRAME_ERROR,
++	GT_FRAME_BUS_ERROR,
++};
+ 
+ #define GT_GPIO_PA	0x10005000u
+ #define GT_DIR(n)	(0x000u + ((n) * 0x10u))
+@@ -76,16 +106,36 @@
+ 	uint32_t active;
+ 	int x[GT_MAX], y[GT_MAX];
+ 	struct ruby_eint *eint;
++	enum gt_bus_mode bus;
++	int hw_ready;
++	int version_ok;
++	uint8_t version[36];
++	uint32_t bb_delay_us;
++	uint32_t hw_speed_khz;
++	uint32_t boot_mode;
++	uint32_t mode_request;
++	uint32_t speed_request;
++	uint32_t stop_requested;
++	uint32_t hw_fail;
++	uint32_t fail_next;
++	uint32_t fail_selftest;
++	int dbg;
++	int force_hw;
+ } gt;
+ 
+ static int gt_sleep_chan;
++static uint32_t gt_do_shadow;
+ 
+ /* Read-only diagnostics: split gt_frame() failures by return path so the
+  * IRQ owner's service_fail counter can be attributed. */
+ static struct {
+-	uint32_t ok, release, touch;
++	uint32_t ok, none, release, touch;
+ 	uint32_t err_zero, err_head, err_noevent, err_ngt2;
+-	uint32_t err_dcsum, err_point;
++	uint32_t err_dcsum, err_point, err_bus;
++	uint32_t head_retry_ok, head_retry_fail;
++	uint32_t ngt2_ok, ngt2_read_fail;
++	uint32_t hw_selftest_ok, hw_selftest_fail;
++	uint32_t hw_fail, path_switch;
+ 	uint32_t status[16];
+ 	uint32_t n[16];
+ 	uint32_t reads, us_sum, us_max;
+@@ -370,7 +420,7 @@
+ }
+ 
+ static void
+-spi_xfer(const uint8_t *tx, uint8_t *rx, unsigned len)
++bb_xfer_legacy(const uint8_t *tx, uint8_t *rx, unsigned len)
+ {
+ 	unsigned i;
+ 	int b;
+@@ -394,12 +444,114 @@
+ 	spi_pin(GT_CS, true);
+ }
+ 
++/*
++ * Fast bit-bang: the GPIO block is mapped nGnRnE (VM_WIMG_IO), so back-to-back
++ * MMIO stores are ordered.  Drop the per-pin dmb/dsb, keep a shadow DO value
++ * and use one compiler barrier per pin change.  The half-period is tunable
++ * from `gt bb delay`; the default stays conservative.
++ */
++static inline void
++bb_fast_flush(void)
++{
++	__asm__ volatile("" ::: "memory");
++	*(volatile uint32_t *)(gt.gpio + GT_SPI_DO) = gt_do_shadow;
++}
++
++static void
++bb_fast_pin(uint32_t mask, bool high)
++{
++	if (high) {
++		gt_do_shadow |= mask;
++	} else {
++		gt_do_shadow &= ~mask;
++	}
++	bb_fast_flush();
++}
++
++static bool
++bb_fast_mi(void)
++{
++	uint32_t v = *(volatile uint32_t *)(gt.gpio + GT_SPI_DI);
++	__asm__ volatile("" ::: "memory");
++	return (v & GT_MI) != 0;
++}
++
++static void
++bb_fast_init(void)
++{
++	gt_do_shadow = *(volatile uint32_t *)(gt.gpio + GT_SPI_DO);
++}
++
+ static void
+-spi_read_req(uint8_t *tx, uint32_t addr)
++bb_xfer_fast(const uint8_t *tx, uint8_t *rx, unsigned len)
+ {
+ 	unsigned i;
++	int b;
++	uint32_t d = __atomic_load_n(&gt.bb_delay_us, __ATOMIC_RELAXED);
++
++	if (d == 0) {
++		d = 1;
++	}
++	if (d > 20) {
++		d = 20;
++	}
+ 
+-	for (i = 0; i < 40; i++) {
++	bb_fast_pin(GT_CS, false);
++	__asm__ volatile("dsb osh" ::: "memory");
++	delay(d);
++	for (i = 0; i < len; i++) {
++		uint8_t r = 0;
++
++		for (b = 7; b >= 0; b--) {
++			bb_fast_pin(GT_MO, (tx[i] >> b) & 1);
++			delay(d);
++			bb_fast_pin(GT_CLK, true);
++			delay(d);
++			if (rx) {
++				r |= (uint8_t)(bb_fast_mi() << b);
++			}
++			bb_fast_pin(GT_CLK, false);
++			delay(d);
++		}
++		if (rx) {
++			rx[i] = r;
++		}
++	}
++	bb_fast_pin(GT_CS, true);
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static int
++gt_bus_xfer(const uint8_t *tx, uint8_t *rx, unsigned len)
++{
++	switch (gt.bus) {
++	case GT_BUS_BB_LEGACY:
++		bb_xfer_legacy(tx, rx, len);
++		return 0;
++	case GT_BUS_BB_FAST:
++		bb_xfer_fast(tx, rx, len);
++		return 0;
++	case GT_BUS_SPI3:
++		if (!gt.hw_ready || !ruby_spi3_ready()) {
++			return ENODEV;
++		}
++		if (__atomic_load_n(&gt.fail_next, __ATOMIC_ACQUIRE)) {
++			(void)__atomic_sub_fetch(&gt.fail_next, 1,
++			    __ATOMIC_ACQ_REL);
++			return EIO;
++		}
++		return ruby_spi3_xfer(tx, rx, len);
++	default:
++		return ENODEV;
++	}
++}
++
++static void
++spi_read_req(uint8_t *tx, uint32_t addr, unsigned total)
++{
++	unsigned i;
++
++	for (i = 0; i < total; i++) {
+ 		tx[i] = 0;
+ 	}
+ 	tx[0] = 0xf1;
+@@ -412,12 +564,51 @@
+ 	tx[7] = 0xff;
+ }
+ 
+-static void
++static int
+ gt_clear_sync(void)
+ {
+ 	uint8_t tx[6] = { 0xf0, 0x00, 0x01, 0x03, 0x08, 0x00 };
+ 
+-	spi_xfer(tx, NULL, sizeof(tx));
++	return gt_bus_xfer(tx, NULL, sizeof(tx));
++}
++
++/* Read a small random-access slice.  The SPI3 FIFO is 32 bytes, so the
++ * segment payload stays at 24 bytes (8-byte prefix + 24 = 32). */
++static int
++gt_xfer_read(uint32_t addr, uint8_t *dst, unsigned len)
++{
++	uint8_t tx[8 + GT_SEG_DATA], rx[8 + GT_SEG_DATA];
++	int rc;
++
++	if (len > GT_SEG_DATA) {
++		return EINVAL;
++	}
++	spi_read_req(tx, addr, 8 + len);
++	rc = gt_bus_xfer(tx, rx, 8 + len);
++	if (rc) {
++		return rc;
++	}
++	memcpy(dst, &rx[8], len);
++	return 0;
++}
++
++static int
++gt_read_burst(uint32_t addr, uint8_t *dst, unsigned len)
++{
++	int rc;
++
++	while (len) {
++		unsigned chunk = len > GT_SEG_DATA ? GT_SEG_DATA : len;
++
++		rc = gt_xfer_read(addr, dst, chunk);
++		if (rc) {
++			return rc;
++		}
++		addr += chunk;
++		dst += chunk;
++		len -= chunk;
++	}
++	return 0;
+ }
+ 
+ static bool
+@@ -435,11 +626,11 @@
+ 		for (i = 0; i < 8; i++) {
+ 			tx[5 + i] = 0xaa;
+ 		}
+-		spi_xfer(tx, NULL, 13);
++		bb_xfer_legacy(tx, NULL, 13);
+ 		gt_wait(5);
+ 
+-		spi_read_req(tx, 0x10000);
+-		spi_xfer(tx, rx, 16);
++		spi_read_req(tx, 0x10000, 16);
++		bb_xfer_legacy(tx, rx, 16);
+ 		for (i = 0; i < 8; i++) {
+ 			if (rx[8 + i] != 0xaa) {
+ 				break;
+@@ -460,16 +651,23 @@
+ 	uint32_t sum = 0;
+ 	int i;
+ 
+-	spi_read_req(tx, 0x10014);
+-	spi_xfer(tx, rx, 36);
++	spi_read_req(tx, 0x10014, 36);
++	bb_xfer_legacy(tx, rx, 36);
+ 	for (i = 0; i < 26; i++) {
+ 		sum += rx[8 + i];
+ 	}
+ 	if ((sum & 0xffff) != (uint32_t)(rx[34] | (rx[35] << 8))) {
+ 		return false;
+ 	}
+-	return rx[8] == 'B' && rx[9] == 'E' && rx[10] == 'R' &&
+-	    rx[11] == 'L' && rx[12] == 'I' && rx[13] == 'N';
++	if (!(rx[8] == 'B' && rx[9] == 'E' && rx[10] == 'R' &&
++	    rx[11] == 'L' && rx[12] == 'I' && rx[13] == 'N')) {
++		return false;
++	}
++	for (i = 0; i < 36; i++) {
++		gt.version[i] = rx[i];
++	}
++	gt.version_ok = 1;
++	return true;
+ }
+ 
+ static bool
+@@ -564,14 +762,11 @@
+ 	return false;
+ }
+ 
+-static bool
+-gt_hw_init(void)
++static void
++gt_pins_gpio_init(void)
+ {
+ 	uint32_t v;
+ 
+-	if (!gt_power_on())
+-		return false;
+-
+ 	/* reset 15 / IOVDD 110 pinmux back to GPIO */
+ 	v = gt_rd(GT_MODE(1));
+ 	gt_wr(GT_MODE(1), v & ~(0xfu << 28));
+@@ -586,6 +781,15 @@
+ 	v = gt_rd(GT_SPI_DO);
+ 	gt_wr(GT_SPI_DO, (v & ~0x0fu) | GT_CS);
+ 	delay(20);
++}
++
++static bool
++gt_hw_init(void)
++{
++	if (!gt_power_on())
++		return false;
++
++	gt_pins_gpio_init();
+ 
+ 	/* Reset GPIO15 low 10 ms, high 100 ms. */
+ 	gt_wr(GT_RESET_DIR, gt_rd(GT_RESET_DIR) | GT_RESET);
+@@ -632,47 +836,118 @@
+ }
+ 
+ static int
++gt_read_frame_data(uint8_t *d)
++{
++	uint32_t n;
++	int rc;
++
++	if (gt.bus == GT_BUS_SPI3) {
++		rc = gt_xfer_read(0x10308, d, 16);
++		if (rc) {
++			return rc;
++		}
++		n = d[2] & 0x0f;
++		if (n > 0) {
++			unsigned rem = n * 8 - 6;
++
++			if (rem > 0) {
++				rc = gt_read_burst(0x10308 + 16, d + 16, rem);
++				if (rc) {
++					if (n > 2) {
++						gt_diag.ngt2_read_fail++;
++					}
++					return rc;
++				}
++			}
++		}
++		return 0;
++	}
++
++	{
++		uint8_t tx[40], rx[40];
++
++		spi_read_req(tx, 0x10308, 34);
++		rc = gt_bus_xfer(tx, rx, 34);
++		if (rc) {
++			return rc;
++		}
++		memcpy(d, &rx[8], 26);
++		n = d[2] & 0x0f;
++		if (n > 2) {
++			unsigned rem = n * 8 - 16;
++
++			if (rem > 0) {
++				rc = gt_read_burst(0x10308 + 26, d + 26, rem);
++				if (rc) {
++					gt_diag.ngt2_read_fail++;
++					return rc;
++				}
++			}
++		}
++	}
++	return 0;
++}
++
++static int
+ gt_frame(void)
+ {
+-	uint8_t tx[40], rx[40];
+-	const uint8_t *d = &rx[8];
+-	uint32_t nz = 0, n, mask = 0, sum = 0;
++	uint8_t d[GT_FRAME_DATA_MAX];
++	uint32_t nz, n, mask = 0, sum = 0;
+ 	uint64_t t0, dt_ns;
+-	int i;
++	int i, attempt, rc;
+ 
+ 	t0 = mach_absolute_time();
+-	spi_read_req(tx, 0x10308);
+-	spi_xfer(tx, rx, 34);
++	for (attempt = 0; ; attempt++) {
++		rc = gt_read_frame_data(d);
++		if (rc) {
++			gt_diag.err_bus++;
++			return GT_FRAME_BUS_ERROR;
++		}
++		nz = 0;
++		for (i = 0; i < 8; i++) {
++			nz |= d[i];
++		}
++		if (nz && gt_head_ok(d)) {
++			if (attempt) {
++				gt_diag.head_retry_ok++;
++			}
++			break;
++		}
++		if (nz) {
++			gt_diag.err_head++;
++		} else {
++			gt_diag.err_zero++;
++		}
++		if (attempt + 1 >= GT_HEAD_RETRY) {
++			gt_diag.reads++;
++			gt_diag.head_retry_fail++;
++			return GT_FRAME_RETRY;
++		}
++	}
++
+ 	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &dt_ns);
+ 	gt_diag.reads++;
+ 	gt_diag.us_sum += (uint32_t)(dt_ns / 1000);
+-	if ((uint32_t)(dt_ns / 1000) > gt_diag.us_max)
++	if ((uint32_t)(dt_ns / 1000) > gt_diag.us_max) {
+ 		gt_diag.us_max = (uint32_t)(dt_ns / 1000);
++	}
+ 	gt_diag.status[(d[0] >> 4) & 0xf]++;
+ 	gt_diag.n[d[2] & 0x0f]++;
+ 
+-	for (i = 0; i < 8; i++) {
+-		nz |= d[i];
+-	}
+-	if (!nz) {
+-		gt_diag.err_zero++;
+-		return EAGAIN;
+-	}
+-	if (!gt_head_ok(d)) {
+-		gt_diag.err_head++;
+-		return EAGAIN;
+-	}
+-
+ 	if (!(d[0] & 0x80)) {
++		gt_diag.none++;
+ 		gt_diag.err_noevent++;
+-		gt_clear_sync();
+-		return EAGAIN;
++		rc = gt_clear_sync();
++		if (rc) {
++			gt_diag.err_bus++;
++			return GT_FRAME_BUS_ERROR;
++		}
++		return GT_FRAME_NONE;
+ 	}
++
+ 	n = d[2] & 0x0f;
+ 	if (n > 2) {
+-		gt_diag.err_ngt2++;
+-		gt_clear_sync();
+-		return EIO;
++		gt_diag.ngt2_ok++;
+ 	}
+ 
+ 	if (n) {
+@@ -682,8 +957,12 @@
+ 		if ((sum & 0xffff) !=
+ 		    (uint32_t)(d[8 + n * 8] | (d[8 + n * 8 + 1] << 8))) {
+ 			gt_diag.err_dcsum++;
+-			gt_clear_sync();
+-			return EIO;
++			rc = gt_clear_sync();
++			if (rc) {
++				gt_diag.err_bus++;
++				return GT_FRAME_BUS_ERROR;
++			}
++			return GT_FRAME_ERROR;
+ 		}
+ 		for (i = 0; i < (int)n; i++) {
+ 			const uint8_t *p = d + 8 + i * 8;
+@@ -694,8 +973,7 @@
+ 			if (id >= GT_MAX || (mask & (1u << id)) ||
+ 			    type == 1 || type == 3) {
+ 				gt_diag.err_point++;
+-				gt_clear_sync();
+-				return EIO;
++				continue;
+ 			}
+ 			x = ((uint32_t)p[2] | ((uint32_t)p[3] << 8)) / 10;
+ 			y = ((uint32_t)p[4] | ((uint32_t)p[5] << 8)) / 10;
+@@ -710,7 +988,12 @@
+ 			gt.y[id] = (int)y;
+ 		}
+ 	}
+-	gt_clear_sync();
++
++	rc = gt_clear_sync();
++	if (rc) {
++		gt_diag.err_bus++;
++		return GT_FRAME_BUS_ERROR;
++	}
+ 
+ 	for (i = 0; i < GT_MAX; i++) {
+ 		if (mask & (1u << i)) {
+@@ -721,11 +1004,12 @@
+ 	}
+ 	gt.active = mask;
+ 	gt_diag.ok++;
+-	if (n == 0)
++	if (n == 0) {
+ 		gt_diag.release++;
+-	else
+-		gt_diag.touch++;
+-	return 0;
++		return GT_FRAME_NONE;
++	}
++	gt_diag.touch++;
++	return GT_FRAME_OK;
+ }
+ 
+ void
+@@ -733,10 +1017,17 @@
+ {
+ 	int i;
+ 
+-	printf("SWEET GT DIAG: ok=%u rel=%u touch=%u zero=%u head=%u noev=%u ngt2=%u dcsum=%u point=%u\n",
+-	    gt_diag.ok, gt_diag.release, gt_diag.touch, gt_diag.err_zero,
+-	    gt_diag.err_head, gt_diag.err_noevent, gt_diag.err_ngt2,
+-	    gt_diag.err_dcsum, gt_diag.err_point);
++	printf("SWEET GT DIAG: bus=%u hw=%d selftest=%u/%u hwfail=%u switch=%u\n",
++	    (unsigned)gt.bus, gt.hw_ready, gt_diag.hw_selftest_ok,
++	    gt_diag.hw_selftest_fail, gt_diag.hw_fail, gt_diag.path_switch);
++	printf("SWEET GT DIAG: ok=%u none=%u rel=%u touch=%u zero=%u head=%u noev=%u ngt2=%u dcsum=%u point=%u buserr=%u\n",
++	    gt_diag.ok, gt_diag.none, gt_diag.release, gt_diag.touch,
++	    gt_diag.err_zero, gt_diag.err_head, gt_diag.err_noevent,
++	    gt_diag.ngt2_ok, gt_diag.err_dcsum, gt_diag.err_point,
++	    gt_diag.err_bus);
++	printf("SWEET GT DIAG: retry=%u/%u ngt2readfail=%u\n",
++	    gt_diag.head_retry_ok, gt_diag.head_retry_fail,
++	    gt_diag.ngt2_read_fail);
+ 	printf("SWEET GT DIAG: status hi:");
+ 	for (i = 0; i < 16; i++)
+ 		printf(" %x:%u", i, gt_diag.status[i]);
+@@ -749,6 +1040,178 @@
+ 		    gt_diag.reads, gt_diag.us_sum / gt_diag.reads,
+ 		    gt_diag.us_max);
+ 	}
++	if (gt.bus == GT_BUS_SPI3) {
++		printf("SWEET GT DIAG: spi3 mux=%u div=%u sck=%ukHz xfers=%u errors=%u st0=%08x st1=%08x\n",
++		    ruby_spi3_mux(), ruby_spi3_div(), ruby_spi3_sck_khz(),
++		    ruby_spi3_xfers(), ruby_spi3_errors(),
++		    ruby_spi3_last_status0(), ruby_spi3_last_status1());
++	}
++}
++
++static int
++gt_hw_read_raw(uint32_t addr, uint8_t *dst, unsigned len)
++{
++	uint8_t tx[8 + GT_SEG_DATA], rx[8 + GT_SEG_DATA];
++	int rc;
++
++	if (len > GT_SEG_DATA) {
++		return EINVAL;
++	}
++	spi_read_req(tx, addr, 8 + len);
++	rc = ruby_spi3_xfer(tx, rx, 8 + len);
++	if (rc) {
++		return rc;
++	}
++	memcpy(dst, &rx[8], len);
++	return 0;
++}
++
++static int
++gt_try_hw(void)
++{
++	uint8_t v[24];
++	int rc;
++
++	if (!gt.version_ok) {
++		printf("SWEET GT: no version reference; stay bb\n");
++		gt_diag.hw_selftest_fail++;
++		return ENODEV;
++	}
++	if (__atomic_exchange_n(&gt.fail_selftest, 0, __ATOMIC_ACQ_REL)) {
++		printf("SWEET GT: spi3 selftest injected fail\n");
++		gt_diag.hw_selftest_fail++;
++		return EIO;
++	}
++	rc = ruby_spi3_init(gt.hw_speed_khz);
++	if (rc) {
++		printf("SWEET GT: spi3 init rc=%d gate=%d\n", rc,
++		    ruby_spi3_gate_on());
++		gt_diag.hw_selftest_fail++;
++		return rc;
++	}
++	rc = gt_hw_read_raw(0x10014, v, 24);
++	if (rc || memcmp(v, &gt.version[8], 6) != 0) {
++		printf("SWEET GT: spi3 selftest mismatch rc=%d\n", rc);
++		ruby_spi3_shutdown();
++		gt_diag.hw_selftest_fail++;
++		return EIO;
++	}
++	gt.hw_ready = 1;
++	gt.bus = GT_BUS_SPI3;
++	gt.hw_fail = 0;
++	gt_diag.hw_selftest_ok++;
++	printf("SWEET GT: spi3 selftest ok mux=%u div=%u sck=%ukHz\n",
++	    ruby_spi3_mux(), ruby_spi3_div(), ruby_spi3_sck_khz());
++	return 0;
++}
++
++static void
++gt_switch_bb(enum gt_bus_mode mode)
++{
++	if (gt.hw_ready || gt.bus == GT_BUS_SPI3) {
++		ruby_spi3_shutdown();
++	}
++	gt.hw_ready = 0;
++	gt_pins_gpio_init();
++	bb_fast_init();
++	gt.bus = mode;
++	gt.hw_fail = 0;
++	gt_release_all();
++	printf("SWEET GT: bus=%s\n",
++	    mode == GT_BUS_BB_LEGACY ? "bb-legacy" : "bb-fast");
++}
++
++static void
++gt_apply_mode(int req)
++{
++	switch (req) {
++	case GT_REQ_BB_FAST:
++		gt_switch_bb(GT_BUS_BB_FAST);
++		break;
++	case GT_REQ_BB_LEGACY:
++		gt_switch_bb(GT_BUS_BB_LEGACY);
++		break;
++	case GT_REQ_HW:
++		if (gt_try_hw() != 0) {
++			if (gt.force_hw) {
++				printf("SWEET GT: force hw failed; touch off\n");
++				gt.stop_requested = 1;
++			} else {
++				gt_switch_bb(GT_BUS_BB_FAST);
++			}
++		}
++		break;
++	case GT_REQ_AUTO:
++		if (gt_try_hw() != 0) {
++			gt_switch_bb(GT_BUS_BB_FAST);
++		}
++		break;
++	case GT_REQ_OFF:
++		gt.stop_requested = 1;
++		break;
++	default:
++		break;
++	}
++}
++
++static void
++gt_fallback_bb(void)
++{
++	if (gt.force_hw) {
++		printf("SWEET GT: force hw runtime fail; touch off\n");
++		gt.stop_requested = 1;
++		return;
++	}
++	printf("SWEET GT: spi3 runtime fail %u; switch bb-fast\n", gt.hw_fail);
++	gt_diag.path_switch++;
++	gt_switch_bb(GT_BUS_BB_FAST);
++}
++
++static void
++gt_stop(void)
++{
++	if (gt.hw_ready || gt.bus == GT_BUS_SPI3) {
++		ruby_spi3_shutdown();
++	}
++	gt.hw_ready = 0;
++	if (gt.gpio) {
++		gt_pins_gpio_init();
++	}
++	gt_release_all();
++	if (gt.eint) {
++		ruby_eint_detach(gt.eint);
++		gt.eint = NULL;
++	}
++	gt.bus = GT_BUS_OFF;
++	printf("SWEET GT: touch disabled\n");
++}
++
++static int
++gt_service_frame(void)
++{
++	int rc = gt_frame();
++
++	if (rc == GT_FRAME_BUS_ERROR) {
++		gt.hw_fail++;
++		gt_diag.hw_fail = gt.hw_fail;
++		if (gt.bus == GT_BUS_SPI3 && gt.hw_fail >= GT_HW_FAIL_MAX) {
++			gt_fallback_bb();
++		} else if (gt.hw_fail == 1) {
++			printf("SWEET GT: frame bus error\n");
++		}
++		return 0;
++	}
++	if (gt.bus == GT_BUS_SPI3 &&
++	    (rc == GT_FRAME_RETRY || rc == GT_FRAME_ERROR)) {
++		gt.hw_fail++;
++		gt_diag.hw_fail = gt.hw_fail;
++		if (gt.hw_fail >= GT_HW_FAIL_MAX) {
++			gt_fallback_bb();
++		}
++		return 0;
++	}
++	gt.hw_fail = 0;
++	return rc == GT_FRAME_OK || rc == GT_FRAME_NONE;
+ }
+ 
+ static void
+@@ -762,9 +1225,35 @@
+ 	(void)arg;
+ 	(void)wr;
+ 
++	gt.bus = GT_BUS_BB_LEGACY;
+ 	if (!gt_hw_init()) {
+ 		goto out;
+ 	}
++	bb_fast_init();
++
++	switch (gt.boot_mode) {
++	case 1:
++		gt_apply_mode(GT_REQ_AUTO);
++		break;
++	case 2:
++		gt_apply_mode(GT_REQ_BB_FAST);
++		break;
++	case 3:
++		gt.force_hw = 1;
++		gt_apply_mode(GT_REQ_HW);
++		break;
++	case 4:
++		gt.bus = GT_BUS_BB_LEGACY;
++		break;
++	default:
++		gt_apply_mode(GT_REQ_AUTO);
++		break;
++	}
++	if (__atomic_load_n(&gt.stop_requested, __ATOMIC_ACQUIRE) ||
++	    gt.bus == GT_BUS_OFF) {
++		goto out;
++	}
++
+ 	gt.eint = ruby_eint_attach(14, RUBY_EINT_EDGE_FALLING,
+ 	    &gt_eint_child);
+ 	if (gt.eint && ruby_eint_activate(gt.eint) == 0)
+@@ -776,11 +1265,29 @@
+ 
+ 	for (;;) {
+ 		bool ev;
++		int req, ok;
++		uint32_t sp;
++
++		req = (int)__atomic_exchange_n(&gt.mode_request, GT_REQ_NONE,
++		    __ATOMIC_ACQ_REL);
++		if (req != GT_REQ_NONE) {
++			gt_apply_mode(req);
++		}
++		if (__atomic_load_n(&gt.stop_requested, __ATOMIC_ACQUIRE)) {
++			break;
++		}
++		sp = __atomic_exchange_n(&gt.speed_request, 0, __ATOMIC_ACQ_REL);
++		if (sp && gt.bus == GT_BUS_SPI3) {
++			(void)ruby_spi3_set_speed(sp);
++		}
++		if (gt.bus == GT_BUS_OFF) {
++			break;
++		}
+ 
+ 		if (gt.eint && (ruby_eint_active(gt.eint) ||
+ 		    ruby_eint_deferred(gt.eint))) {
+ 			if (ruby_eint_wait(gt.eint, 8)) {
+-				int ok = (gt_frame() == 0);
++				ok = gt_service_frame();
+ 
+ 				if (ok) {
+ 					bad = 0;
+@@ -816,7 +1323,8 @@
+ 		ev = gt.eint && ruby_eint_pending(gt.eint);
+ 
+ 		if (ev || idle >= 8) {
+-			if (gt_frame() != 0) {
++			ok = gt_service_frame();
++			if (!ok) {
+ 				if (++bad >= 50) {
+ 					gt_release_all();
+ 					bad = 0;
+@@ -848,6 +1356,9 @@
+ 	}
+ 
+ out:
++	if (gt.bus != GT_BUS_OFF) {
++		gt_stop();
++	}
+ 	ruby_eint_detach(gt.eint);
+ 	gt.eint = NULL;
+ 	printf("SWEET GT: stopped\n");
+@@ -855,10 +1366,145 @@
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++static const char *
++gt_bus_name(enum gt_bus_mode bus)
++{
++	switch (bus) {
++	case GT_BUS_BB_LEGACY:
++		return "bb-legacy";
++	case GT_BUS_BB_FAST:
++		return "bb-fast";
++	case GT_BUS_SPI3:
++		return "spi3";
++	default:
++		return "off";
++	}
++}
++
++static int
++gt_parse_uint(const char *s, uint32_t *out)
++{
++	uint32_t v = 0;
++	int any = 0;
++
++	while (*s == ' ' || *s == '\t') {
++		s++;
++	}
++	while (*s >= '0' && *s <= '9') {
++		v = v * 10 + (uint32_t)(*s - '0');
++		s++;
++		any = 1;
++	}
++	if (!any) {
++		return EINVAL;
++	}
++	*out = v;
++	return 0;
++}
++
++int
++sweet_goodix_cmd(char *cmd)
++{
++	char *p = cmd;
++	char *q;
++	uint32_t v;
++
++	while (*p == ' ' || *p == '\t') {
++		p++;
++	}
++	q = p + strlen(p);
++	while (q > p && (q[-1] == ' ' || q[-1] == '\t' ||
++	    q[-1] == '\n' || q[-1] == '\r')) {
++		*--q = 0;
++	}
++
++	if (!strcmp(p, "diag")) {
++		sweet_goodix_diag();
++		return 1;
++	}
++	if (!strcmp(p, "bus")) {
++		printf("SWEET GT: bus=%s hw=%d version=%d\n",
++		    gt_bus_name(gt.bus), gt.hw_ready, gt.version_ok);
++		return 1;
++	}
++	if (!strncmp(p, "bus ", 4)) {
++		p += 4;
++		while (*p == ' ') {
++			p++;
++		}
++		if (!strcmp(p, "bb")) {
++			__atomic_store_n(&gt.mode_request, GT_REQ_BB_FAST,
++			    __ATOMIC_RELEASE);
++		} else if (!strcmp(p, "legacy")) {
++			__atomic_store_n(&gt.mode_request, GT_REQ_BB_LEGACY,
++			    __ATOMIC_RELEASE);
++		} else if (!strcmp(p, "hw")) {
++			__atomic_store_n(&gt.mode_request, GT_REQ_HW,
++			    __ATOMIC_RELEASE);
++		} else if (!strcmp(p, "auto")) {
++			__atomic_store_n(&gt.mode_request, GT_REQ_AUTO,
++			    __ATOMIC_RELEASE);
++		} else if (!strcmp(p, "off")) {
++			__atomic_store_n(&gt.mode_request, GT_REQ_OFF,
++			    __ATOMIC_RELEASE);
++		} else {
++			printf("SWEET GT: bus bb|legacy|hw|auto|off\n");
++			return 1;
++		}
++		printf("SWEET GT: bus request=%s\n", p);
++		return 1;
++	}
++	if (!strncmp(p, "bb delay ", 9)) {
++		if (gt_parse_uint(p + 9, &v) != 0 || v == 0 || v > 20) {
++			printf("SWEET GT: bb delay 1..20 us\n");
++			return 1;
++		}
++		__atomic_store_n(&gt.bb_delay_us, v, __ATOMIC_RELEASE);
++		printf("SWEET GT: bb delay=%u us\n", v);
++		return 1;
++	}
++	if (!strncmp(p, "spi speed ", 10)) {
++		if (gt_parse_uint(p + 10, &v) != 0 || v < 100 || v > 5000) {
++			printf("SWEET GT: spi speed 100..5000 kHz\n");
++			return 1;
++		}
++		__atomic_store_n(&gt.hw_speed_khz, v, __ATOMIC_RELEASE);
++		__atomic_store_n(&gt.speed_request, v, __ATOMIC_RELEASE);
++		printf("SWEET GT: spi speed request=%u kHz\n", v);
++		return 1;
++	}
++	if (!strncmp(p, "spi failtest ", 13)) {
++		if (!gt.dbg) {
++			printf("SWEET GT: failtest needs sweetgtdbg=1\n");
++			return 1;
++		}
++		p += 13;
++		while (*p == ' ') {
++			p++;
++		}
++		if (!strcmp(p, "self")) {
++			__atomic_store_n(&gt.fail_selftest, 1, __ATOMIC_RELEASE);
++		} else if (!strcmp(p, "runtime")) {
++			__atomic_store_n(&gt.fail_next, 3, __ATOMIC_RELEASE);
++		} else if (!strcmp(p, "off")) {
++			__atomic_store_n(&gt.fail_selftest, 0, __ATOMIC_RELEASE);
++			__atomic_store_n(&gt.fail_next, 0, __ATOMIC_RELEASE);
++		} else {
++			printf("SWEET GT: spi failtest self|runtime|off\n");
++			return 1;
++		}
++		printf("SWEET GT: failtest=%s\n", p);
++		return 1;
++	}
++	printf("SWEET GT: gt diag | bus [bb|legacy|hw|auto|off] | bb delay <us> | spi speed <khz>\n");
++	return 1;
++}
++
+ void
+ sweet_goodix_spi_init(void)
+ {
+ 	int enabled = 1;
++	int val;
+ 	thread_t thread;
+ 	kern_return_t kr;
+ 
+@@ -867,10 +1513,34 @@
+ 	}
+ 	gt.started = true;
+ 
+-	if (PE_parse_boot_argn("sweetgt", &enabled, sizeof(enabled)) && !enabled) {
+-		printf("SWEET GT: disabled (sweetgt=0)\n");
+-		return;
++	if (PE_parse_boot_argn("sweetgt", &enabled, sizeof(enabled))) {
++		if (enabled == 0) {
++			printf("SWEET GT: disabled (sweetgt=0)\n");
++			return;
++		}
++		if (enabled < 1 || enabled > 4) {
++			enabled = 1;
++		}
+ 	}
++	gt.boot_mode = (uint32_t)enabled;
++	gt.bb_delay_us = 2;
++	gt.hw_speed_khz = 2000;
++	if (PE_parse_boot_argn("sweetgtbbdelay", &val, sizeof(val)) &&
++	    val >= 1 && val <= 20) {
++		gt.bb_delay_us = (uint32_t)val;
++	}
++	if (PE_parse_boot_argn("sweetgtspispeed", &val, sizeof(val)) &&
++	    val >= 100 && val <= 5000) {
++		gt.hw_speed_khz = (uint32_t)val;
++	}
++	if (PE_parse_boot_argn("sweetgtdbg", &val, sizeof(val)) && val) {
++		gt.dbg = 1;
++	}
++	gt.bus = GT_BUS_BB_LEGACY;
++	gt.mode_request = GT_REQ_NONE;
++	gt.speed_request = 0;
++	gt.stop_requested = 0;
++
+ 	if (ruby_i2c5_lock_init() != 0) {
+ 		printf("SWEET GT: no I2C5 lock\n");
+ 		return;
