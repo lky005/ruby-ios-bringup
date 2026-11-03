@@ -887,7 +887,7 @@
  
  	/* Reset GPIO15 low 10 ms, high 100 ms. */
  	gt_wr(GT_RESET_DIR, gt_rd(GT_RESET_DIR) | GT_RESET);
-@@ -632,47 +859,122 @@
+@@ -632,47 +859,123 @@
  }
  
  static int
@@ -897,16 +897,17 @@
 +	int rc;
 +
 +	if (gt.bus == GT_BUS_SPI3) {
-+		rc = gt_xfer_read(0x10308, d, 16);
++		rc = gt_xfer_read(0x10308, d, 24);
 +		if (rc) {
 +			return rc;
 +		}
 +		n = d[2] & 0x0f;
 +		if (n > 0) {
-+			unsigned rem = n * 8 - 6;
++			unsigned total = n * 8 + 10;
++			unsigned rem = total > 24 ? total - 24 : 0;
 +
 +			if (rem > 0) {
-+				rc = gt_read_burst(0x10308 + 16, d + 16, rem);
++				rc = gt_read_burst(0x10308 + 24, d + 24, rem);
 +				if (rc) {
 +					if (n > 2) {
 +						gt_diag.ngt2_read_fail++;
@@ -1034,7 +1035,7 @@
  	}
  
  	if (n) {
-@@ -682,8 +984,12 @@
+@@ -682,8 +985,12 @@
  		if ((sum & 0xffff) !=
  		    (uint32_t)(d[8 + n * 8] | (d[8 + n * 8 + 1] << 8))) {
  			gt_diag.err_dcsum++;
@@ -1049,7 +1050,7 @@
  		}
  		for (i = 0; i < (int)n; i++) {
  			const uint8_t *p = d + 8 + i * 8;
-@@ -694,8 +1000,7 @@
+@@ -694,8 +1001,7 @@
  			if (id >= GT_MAX || (mask & (1u << id)) ||
  			    type == 1 || type == 3) {
  				gt_diag.err_point++;
@@ -1059,7 +1060,7 @@
  			}
  			x = ((uint32_t)p[2] | ((uint32_t)p[3] << 8)) / 10;
  			y = ((uint32_t)p[4] | ((uint32_t)p[5] << 8)) / 10;
-@@ -710,7 +1015,12 @@
+@@ -710,7 +1016,12 @@
  			gt.y[id] = (int)y;
  		}
  	}
@@ -1073,7 +1074,7 @@
  
  	for (i = 0; i < GT_MAX; i++) {
  		if (mask & (1u << i)) {
-@@ -721,11 +1031,12 @@
+@@ -721,11 +1032,12 @@
  	}
  	gt.active = mask;
  	gt_diag.ok++;
@@ -1090,7 +1091,7 @@
  }
  
  void
-@@ -733,10 +1044,18 @@
+@@ -733,10 +1045,18 @@
  {
  	int i;
  
@@ -1113,7 +1114,7 @@
  	printf("SWEET GT DIAG: status hi:");
  	for (i = 0; i < 16; i++)
  		printf(" %x:%u", i, gt_diag.status[i]);
-@@ -749,6 +1068,229 @@
+@@ -749,6 +1069,227 @@
  		    gt_diag.reads, gt_diag.us_sum / gt_diag.reads,
  		    gt_diag.us_max);
  	}
@@ -1214,13 +1215,13 @@
 +				printf("SWEET GT: force hw failed; touch off\n");
 +				gt.stop_requested = 1;
 +			} else {
-+				gt_switch_bb(GT_BUS_BB_FAST);
++				gt_switch_bb(GT_BUS_BB_LEGACY);
 +			}
 +		}
 +		break;
 +	case GT_REQ_AUTO:
 +		if (gt_try_hw() != 0) {
-+			gt_switch_bb(GT_BUS_BB_FAST);
++			gt_switch_bb(GT_BUS_BB_LEGACY);
 +		}
 +		break;
 +	case GT_REQ_OFF:
@@ -1239,9 +1240,9 @@
 +		gt.stop_requested = 1;
 +		return;
 +	}
-+	printf("SWEET GT: spi3 runtime fail %u; switch bb-fast\n", gt.hw_fail);
++	printf("SWEET GT: spi3 runtime fail %u; switch bb-legacy\n", gt.hw_fail);
 +	gt_diag.path_switch++;
-+	gt_switch_bb(GT_BUS_BB_FAST);
++	gt_switch_bb(GT_BUS_BB_LEGACY);
 +}
 +
 +static void
@@ -1298,11 +1299,9 @@
 +		gt.stop_requested = 1;
 +		return;
 +	}
-+	if (old == GT_BUS_BB_LEGACY) {
-+		gt_switch_bb(GT_BUS_BB_LEGACY);
-+	} else {
-+		gt_switch_bb(GT_BUS_BB_FAST);
-+	}
++	/* Fast BB is experimental and has proven destructive on this
++	 * panel; never make it the implicit recovery target. */
++	gt_switch_bb(GT_BUS_BB_LEGACY);
 +}
 +
 +static int
@@ -1343,7 +1342,7 @@
  }
  
  static void
-@@ -762,9 +1304,35 @@
+@@ -762,9 +1303,35 @@
  	(void)arg;
  	(void)wr;
  
@@ -1379,7 +1378,7 @@
  	gt.eint = ruby_eint_attach(14, RUBY_EINT_EDGE_FALLING,
  	    &gt_eint_child);
  	if (gt.eint && ruby_eint_activate(gt.eint) == 0)
-@@ -776,11 +1344,33 @@
+@@ -776,11 +1343,33 @@
  
  	for (;;) {
  		bool ev;
@@ -1414,7 +1413,7 @@
  
  				if (ok) {
  					bad = 0;
-@@ -816,7 +1406,8 @@
+@@ -816,7 +1405,8 @@
  		ev = gt.eint && ruby_eint_pending(gt.eint);
  
  		if (ev || idle >= 8) {
@@ -1424,7 +1423,7 @@
  				if (++bad >= 50) {
  					gt_release_all();
  					bad = 0;
-@@ -848,6 +1439,9 @@
+@@ -848,6 +1438,9 @@
  	}
  
  out:
@@ -1434,7 +1433,7 @@
  	ruby_eint_detach(gt.eint);
  	gt.eint = NULL;
  	printf("SWEET GT: stopped\n");
-@@ -855,10 +1449,159 @@
+@@ -855,10 +1448,159 @@
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1594,7 +1593,7 @@
  	thread_t thread;
  	kern_return_t kr;
  
-@@ -867,10 +1610,40 @@
+@@ -867,10 +1609,40 @@
  	}
  	gt.started = true;
  
