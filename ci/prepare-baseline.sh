@@ -150,6 +150,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0159-ruby-eint-touch.patch" \
     "$ROOT/patches/0160-ruby-eint.patch" \
     "$ROOT/patches/0161-ruby-irq.patch" \
+    "$ROOT/patches/0162-ruby-irq-adjudicate.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
