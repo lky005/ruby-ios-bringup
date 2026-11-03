@@ -42,7 +42,7 @@
  		pr_cmd_battery();
 --- /dev/null
 +++ b/bsd/dev/ruby_spi3.h
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,24 @@
 +#ifndef RUBY_SPI3_H
 +#define RUBY_SPI3_H
 +
@@ -53,6 +53,7 @@
 +int ruby_spi3_init(uint32_t target_khz);
 +int ruby_spi3_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len);
 +int ruby_spi3_set_speed(uint32_t target_khz);
++void ruby_spi3_cs_high(void);
 +void ruby_spi3_shutdown(void);
 +
 +int ruby_spi3_ready(void);
@@ -68,7 +69,7 @@
 +#endif /* RUBY_SPI3_H */
 --- /dev/null
 +++ b/bsd/dev/ruby_spi3.c
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,443 @@
 +/*
 + * Minimal polled MTK SPI3 controller for the ruby (MT6877) touch panel.
 + *
@@ -422,6 +423,16 @@
 +}
 +
 +void
++ruby_spi3_cs_high(void)
++{
++	if (!s3.ready) {
++		return;
++	}
++	s3_reset();
++	s3_idle();
++}
++
++void
 +ruby_spi3_shutdown(void)
 +{
 +	s3.ready = 0;
@@ -553,7 +564,7 @@
  
  #define GT_GPIO_PA	0x10005000u
  #define GT_DIR(n)	(0x000u + ((n) * 0x10u))
-@@ -76,19 +106,54 @@
+@@ -76,19 +106,55 @@
  	uint32_t active;
  	int x[GT_MAX], y[GT_MAX];
  	struct ruby_eint *eint;
@@ -572,6 +583,7 @@
 +	uint32_t fail_streak;
 +	uint32_t stop_requested;
 +	uint32_t hw_fail;
++	uint32_t hw_fail_max;
 +	uint32_t fail_next;
 +	uint32_t fail_selftest;
 +	int dbg;
@@ -610,7 +622,7 @@
  } gt_diag;
  
  static const struct ruby_eint_child gt_eint_child = {
-@@ -370,7 +435,7 @@
+@@ -370,7 +436,7 @@
  }
  
  static void
@@ -619,7 +631,7 @@
  {
  	unsigned i;
  	int b;
-@@ -394,12 +459,127 @@
+@@ -394,12 +460,143 @@
  	spi_pin(GT_CS, true);
  }
  
@@ -636,8 +648,7 @@
 +	*(volatile uint32_t *)(gt.gpio + GT_SPI_DO) = gt_do_shadow;
 +}
 +
- static void
--spi_read_req(uint8_t *tx, uint32_t addr)
++static void
 +bb_fast_pin(uint32_t mask, bool high)
 +{
 +	if (high) {
@@ -673,8 +684,8 @@
 +
 +static void
 +bb_xfer_fast(const uint8_t *tx, uint8_t *rx, unsigned len)
- {
- 	unsigned i;
++{
++	unsigned i;
 +	int b;
 +	uint32_t d = __atomic_load_n(&gt.bb_delay_us, __ATOMIC_RELAXED);
 +
@@ -684,8 +695,7 @@
 +	if (d > 20) {
 +		d = 20;
 +	}
- 
--	for (i = 0; i < 40; i++) {
++
 +	bb_fast_pin(GT_CS, false);
 +	__asm__ volatile("dsb osh" ::: "memory");
 +	delay(d);
@@ -740,16 +750,34 @@
 +	}
 +}
 +
++/* Leave CS high for 1 ms between header retries so the panel can drop a
++ * stale FIFO/transaction state before the next read. */
+ static void
+-spi_read_req(uint8_t *tx, uint32_t addr)
++gt_cs_pulse(void)
++{
++	if (gt.bus == GT_BUS_SPI3) {
++		ruby_spi3_cs_high();
++	} else if (gt.bus == GT_BUS_BB_FAST) {
++		bb_fast_pin(GT_CS, true);
++		__asm__ volatile("dsb osh" ::: "memory");
++	} else if (gt.bus == GT_BUS_BB_LEGACY) {
++		spi_pin(GT_CS, true);
++	}
++	gt_wait(1);
++}
++
 +static void
 +spi_read_req(uint8_t *tx, uint32_t addr, unsigned total)
-+{
-+	unsigned i;
-+
+ {
+ 	unsigned i;
+ 
+-	for (i = 0; i < 40; i++) {
 +	for (i = 0; i < total; i++) {
  		tx[i] = 0;
  	}
  	tx[0] = 0xf1;
-@@ -412,12 +592,51 @@
+@@ -412,12 +609,51 @@
  	tx[7] = 0xff;
  }
  
@@ -803,7 +831,7 @@
  }
  
  static bool
-@@ -435,11 +654,11 @@
+@@ -435,11 +671,11 @@
  		for (i = 0; i < 8; i++) {
  			tx[5 + i] = 0xaa;
  		}
@@ -818,7 +846,7 @@
  		for (i = 0; i < 8; i++) {
  			if (rx[8 + i] != 0xaa) {
  				break;
-@@ -460,16 +679,23 @@
+@@ -460,16 +696,23 @@
  	uint32_t sum = 0;
  	int i;
  
@@ -846,7 +874,7 @@
  }
  
  static bool
-@@ -510,13 +736,19 @@
+@@ -510,13 +753,19 @@
  	printf("SWEET GT: LDO3 en=%02x vout=%02x, LDO2 en=%02x vout=%02x\n",
  	    en3, v3, en2, v2);
  
@@ -868,7 +896,7 @@
  
  	if (v3 < 0x3a || v3 > 0x40) {
  		if (!pmic_write(GT_LDO3_VOUT, 0x3a)) {
-@@ -564,14 +796,11 @@
+@@ -564,14 +813,11 @@
  	return false;
  }
  
@@ -885,7 +913,7 @@
  	/* reset 15 / IOVDD 110 pinmux back to GPIO */
  	v = gt_rd(GT_MODE(1));
  	gt_wr(GT_MODE(1), v & ~(0xfu << 28));
-@@ -586,6 +815,15 @@
+@@ -586,6 +832,15 @@
  	v = gt_rd(GT_SPI_DO);
  	gt_wr(GT_SPI_DO, (v & ~0x0fu) | GT_CS);
  	delay(20);
@@ -901,7 +929,7 @@
  
  	/* Reset GPIO15 low 10 ms, high 100 ms. */
  	gt_wr(GT_RESET_DIR, gt_rd(GT_RESET_DIR) | GT_RESET);
-@@ -632,47 +870,130 @@
+@@ -632,47 +887,131 @@
  }
  
  static int
@@ -1008,8 +1036,9 @@
 +			return GT_FRAME_RETRY;
 +		}
 +		/* The panel can assert IRQ just before the frame buffer is
-+		 * coherent; an immediate re-read sees the same bad header. */
-+		gt_wait(1);
++		 * coherent; an immediate re-read sees the same bad header.
++		 * Hold CS high for 1 ms so the panel can drop stale state. */
++		gt_cs_pulse();
 +	}
 +
  	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &dt_ns);
@@ -1056,7 +1085,7 @@
  	}
  
  	if (n) {
-@@ -682,8 +1003,12 @@
+@@ -682,8 +1021,12 @@
  		if ((sum & 0xffff) !=
  		    (uint32_t)(d[8 + n * 8] | (d[8 + n * 8 + 1] << 8))) {
  			gt_diag.err_dcsum++;
@@ -1071,7 +1100,7 @@
  		}
  		for (i = 0; i < (int)n; i++) {
  			const uint8_t *p = d + 8 + i * 8;
-@@ -694,8 +1019,7 @@
+@@ -694,8 +1037,7 @@
  			if (id >= GT_MAX || (mask & (1u << id)) ||
  			    type == 1 || type == 3) {
  				gt_diag.err_point++;
@@ -1081,7 +1110,7 @@
  			}
  			x = ((uint32_t)p[2] | ((uint32_t)p[3] << 8)) / 10;
  			y = ((uint32_t)p[4] | ((uint32_t)p[5] << 8)) / 10;
-@@ -710,7 +1034,12 @@
+@@ -710,7 +1052,12 @@
  			gt.y[id] = (int)y;
  		}
  	}
@@ -1095,7 +1124,7 @@
  
  	for (i = 0; i < GT_MAX; i++) {
  		if (mask & (1u << i)) {
-@@ -721,22 +1050,31 @@
+@@ -721,22 +1068,31 @@
  	}
  	gt.active = mask;
  	gt_diag.ok++;
@@ -1121,10 +1150,10 @@
 -	    gt_diag.ok, gt_diag.release, gt_diag.touch, gt_diag.err_zero,
 -	    gt_diag.err_head, gt_diag.err_noevent, gt_diag.err_ngt2,
 -	    gt_diag.err_dcsum, gt_diag.err_point);
-+	printf("SWEET GT DIAG: bus=%u hw=%d selftest=%u/%u hwfail=%u switch=%u recover=%u\n",
++	printf("SWEET GT DIAG: bus=%u hw=%d selftest=%u/%u hwfail=%u/%u switch=%u recover=%u\n",
 +	    (unsigned)gt.bus, gt.hw_ready, gt_diag.hw_selftest_ok,
-+	    gt_diag.hw_selftest_fail, gt_diag.hw_fail, gt_diag.path_switch,
-+	    gt_diag.recover);
++	    gt_diag.hw_selftest_fail, gt_diag.hw_fail, gt.hw_fail_max,
++	    gt_diag.path_switch, gt_diag.recover);
 +	printf("SWEET GT DIAG: ok=%u none=%u rel=%u touch=%u zero=%u head=%u noev=%u ngt2=%u dcsum=%u point=%u buserr=%u\n",
 +	    gt_diag.ok, gt_diag.none, gt_diag.release, gt_diag.touch,
 +	    gt_diag.err_zero, gt_diag.err_head, gt_diag.err_noevent,
@@ -1136,7 +1165,7 @@
  	printf("SWEET GT DIAG: status hi:");
  	for (i = 0; i < 16; i++)
  		printf(" %x:%u", i, gt_diag.status[i]);
-@@ -749,6 +1087,238 @@
+@@ -749,6 +1105,238 @@
  		    gt_diag.reads, gt_diag.us_sum / gt_diag.reads,
  		    gt_diag.us_max);
  	}
@@ -1351,7 +1380,7 @@
 +	if (rc == GT_FRAME_BUS_ERROR) {
 +		gt.hw_fail++;
 +		gt_diag.hw_fail = gt.hw_fail;
-+		if (gt.bus == GT_BUS_SPI3 && gt.hw_fail >= GT_HW_FAIL_MAX) {
++		if (gt.bus == GT_BUS_SPI3 && gt.hw_fail >= gt.hw_fail_max) {
 +			gt_fallback_bb();
 +		} else if (gt.hw_fail == 1) {
 +			GT_LOG("SWEET GT: frame bus error\n");
@@ -1359,7 +1388,7 @@
 +	} else if (gt.bus == GT_BUS_SPI3) {
 +		gt.hw_fail++;
 +		gt_diag.hw_fail = gt.hw_fail;
-+		if (gt.hw_fail >= GT_HW_FAIL_MAX) {
++		if (gt.hw_fail >= gt.hw_fail_max) {
 +			gt_fallback_bb();
 +		}
 +	}
@@ -1375,7 +1404,7 @@
  }
  
  static void
-@@ -762,9 +1332,35 @@
+@@ -762,9 +1350,35 @@
  	(void)arg;
  	(void)wr;
  
@@ -1411,7 +1440,7 @@
  	gt.eint = ruby_eint_attach(14, RUBY_EINT_EDGE_FALLING,
  	    &gt_eint_child);
  	if (gt.eint && ruby_eint_activate(gt.eint) == 0)
-@@ -776,11 +1372,33 @@
+@@ -776,11 +1390,33 @@
  
  	for (;;) {
  		bool ev;
@@ -1446,7 +1475,7 @@
  
  				if (ok) {
  					bad = 0;
-@@ -816,7 +1434,8 @@
+@@ -816,7 +1452,8 @@
  		ev = gt.eint && ruby_eint_pending(gt.eint);
  
  		if (ev || idle >= 8) {
@@ -1456,7 +1485,7 @@
  				if (++bad >= 50) {
  					gt_release_all();
  					bad = 0;
-@@ -848,6 +1467,9 @@
+@@ -848,6 +1485,9 @@
  	}
  
  out:
@@ -1466,7 +1495,7 @@
  	ruby_eint_detach(gt.eint);
  	gt.eint = NULL;
  	printf("SWEET GT: stopped\n");
-@@ -855,10 +1477,168 @@
+@@ -855,10 +1495,177 @@
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
@@ -1590,6 +1619,15 @@
 +		printf("SWEET GT: bb bar=%u\n", v);
 +		return 1;
 +	}
++	if (!strncmp(p, "hwfail ", 7)) {
++		if (gt_parse_uint(p + 7, &v) != 0 || v < 1 || v > 100) {
++			printf("SWEET GT: hwfail 1..100\n");
++			return 1;
++		}
++		gt.hw_fail_max = v;
++		printf("SWEET GT: hwfail=%u\n", v);
++		return 1;
++	}
 +	if (!strncmp(p, "spi speed ", 10)) {
 +		if (gt_parse_uint(p + 10, &v) != 0 || v < 100 || v > 5000) {
 +			printf("SWEET GT: spi speed 100..5000 kHz\n");
@@ -1623,7 +1661,7 @@
 +		printf("SWEET GT: failtest=%s\n", p);
 +		return 1;
 +	}
-+	printf("SWEET GT: gt diag | bus [bb|legacy|hw|auto|off] | recover | log 0|1 | bb delay <us> | bb bar <0..15> | spi speed <khz>\n");
++	printf("SWEET GT: gt diag | bus [bb|legacy|hw|auto|off] | recover | log 0|1 | hwfail <1..100> | bb delay <us> | bb bar <0..15> | spi speed <khz>\n");
 +	return 1;
 +}
 +
@@ -1635,7 +1673,7 @@
  	thread_t thread;
  	kern_return_t kr;
  
-@@ -867,10 +1647,44 @@
+@@ -867,10 +1674,49 @@
  	}
  	gt.started = true;
  
@@ -1655,6 +1693,7 @@
 +	gt.bb_delay_us = 2;
 +	gt.bb_barrier = 0;
 +	gt.hw_speed_khz = 2000;
++	gt.hw_fail_max = GT_HW_FAIL_MAX;
 +	gt.quiet = 1;
 +	if (PE_parse_boot_argn("sweetgtbbdelay", &val, sizeof(val)) &&
 +	    val >= 1 && val <= 20) {
@@ -1667,6 +1706,10 @@
 +	if (PE_parse_boot_argn("sweetgtspispeed", &val, sizeof(val)) &&
 +	    val >= 100 && val <= 5000) {
 +		gt.hw_speed_khz = (uint32_t)val;
++	}
++	if (PE_parse_boot_argn("sweetgthwfail", &val, sizeof(val)) &&
++	    val >= 1 && val <= 100) {
++		gt.hw_fail_max = (uint32_t)val;
 +	}
 +	if (PE_parse_boot_argn("sweetgtdbg", &val, sizeof(val)) && val) {
 +		gt.dbg = 1;
