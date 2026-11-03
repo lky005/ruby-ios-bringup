@@ -1,0 +1,233 @@
+--- a/bsd/dev/ruby_irq.c
++++ b/bsd/dev/ruby_irq.c
+@@ -5,9 +5,11 @@
+  * pexpert/arm/pe_fiq.c and osfmk/arm64/sleh.c.  This module only configures
+  * the EINT parent SPI and installs a handler for it.
+  *
+- * ruby_irq_status() is read-only.  ruby_irq_arm() is gated by rubyirq=1 and
+- * refuses to write anything unless the preflight proves the SPI is Group1NS,
+- * level, idle and owned by the touch EINT line.
++ * ruby_irq_status() is read-only.  ruby_irq_arm() is gated by rubyirq=1.
++ * When GICD_CTLR.DS is clear the NS view of IGROUPR is RAZ/WI, so the
++ * interrupt group can only come from the secure monitor: the preflight
++ * asks ATF (MTK_SIP_KERNEL_GIC_DUMP) and refuses a Group0 line.  The
++ * final proof is the NS ISENABLER readback after the enable write.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 
+@@ -52,7 +54,11 @@
+ #define GICD_CTLR_ARE_NS      0x10u
+ #define GICD_CTLR_GRP1NS      0x2u
+ 
++/* MTK_SIP_SMC_CMD(0x201): ATF returns the secure GIC view of one INTID. */
++#define RUBY_IRQ_SMC_GIC_DUMP 0xc2000201u
++
+ #define RUBY_IRQ_PF_NODEV     (1u << 0)
++#define RUBY_IRQ_PF_GROUP     (1u << 1)
+ #define RUBY_IRQ_PF_CTLR      (1u << 2)
+ #define RUBY_IRQ_PF_SRE       (1u << 3)
+ #define RUBY_IRQ_PF_GRPEN     (1u << 4)
+@@ -81,7 +87,6 @@
+ static uint32_t g_saved_prio;
+ static uint32_t g_saved_icfgr;
+ static uint32_t g_saved_enable9;
+-static uint32_t g_saved_group9;
+ static uint64_t g_saved_router;
+ 
+ static int g_irq_chan;
+@@ -158,6 +163,32 @@
+ 	return (aff3 << 32) | (aff2 << 24) | (aff1 << 16) | aff0;
+ }
+ 
++/*
++ * The secure monitor must tell us the group: with GICD_CTLR.DS=0 the NS
++ * view of GICD_IGROUPR is RAZ/WI and cannot be used to adjudicate.
++ */
++static long
++ruby_irq_smc_dump(uint32_t intid, uint64_t *raw)
++{
++	register uint64_t x0 __asm__("x0") = RUBY_IRQ_SMC_GIC_DUMP;
++	register uint64_t x1 __asm__("x1") = intid;
++
++	__asm__ volatile(
++	    "mov x2, xzr\n\t"
++	    "mov x3, xzr\n\t"
++	    "mov x4, xzr\n\t"
++	    "mov x5, xzr\n\t"
++	    "mov x6, xzr\n\t"
++	    "mov x7, xzr\n\t"
++	    "smc #0\n\t"
++	    : "+r"(x0), "+r"(x1)
++	    :
++	    : "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
++	      "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	*raw = x0;
++	return (long)x0;
++}
++
+ static int
+ ruby_irq_rwp(void)
+ {
+@@ -174,6 +205,9 @@
+ int
+ ruby_irq_status(struct ruby_irq_status *out)
+ {
++	uint64_t smc;
++	long smc_rc;
++
+ 	if (!out)
+ 		return EINVAL;
+ 	memset(out, 0, sizeof(*out));
+@@ -191,6 +225,21 @@
+ 	out->priority288 = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
+ 	out->icfgr = ruby_rd32(g_gicd, GICD_ICFGR_288);
+ 	out->router288 = ruby_rd64(g_gicd, GICD_IROUTER_288);
++	smc_rc = ruby_irq_smc_dump(RUBY_IRQ_INTID, &smc);
++	if (smc_rc >= 0) {
++		out->smc_valid = 1;
++		out->smc_enable = (uint32_t)(smc & 1u);
++		out->smc_group = (uint32_t)((smc >> 1) & 1u);
++		out->smc_prio = (uint32_t)((smc >> 2) & 0xffu);
++		out->smc_sens = (uint32_t)((smc >> 10) & 1u);
++		out->smc_pending = (uint32_t)((smc >> 11) & 1u);
++		out->smc_active = (uint32_t)((smc >> 12) & 1u);
++		/* GIC-600 shifts the target mask one bit further. */
++		if (((out->gicd_iidr >> 24) & 0xffu) == 0x2u)
++			out->smc_target = (uint32_t)((smc >> 15) & 0xffffu);
++		else
++			out->smc_target = (uint32_t)((smc >> 14) & 0xffffu);
++	}
+ 	out->mpidr = __builtin_arm_rsr64("MPIDR_EL1");
+ 	out->icc_sre = __builtin_arm_rsr64("ICC_SRE_EL1");
+ 	if (out->icc_sre & 1u) {
+@@ -237,11 +286,27 @@
+ 		pf |= RUBY_IRQ_PF_RWP;
+ 	if (!ruby_eint_line_used(RUBY_IRQ_TOUCH_LINE))
+ 		pf |= RUBY_IRQ_PF_NOOWNER;
++	if (st->smc_valid) {
++		if (st->smc_group == 0)
++			pf |= RUBY_IRQ_PF_GROUP;
++	} else {
++		printf("RUBY IRQ: SMC denied; INTID%u group unknown\n",
++		    RUBY_IRQ_INTID);
++	}
+ 
+-	printf("RUBY IRQ: preflight pf=%08x ctlr=%08x group9=%08x en9=%08x pnd9=%08x act9=%08x cfg=%08x pmr=%llx\n",
++	printf("RUBY IRQ: preflight pf=%08x ctlr=%08x group9ns=%08x en9=%08x pnd9=%08x act9=%08x cfg=%08x pmr=%llx\n",
+ 	    pf, st->gicd_ctlr, st->group9, st->enable9, st->pending9,
+ 	    st->active9, st->icfgr & 3u,
+ 	    (unsigned long long)(st->icc_pmr & 0xffu));
++	if (st->smc_valid)
++		printf("RUBY IRQ: SMC intid%u enable=%u group=%u prio=%02x sens=%u pend=%u active=%u target=%04x raw=%016llx\n",
++		    RUBY_IRQ_INTID, st->smc_enable, st->smc_group,
++		    st->smc_prio, st->smc_sens, st->smc_pending,
++		    st->smc_active, st->smc_target,
++		    (unsigned long long)st->smc_raw);
++	if (pf & RUBY_IRQ_PF_GROUP)
++		printf("RUBY IRQ: SMC says INTID%u is Group0/secure; refusing\n",
++		    RUBY_IRQ_INTID);
+ 	if (pf & RUBY_IRQ_PF_ENABLED)
+ 		printf("RUBY IRQ: INTID%u already enabled; refusing\n",
+ 		    RUBY_IRQ_INTID);
+@@ -262,7 +327,7 @@
+ ruby_irq_arm(void)
+ {
+ 	struct ruby_irq_status st;
+-	uint32_t pf, prio, cfg, group9;
++	uint32_t pf, prio, cfg;
+ 	uint64_t mpidr, route;
+ 
+ 	ruby_irq_init();
+@@ -285,29 +350,8 @@
+ 	g_saved_prio = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
+ 	g_saved_icfgr = ruby_rd32(g_gicd, GICD_ICFGR_288);
+ 	g_saved_router = ruby_rd64(g_gicd, GICD_IROUTER_288);
+-	g_saved_group9 = ruby_rd32(g_gicd, GICD_IGROUPR9);
+ 	__atomic_store_n(&g_configured, 1, __ATOMIC_RELEASE);
+ 
+-	/*
+-	 * A read of 0 is only the reset value; the secure world may have
+-	 * left the SPI for the NS kernel to group.  Write one bit and read
+-	 * it back: 1 = NS may own it, 0 = the write was ignored (secure).
+-	 */
+-	ruby_wr32(g_gicd, GICD_IGROUPR9, g_saved_group9 | 1u);
+-	if (ruby_irq_rwp() != 0) {
+-		printf("RUBY IRQ: RWP timeout after group write\n");
+-		ruby_irq_disarm();
+-		return ETIMEDOUT;
+-	}
+-	group9 = ruby_rd32(g_gicd, GICD_IGROUPR9);
+-	if ((group9 & 1u) == 0) {
+-		printf("RUBY IRQ: NS group write ignored; INTID%u is secure\n",
+-		    RUBY_IRQ_INTID);
+-		__atomic_store_n(&g_configured, 0, __ATOMIC_RELEASE);
+-		return EPERM;
+-	}
+-	printf("RUBY IRQ: NS group write accepted group9=%08x\n", group9);
+-
+ 	disable_preemption();
+ 	ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL,
+ 	    ruby_irq_isr, NULL);
+@@ -343,10 +387,10 @@
+ 	}
+ 
+ 	ruby_eint_set_parent_owned(1);
+-	printf("RUBY IRQ: armed intid=%u mpidr=%016llx route=%016llx en9=%08x group9=%08x prio=%08x cfg=%08x\n",
++	printf("RUBY IRQ: armed intid=%u mpidr=%016llx route=%016llx en9=%08x smc_group=%d prio=%08x cfg=%08x\n",
+ 	    RUBY_IRQ_INTID, (unsigned long long)mpidr,
+ 	    (unsigned long long)route, ruby_rd32(g_gicd, GICD_ISENABLER9),
+-	    ruby_rd32(g_gicd, GICD_IGROUPR9),
++	    st.smc_valid ? (int)st.smc_group : -1,
+ 	    ruby_rd32(g_gicd, GICD_IPRIORITY_288),
+ 	    ruby_rd32(g_gicd, GICD_ICFGR_288) & 3u);
+ 	return 0;
+@@ -366,14 +410,11 @@
+ 		ruby_wr32(g_gicd, GICD_IPRIORITY_288, g_saved_prio);
+ 		ruby_wr32(g_gicd, GICD_ICFGR_288, g_saved_icfgr);
+ 		ruby_wr64(g_gicd, GICD_IROUTER_288, g_saved_router);
+-		ruby_wr32(g_gicd, GICD_IGROUPR9, g_saved_group9);
+ 		if (g_saved_enable9 & 1u)
+ 			ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
+ 		else
+ 			ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
+ 		(void)ruby_irq_rwp();
+-		printf("RUBY IRQ: group restore=%08x\n",
+-		    ruby_rd32(g_gicd, GICD_IGROUPR9));
+ 		/*
+ 		 * ml_install_interrupt_handler() is per-CPU and arm/disarm
+ 		 * usually run from the same probe thread.  A stale handler on
+--- a/bsd/dev/ruby_irq.h
++++ b/bsd/dev/ruby_irq.h
+@@ -24,6 +24,15 @@
+ 	uint64_t icc_bpr1;
+ 	uint64_t icc_igrpen1;
+ 	uint64_t icc_hppir1;
++	uint64_t smc_raw;
++	uint32_t smc_valid;
++	uint32_t smc_enable;
++	uint32_t smc_group;
++	uint32_t smc_prio;
++	uint32_t smc_sens;
++	uint32_t smc_pending;
++	uint32_t smc_active;
++	uint32_t smc_target;
+ 	uint32_t armed;
+ 	uint32_t fatal;
+ 	uint32_t isr_count;
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -1409,9 +1409,13 @@
+ 	    st->event_count);
+ 	printf("RUBY IRQ: gicd ctlr=%08x typer=%08x iidr=%08x\n",
+ 	    st->gicd_ctlr, st->gicd_typer, st->gicd_iidr);
+-	printf("RUBY IRQ: intid%u group9=%08x en9=%08x pnd9=%08x act9=%08x\n",
++	printf("RUBY IRQ: intid%u group9ns=%08x en9=%08x pnd9=%08x act9=%08x\n",
+ 	    RUBY_IRQ_INTID, st->group9, st->enable9, st->pending9,
+ 	    st->active9);
++	printf("RUBY IRQ: smc valid=%u enable=%u group=%u prio=%02x sens=%u pend=%u active=%u target=%04x raw=%016llx\n",
++	    st->smc_valid, st->smc_enable, st->smc_group, st->smc_prio,
++	    st->smc_sens, st->smc_pending, st->smc_active, st->smc_target,
++	    (unsigned long long)st->smc_raw);
+ 	printf("RUBY IRQ: prio288=%08x icfgr=%08x router288=%016llx mpidr=%016llx\n",
+ 	    st->priority288, st->icfgr, (unsigned long long)st->router288,
+ 	    (unsigned long long)st->mpidr);
