@@ -1,4 +1,4 @@
-name: xnu-0164
+name: xnu-0165
 
 # Builds the ruby kernel without vendoring the upstream tree.
 # ci/prepare-baseline.sh takes a content-pinned 82-file baseline (private
@@ -22,13 +22,13 @@ on:
         default: "16.0"
       hash_config:
         description: config carrying the expected kernel hash (empty expectation = record only)
-        default: "config/0164.env"
+        default: "config/0165.env"
       skip_patches:
         description: patch numbers to drop (prefix match, e.g. 0144) for an older line
         default: ""
       patchset_sha256:
         description: expected patchset hash; must match the patch set actually built
-        default: "2e4fede8c700e7afaf781e2b09a6877241969d7b3b25a9bfc765819722d90fe7"
+        default: "8fee441a9cc046d2646748ed3e9a001e1a7eed557a005a8c3158176524184efb"
       kernel_config:
         description: RELEASE / DEVELOPMENT / DEBUG
         default: DEVELOPMENT
@@ -59,14 +59,14 @@ env:
   # BASELINE_SSH_KEY. The public pin is the manifest root, not a URL.
   BASELINE_MANIFEST_SHA256: 829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910
   BASELINE_FILES: "82"
-  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || '2e4fede8c700e7afaf781e2b09a6877241969d7b3b25a9bfc765819722d90fe7' }}
+  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || '8fee441a9cc046d2646748ed3e9a001e1a7eed557a005a8c3158176524184efb' }}
   SKIP_PATCHES: ${{ inputs.skip_patches || '' }}
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   RUNNER_IMAGE: ${{ inputs.runner || 'macos-15' }}
   XCODE_VERSION: ${{ inputs.xcode_version || '16.0' }}
-  HASH_CONFIG: ${{ inputs.hash_config || 'config/0164.env' }}
+  HASH_CONFIG: ${{ inputs.hash_config || 'config/0165.env' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
   # ccache: xnu is ~2000 compiles; a patch usually changes a few of them

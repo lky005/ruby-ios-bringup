@@ -1,0 +1,1564 @@
+--- a/bsd/dev/ruby_eint.c
++++ b/bsd/dev/ruby_eint.c
+@@ -11,11 +11,15 @@
+ #include <sys/errno.h>
+ #include <kern/clock.h>
+ #include <kern/locks.h>
++#include <kern/sched_prim.h>
++#include <kern/thread.h>
++#include <mach/mach_time.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include <libkern/libkern.h>
+ 
+ #include "ruby_eint.h"
++#include "ruby_irq.h"
+ #include "ruby_hal.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+@@ -23,7 +27,10 @@
+ #define RUBY_EINT0_PA        0x1000b000u
+ #define RUBY_EINT_GICD_PA    0x0c000000u
+ #define RUBY_EINT_REG_SIZE   0x1000u
+-#define RUBY_EINT_LINES      32u
++/* MT6877: ports=7, ap_num=128 (pinctrl-mt6877.c:701).  Only the first
++ * four 32-line ports exist; a child line may exceed port 0. */
++#define RUBY_EINT_LINES      128u
++#define RUBY_EINT_LINE_PORTS 4u
+ #define RUBY_EINT_PORTS      7u
+ 
+ #define RUBY_EINT_STA        0x000u
+@@ -49,6 +56,27 @@
+ #define RUBY_EINT_GIC_SPI256_BIT \
+ 	(1u << (RUBY_EINT_GIC_SPI256_INTID % 32u))
+ 
++static inline uint32_t
++ruby_eint_bit(uint32_t line)
++{
++	return 1u << (line & 31u);
++}
++
++static inline uint32_t
++ruby_eint_off(uint32_t reg, uint32_t line)
++{
++	return reg + (line >> 5) * 4u;
++}
++
++static uint64_t
++ruby_eint_now_ms(void)
++{
++	uint64_t ns = 0;
++
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000000ULL;
++}
++
+ struct ruby_eint {
+ 	uint32_t line;
+ 	uint32_t trigger;
+@@ -57,6 +85,20 @@
+ 	uint32_t saved_pol;
+ 	uint32_t pending_count;
+ 	uint32_t ack_count;
++	uint32_t state;
++	const struct ruby_eint_child *child;
++	uint32_t seq;
++	uint32_t isr_hits;
++	uint32_t service_ok;
++	uint32_t service_fail;
++	uint32_t stray;
++	uint32_t edge_rearm;
++	uint32_t poll_seen;
++	uint32_t win_start_ms;
++	uint32_t win_hits;
++	uint32_t win_service_base;
++	uint32_t fail_streak;
++	int poll_only;
+ 	bool used;
+ };
+ 
+@@ -125,24 +167,30 @@
+ }
+ 
+ static void
+-ruby_eint_apply_trigger(struct ruby_eint *e, uint32_t bit)
++ruby_eint_apply_trigger(struct ruby_eint *e)
+ {
++	uint32_t bit = ruby_eint_bit(e->line);
++	uint32_t sens_set = ruby_eint_off(RUBY_EINT_SENS_SET, e->line);
++	uint32_t sens_clr = ruby_eint_off(RUBY_EINT_SENS_CLR, e->line);
++	uint32_t pol_set = ruby_eint_off(RUBY_EINT_POL_SET, e->line);
++	uint32_t pol_clr = ruby_eint_off(RUBY_EINT_POL_CLR, e->line);
++
+ 	switch (e->trigger) {
+ 	case RUBY_EINT_EDGE_FALLING:
+-		ruby_wr32(g_eint_base, RUBY_EINT_SENS_CLR, bit);
+-		ruby_wr32(g_eint_base, RUBY_EINT_POL_CLR, bit);
++		ruby_wr32(g_eint_base, sens_clr, bit);
++		ruby_wr32(g_eint_base, pol_clr, bit);
+ 		break;
+ 	case RUBY_EINT_EDGE_RISING:
+-		ruby_wr32(g_eint_base, RUBY_EINT_SENS_CLR, bit);
+-		ruby_wr32(g_eint_base, RUBY_EINT_POL_SET, bit);
++		ruby_wr32(g_eint_base, sens_clr, bit);
++		ruby_wr32(g_eint_base, pol_set, bit);
+ 		break;
+ 	case RUBY_EINT_LEVEL_LOW:
+-		ruby_wr32(g_eint_base, RUBY_EINT_SENS_SET, bit);
+-		ruby_wr32(g_eint_base, RUBY_EINT_POL_CLR, bit);
++		ruby_wr32(g_eint_base, sens_set, bit);
++		ruby_wr32(g_eint_base, pol_clr, bit);
+ 		break;
+ 	case RUBY_EINT_LEVEL_HIGH:
+-		ruby_wr32(g_eint_base, RUBY_EINT_SENS_SET, bit);
+-		ruby_wr32(g_eint_base, RUBY_EINT_POL_SET, bit);
++		ruby_wr32(g_eint_base, sens_set, bit);
++		ruby_wr32(g_eint_base, pol_set, bit);
+ 		break;
+ 	default:
+ 		break;
+@@ -153,7 +201,7 @@
+ ruby_eint_acquire(uint32_t line, enum ruby_eint_trigger trig)
+ {
+ 	struct ruby_eint *e;
+-	uint32_t bit, mask, ctl, isen, pnd;
++	uint32_t bit, mask, ctl, isen, pnd, doff, dval;
+ 	uint32_t saved_mask, saved_sens, saved_pol;
+ 
+ 	ruby_eint_init();
+@@ -164,7 +212,7 @@
+ 	    trig > RUBY_EINT_LEVEL_HIGH)
+ 		return NULL;
+ 
+-	bit = 1u << line;
++	bit = ruby_eint_bit(line);
+ 	ruby_eint_gic_read(&ctl, &isen, &pnd);
+ 	if (ctl == 0 || ctl == 0xffffffffu || isen == 0xffffffffu ||
+ 	    ((isen & RUBY_EINT_GIC_SPI256_BIT) &&
+@@ -182,20 +230,41 @@
+ 	}
+ 	e->line = line;
+ 	e->trigger = (uint32_t)trig;
+-	saved_mask = (ruby_rd32(g_eint_base, RUBY_EINT_MASK) & bit) ? 1 : 0;
+-	saved_sens = (ruby_rd32(g_eint_base, RUBY_EINT_SENS) & bit) ? 1 : 0;
+-	saved_pol = (ruby_rd32(g_eint_base, RUBY_EINT_POL) & bit) ? 1 : 0;
++	saved_mask = (ruby_rd32(g_eint_base,
++	    ruby_eint_off(RUBY_EINT_MASK, line)) & bit) ? 1 : 0;
++	saved_sens = (ruby_rd32(g_eint_base,
++	    ruby_eint_off(RUBY_EINT_SENS, line)) & bit) ? 1 : 0;
++	saved_pol = (ruby_rd32(g_eint_base,
++	    ruby_eint_off(RUBY_EINT_POL, line)) & bit) ? 1 : 0;
+ 	e->saved_mask = saved_mask;
+ 	e->saved_sens = saved_sens;
+ 	e->saved_pol = saved_pol;
+ 	e->pending_count = 0;
+ 	e->ack_count = 0;
+-
+-	ruby_eint_apply_trigger(e, bit);
+-	ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
+-	ruby_wr32(g_eint_base, RUBY_EINT_MASK_CLR, bit);
++	e->state = RUBY_EINT_RESERVED;
++	e->child = NULL;
++	e->seq = 0;
++	e->isr_hits = 0;
++	e->service_ok = 0;
++	e->service_fail = 0;
++	e->stray = 0;
++	e->edge_rearm = 0;
++	e->poll_seen = 0;
++	e->win_start_ms = 0;
++	e->win_hits = 0;
++	e->win_service_base = 0;
++	e->fail_streak = 0;
++	e->poll_only = 0;
++
++	ruby_eint_apply_trigger(e);
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_ACK, line), bit);
++	doff = ruby_eint_off(RUBY_EINT_DOM_EN, line);
++	dval = ruby_rd32(g_eint_base, doff);
++	ruby_wr32(g_eint_base, doff, dval & ~bit);
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_MASK_CLR, line), bit);
+ 	e->used = true;
+-	mask = ruby_rd32(g_eint_base, RUBY_EINT_MASK);
++	mask = ruby_rd32(g_eint_base,
++	    ruby_eint_off(RUBY_EINT_MASK, line));
+ 	RUBY_EINT_UNLOCK();
+ 
+ 	printf("RUBY EINT: line=%u armed trigger=%u saved=%u/%u/%u mask=%08x\n",
+@@ -206,7 +275,7 @@
+ void
+ ruby_eint_release(struct ruby_eint *e)
+ {
+-	uint32_t bit;
++	uint32_t bit, doff, dval;
+ 
+ 	if (!e)
+ 		return;
+@@ -214,28 +283,41 @@
+ 	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
+ 	    !g_eint_base || e->line >= RUBY_EINT_LINES)
+ 		return;
+-	bit = 1u << e->line;
++	bit = ruby_eint_bit(e->line);
+ 
+ 	RUBY_EINT_LOCK();
+ 	if (!e->used) {
+ 		RUBY_EINT_UNLOCK();
+ 		return;
+ 	}
++	doff = ruby_eint_off(RUBY_EINT_DOM_EN, e->line);
++	dval = ruby_rd32(g_eint_base, doff);
++	ruby_wr32(g_eint_base, doff, dval & ~bit);
+ 	if (e->saved_mask & 1u)
+-		ruby_wr32(g_eint_base, RUBY_EINT_MASK_SET, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_SET, e->line), bit);
+ 	else
+-		ruby_wr32(g_eint_base, RUBY_EINT_MASK_CLR, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_CLR, e->line), bit);
+ 	if (e->saved_sens & 1u)
+-		ruby_wr32(g_eint_base, RUBY_EINT_SENS_SET, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_SENS_SET, e->line), bit);
+ 	else
+-		ruby_wr32(g_eint_base, RUBY_EINT_SENS_CLR, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_SENS_CLR, e->line), bit);
+ 	if (e->saved_pol & 1u)
+-		ruby_wr32(g_eint_base, RUBY_EINT_POL_SET, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_POL_SET, e->line), bit);
+ 	else
+-		ruby_wr32(g_eint_base, RUBY_EINT_POL_CLR, bit);
+-	ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_POL_CLR, e->line), bit);
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_ACK, e->line), bit);
+ 	e->used = false;
++	e->state = RUBY_EINT_FREE;
++	e->poll_only = 0;
++	e->seq++;
+ 	RUBY_EINT_UNLOCK();
++	wakeup(&e->seq);
+ 	printf("RUBY EINT: line=%u released\n", e->line);
+ }
+ 
+@@ -247,10 +329,11 @@
+ 
+ 	if (!e || e->line >= RUBY_EINT_LINES)
+ 		return 0;
+-	bit = 1u << e->line;
++	bit = ruby_eint_bit(e->line);
+ 	RUBY_EINT_LOCK();
+ 	if (e->used) {
+-		sta = ruby_rd32(g_eint_base, RUBY_EINT_STA);
++		sta = ruby_rd32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_STA, e->line));
+ 		if (sta & bit) {
+ 			e->pending_count++;
+ 			hit = 1;
+@@ -267,10 +350,11 @@
+ 
+ 	if (!e || e->line >= RUBY_EINT_LINES)
+ 		return;
+-	bit = 1u << e->line;
++	bit = ruby_eint_bit(e->line);
+ 	RUBY_EINT_LOCK();
+ 	if (e->used) {
+-		ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_ACK, e->line), bit);
+ 		e->ack_count++;
+ 	}
+ 	RUBY_EINT_UNLOCK();
+@@ -343,7 +427,9 @@
+ ruby_eint_status(void)
+ {
+ 	struct {
+-		uint32_t line, trigger, pending, ack;
++		uint32_t line, trigger, pending, ack, state;
++		uint32_t isr, ok, fail, stray, rearm;
++		int poll;
+ 	} snap[RUBY_EINT_LINES];
+ 	uint32_t ctl, isen, pnd;
+ 	uint32_t sta, mask, sens, pol;
+@@ -368,6 +454,13 @@
+ 		snap[n].trigger = g_eint_slots[i].trigger;
+ 		snap[n].pending = g_eint_slots[i].pending_count;
+ 		snap[n].ack = g_eint_slots[i].ack_count;
++		snap[n].state = g_eint_slots[i].state;
++		snap[n].isr = g_eint_slots[i].isr_hits;
++		snap[n].ok = g_eint_slots[i].service_ok;
++		snap[n].fail = g_eint_slots[i].service_fail;
++		snap[n].stray = g_eint_slots[i].stray;
++		snap[n].rearm = g_eint_slots[i].edge_rearm;
++		snap[n].poll = g_eint_slots[i].poll_only;
+ 		n++;
+ 	}
+ 	RUBY_EINT_UNLOCK();
+@@ -385,8 +478,11 @@
+ 		return;
+ 	}
+ 	for (i = 0; i < n; i++)
+-		printf("RUBY EINT: used line=%u trigger=%u pending=%u ack=%u\n",
+-		    snap[i].line, snap[i].trigger, snap[i].pending, snap[i].ack);
++		printf("RUBY EINT: used line=%u %s trig=%u pending=%u ack=%u isr=%u ok=%u fail=%u stray=%u rearm=%u poll=%d\n",
++		    snap[i].line, ruby_eint_state_name(snap[i].state),
++		    snap[i].trigger, snap[i].pending, snap[i].ack,
++		    snap[i].isr, snap[i].ok, snap[i].fail, snap[i].stray,
++		    snap[i].rearm, snap[i].poll);
+ }
+ 
+ int
+@@ -449,10 +545,11 @@
+ 	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
+ 	    !g_eint_base)
+ 		return;
+-	bit = 1u << line;
++	bit = ruby_eint_bit(line);
+ 	RUBY_EINT_LOCK();
+ 	if (g_eint_slots[line].used)
+-		ruby_wr32(g_eint_base, RUBY_EINT_MASK_SET, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_SET, line), bit);
+ 	RUBY_EINT_UNLOCK();
+ }
+ 
+@@ -467,10 +564,11 @@
+ 	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
+ 	    !g_eint_base)
+ 		return;
+-	bit = 1u << line;
++	bit = ruby_eint_bit(line);
+ 	RUBY_EINT_LOCK();
+ 	if (g_eint_slots[line].used)
+-		ruby_wr32(g_eint_base, RUBY_EINT_MASK_CLR, bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_CLR, line), bit);
+ 	RUBY_EINT_UNLOCK();
+ }
+ 
+@@ -485,14 +583,17 @@
+ 	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
+ 	    !g_eint_base)
+ 		return 0;
+-	bit = 1u << line;
++	bit = ruby_eint_bit(line);
+ 	/* Interrupt context: interrupts are already masked. */
+ 	lck_spin_lock(&g_eint_lock);
+ 	if (g_eint_slots[line].used) {
+-		sta = ruby_rd32(g_eint_base, RUBY_EINT_STA);
++		sta = ruby_rd32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_STA, line));
+ 		if (sta & bit) {
+-			ruby_wr32(g_eint_base, RUBY_EINT_MASK_SET, bit);
+-			ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
++			ruby_wr32(g_eint_base,
++			    ruby_eint_off(RUBY_EINT_MASK_SET, line), bit);
++			ruby_wr32(g_eint_base,
++			    ruby_eint_off(RUBY_EINT_ACK, line), bit);
+ 			g_eint_slots[line].pending_count++;
+ 			g_eint_slots[line].ack_count++;
+ 			hit = 1;
+@@ -502,6 +603,463 @@
+ 	return hit;
+ }
+ 
++const char *
++ruby_eint_state_name(uint32_t state)
++{
++	switch (state) {
++	case RUBY_EINT_FREE:
++		return "free";
++	case RUBY_EINT_RESERVED:
++		return "reserved";
++	case RUBY_EINT_ACTIVE:
++		return "active";
++	case RUBY_EINT_DEFERRED:
++		return "deferred";
++	case RUBY_EINT_STUCK:
++		return "stuck";
++	case RUBY_EINT_POLL_ONLY:
++		return "poll";
++	default:
++		return "?";
++	}
++}
++
++struct ruby_eint *
++ruby_eint_attach(uint32_t line, enum ruby_eint_trigger trig,
++    const struct ruby_eint_child *child)
++{
++	struct ruby_eint *e;
++	uint32_t bit, doff, dval, mask, ctl, isen, pnd;
++	uint32_t saved_mask, saved_sens, saved_pol;
++
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_enabled || !g_eint_base || !g_gicd_base)
++		return NULL;
++	if (line >= RUBY_EINT_LINES || trig > RUBY_EINT_LEVEL_HIGH)
++		return NULL;
++
++	bit = ruby_eint_bit(line);
++	ruby_eint_gic_read(&ctl, &isen, &pnd);
++	if (ctl == 0 || ctl == 0xffffffffu || isen == 0xffffffffu)
++		return NULL;
++
++	RUBY_EINT_LOCK();
++	e = &g_eint_slots[line];
++	if (e->used) {
++		RUBY_EINT_UNLOCK();
++		return NULL;
++	}
++	e->line = line;
++	e->trigger = (uint32_t)trig;
++	saved_mask = (ruby_rd32(g_eint_base,
++	    ruby_eint_off(RUBY_EINT_MASK, line)) & bit) ? 1u : 0u;
++	saved_sens = (ruby_rd32(g_eint_base,
++	    ruby_eint_off(RUBY_EINT_SENS, line)) & bit) ? 1u : 0u;
++	saved_pol = (ruby_rd32(g_eint_base,
++	    ruby_eint_off(RUBY_EINT_POL, line)) & bit) ? 1u : 0u;
++	e->saved_mask = saved_mask;
++	e->saved_sens = saved_sens;
++	e->saved_pol = saved_pol;
++	e->pending_count = 0;
++	e->ack_count = 0;
++	e->state = RUBY_EINT_RESERVED;
++	e->child = child;
++	e->seq = 0;
++	e->isr_hits = 0;
++	e->service_ok = 0;
++	e->service_fail = 0;
++	e->stray = 0;
++	e->edge_rearm = 0;
++	e->poll_seen = 0;
++	e->win_start_ms = 0;
++	e->win_hits = 0;
++	e->win_service_base = 0;
++	e->fail_streak = 0;
++	e->poll_only = 0;
++
++	ruby_eint_apply_trigger(e);
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_ACK, line), bit);
++	doff = ruby_eint_off(RUBY_EINT_DOM_EN, line);
++	dval = ruby_rd32(g_eint_base, doff);
++	ruby_wr32(g_eint_base, doff, dval & ~bit);
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_MASK_SET, line), bit);
++	(void)ruby_rd32(g_eint_base, ruby_eint_off(RUBY_EINT_MASK, line));
++	e->used = true;
++	mask = ruby_rd32(g_eint_base, ruby_eint_off(RUBY_EINT_MASK, line));
++	RUBY_EINT_UNLOCK();
++
++	printf("RUBY EINT: attach line=%u trigger=%u child=%s saved=%u/%u/%u mask=%08x\n",
++	    line, (unsigned)trig, child && child->name ? child->name : "-",
++	    saved_mask, saved_sens, saved_pol, mask);
++	return e;
++}
++
++int
++ruby_eint_activate(struct ruby_eint *e)
++{
++	uint32_t bit, doff, dval, moff;
++	int rc;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return EINVAL;
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base || !e->used)
++		return ENODEV;
++
++	/* Parent start is lazy and idempotent; failure means poll-only. */
++	rc = ruby_irq_parent_start();
++	if (rc != 0) {
++		bit = ruby_eint_bit(e->line);
++		doff = ruby_eint_off(RUBY_EINT_DOM_EN, e->line);
++		moff = ruby_eint_off(RUBY_EINT_MASK, e->line);
++		RUBY_EINT_LOCK();
++		if (e->used) {
++			dval = ruby_rd32(g_eint_base, doff);
++			ruby_wr32(g_eint_base, doff, dval & ~bit);
++			ruby_wr32(g_eint_base,
++			    ruby_eint_off(RUBY_EINT_MASK_CLR, e->line), bit);
++			(void)ruby_rd32(g_eint_base, moff);
++			e->state = RUBY_EINT_POLL_ONLY;
++			e->poll_only = 1;
++			e->seq++;
++		}
++		RUBY_EINT_UNLOCK();
++		wakeup(&e->seq);
++		printf("RUBY EINT: line=%u parent unavailable rc=%d; poll\n",
++		    e->line, rc);
++		return rc;
++	}
++
++	bit = ruby_eint_bit(e->line);
++	doff = ruby_eint_off(RUBY_EINT_DOM_EN, e->line);
++	moff = ruby_eint_off(RUBY_EINT_MASK, e->line);
++	RUBY_EINT_LOCK();
++	if (!e->used) {
++		RUBY_EINT_UNLOCK();
++		return ENODEV;
++	}
++	/* Clear any latch accumulated while gated, then open DOM + line. */
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_ACK, e->line), bit);
++	dval = ruby_rd32(g_eint_base, doff);
++	ruby_wr32(g_eint_base, doff, dval | bit);
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_MASK_CLR, e->line), bit);
++	(void)ruby_rd32(g_eint_base, moff);	/* flush gates */
++	dval = ruby_rd32(g_eint_base, doff);
++	if ((dval & bit) == 0) {
++		ruby_wr32(g_eint_base, doff, dval & ~bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_CLR, e->line), bit);
++		(void)ruby_rd32(g_eint_base, moff);
++		e->state = RUBY_EINT_POLL_ONLY;
++		e->poll_only = 1;
++		e->service_fail++;
++		RUBY_EINT_UNLOCK();
++		printf("RUBY EINT: line=%u dom readback failed; poll\n", e->line);
++		return EIO;
++	}
++	e->state = RUBY_EINT_ACTIVE;
++	e->poll_only = 0;
++	e->fail_streak = 0;
++	RUBY_EINT_UNLOCK();
++	printf("RUBY EINT: line=%u active\n", e->line);
++	return 0;
++}
++
++void
++ruby_eint_deactivate(struct ruby_eint *e)
++{
++	uint32_t bit, doff, dval, moff;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return;
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return;
++	bit = ruby_eint_bit(e->line);
++	doff = ruby_eint_off(RUBY_EINT_DOM_EN, e->line);
++	moff = ruby_eint_off(RUBY_EINT_MASK, e->line);
++	RUBY_EINT_LOCK();
++	if (!e->used) {
++		RUBY_EINT_UNLOCK();
++		return;
++	}
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_MASK_SET, e->line),
++	    bit);
++	ruby_wr32(g_eint_base, ruby_eint_off(RUBY_EINT_ACK, e->line), bit);
++	dval = ruby_rd32(g_eint_base, doff);
++	ruby_wr32(g_eint_base, doff, dval & ~bit);
++	(void)ruby_rd32(g_eint_base, moff);
++	e->state = RUBY_EINT_RESERVED;
++	e->poll_only = 0;
++	RUBY_EINT_UNLOCK();
++	printf("RUBY EINT: line=%u deactivated\n", e->line);
++}
++
++void
++ruby_eint_detach(struct ruby_eint *e)
++{
++	/* release() restores the saved pin state and frees the slot. */
++	ruby_eint_release(e);
++}
++
++int
++ruby_eint_wait(struct ruby_eint *e, unsigned ms)
++{
++	uint64_t deadline, now;
++	uint32_t seen;
++	boolean_t intr;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return 0;
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2)
++		return 0;
++	if (ms == 0)
++		ms = 8;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++
++	RUBY_EINT_LOCK();
++	seen = e->seq;
++	RUBY_EINT_UNLOCK();
++
++	for (;;) {
++		intr = ml_set_interrupts_enabled(FALSE);
++		lck_spin_lock(&g_eint_lock);
++		if (!e->used || e->state == RUBY_EINT_FREE) {
++			lck_spin_unlock(&g_eint_lock);
++			ml_set_interrupts_enabled(intr);
++			return 0;
++		}
++		if (e->seq != seen) {
++			lck_spin_unlock(&g_eint_lock);
++			ml_set_interrupts_enabled(intr);
++			return 1;
++		}
++		clock_get_uptime(&now);
++		if (now >= deadline) {
++			lck_spin_unlock(&g_eint_lock);
++			ml_set_interrupts_enabled(intr);
++			return 0;
++		}
++		assert_wait_deadline(&e->seq, THREAD_UNINT, deadline);
++		lck_spin_unlock(&g_eint_lock);
++		ml_set_interrupts_enabled(intr);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++void
++ruby_eint_service_done(struct ruby_eint *e, int ok, int source_clear)
++{
++	uint32_t bit, doff, dval, moff;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return;
++	bit = ruby_eint_bit(e->line);
++	doff = ruby_eint_off(RUBY_EINT_DOM_EN, e->line);
++	moff = ruby_eint_off(RUBY_EINT_MASK, e->line);
++	RUBY_EINT_LOCK();
++	if (!e->used || e->state != RUBY_EINT_DEFERRED) {
++		RUBY_EINT_UNLOCK();
++		return;
++	}
++	if (ok && source_clear) {
++		/* No bottom-half ACK: an edge latched during service must
++		 * survive and re-trigger the parent after MASK_CLR. */
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_CLR, e->line), bit);
++		(void)ruby_rd32(g_eint_base, moff);
++		e->state = RUBY_EINT_ACTIVE;
++		e->service_ok++;
++		e->fail_streak = 0;
++	} else {
++		/* Keep the parent gated but let polling observe new edges. */
++		dval = ruby_rd32(g_eint_base, doff);
++		ruby_wr32(g_eint_base, doff, dval & ~bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_CLR, e->line), bit);
++		(void)ruby_rd32(g_eint_base, moff);
++		e->service_fail++;
++		e->fail_streak++;
++		e->state = (e->fail_streak >= 8) ?
++		    RUBY_EINT_POLL_ONLY : RUBY_EINT_STUCK;
++		if (e->state == RUBY_EINT_POLL_ONLY)
++			e->poll_only = 1;
++	}
++	RUBY_EINT_UNLOCK();
++}
++
++int
++ruby_eint_active(struct ruby_eint *e)
++{
++	int r;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return 0;
++	RUBY_EINT_LOCK();
++	r = e->used && e->state == RUBY_EINT_ACTIVE;
++	RUBY_EINT_UNLOCK();
++	return r;
++}
++
++int
++ruby_eint_poll_only(struct ruby_eint *e)
++{
++	int r;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return 0;
++	RUBY_EINT_LOCK();
++	r = e->used && (e->poll_only || e->state == RUBY_EINT_STUCK ||
++	    e->state == RUBY_EINT_POLL_ONLY);
++	RUBY_EINT_UNLOCK();
++	return r;
++}
++
++void
++ruby_eint_force_poll(struct ruby_eint *e)
++{
++	uint32_t bit, doff, dval, moff;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return;
++	bit = ruby_eint_bit(e->line);
++	doff = ruby_eint_off(RUBY_EINT_DOM_EN, e->line);
++	moff = ruby_eint_off(RUBY_EINT_MASK, e->line);
++	RUBY_EINT_LOCK();
++	if (e->used && e->state != RUBY_EINT_FREE) {
++		dval = ruby_rd32(g_eint_base, doff);
++		ruby_wr32(g_eint_base, doff, dval & ~bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_CLR, e->line), bit);
++		(void)ruby_rd32(g_eint_base, moff);
++		e->state = RUBY_EINT_POLL_ONLY;
++		e->poll_only = 1;
++		e->service_fail++;
++		e->seq++;
++	}
++	RUBY_EINT_UNLOCK();
++	wakeup(&e->seq);
++}
++
++int
++ruby_eint_demux_isr(void)
++{
++	uint32_t port, sta, bit, line, wake[RUBY_EINT_LINE_PORTS] = { 0 };
++	uint64_t now;
++	struct ruby_eint *e;
++	int handled = 0, p;
++
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return 0;
++	now = ruby_eint_now_ms();
++
++	lck_spin_lock(&g_eint_lock);
++	for (port = 0; port < RUBY_EINT_LINE_PORTS; port++) {
++		sta = ruby_rd32(g_eint_base, RUBY_EINT_STA + port * 4u);
++		while (sta != 0) {
++			bit = __builtin_ctz(sta);
++			sta &= ~(1u << bit);
++			line = port * 32u + bit;
++			e = &g_eint_slots[line];
++
++			/* Close the gate, clear the latch, flush APB before
++			 * the parent EOI can observe a still-high line. */
++			ruby_wr32(g_eint_base,
++			    RUBY_EINT_MASK_SET + port * 4u, 1u << bit);
++			ruby_wr32(g_eint_base,
++			    RUBY_EINT_ACK + port * 4u, 1u << bit);
++			(void)ruby_rd32(g_eint_base,
++			    RUBY_EINT_MASK + port * 4u);
++			handled++;
++
++			if (!e->used || e->state != RUBY_EINT_ACTIVE) {
++				e->stray++;
++				continue;
++			}
++
++			e->state = RUBY_EINT_DEFERRED;
++			e->isr_hits++;
++			if (ruby_rd32(g_eint_base,
++			    RUBY_EINT_STA + port * 4u) & (1u << bit))
++				e->edge_rearm++;
++			e->seq++;
++			wake[port] |= 1u << bit;
++
++			if (e->win_start_ms == 0 ||
++			    now - e->win_start_ms >= 20) {
++				e->win_start_ms = (uint32_t)now;
++				e->win_hits = 0;
++				e->win_service_base = e->service_ok;
++			}
++			e->win_hits++;
++			if (e->win_hits > 64 &&
++			    e->service_ok == e->win_service_base &&
++			    !e->poll_only) {
++				uint32_t doff = ruby_eint_off(
++				    RUBY_EINT_DOM_EN, line);
++				uint32_t dval = ruby_rd32(g_eint_base, doff);
++				ruby_wr32(g_eint_base, doff,
++				    dval & ~(1u << bit));
++				ruby_wr32(g_eint_base,
++				    RUBY_EINT_MASK_CLR + port * 4u,
++				    1u << bit);
++				(void)ruby_rd32(g_eint_base,
++				    RUBY_EINT_MASK + port * 4u);
++				e->state = RUBY_EINT_POLL_ONLY;
++				e->poll_only = 1;
++				e->service_fail++;
++			}
++		}
++	}
++	lck_spin_unlock(&g_eint_lock);
++
++	for (p = 0; p < (int)RUBY_EINT_LINE_PORTS; p++) {
++		uint32_t w = wake[p];
++		while (w != 0) {
++			uint32_t b = __builtin_ctz(w);
++			w &= ~(1u << b);
++			wakeup(&g_eint_slots[p * 32u + b].seq);
++		}
++	}
++	return handled;
++}
++
++void
++ruby_eint_all_poll_only(void)
++{
++	uint32_t i, bit, doff, dval;
++
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return;
++	lck_spin_lock(&g_eint_lock);
++	for (i = 0; i < RUBY_EINT_LINES; i++) {
++		struct ruby_eint *e = &g_eint_slots[i];
++
++		if (!e->used)
++			continue;
++		bit = ruby_eint_bit(i);
++		doff = ruby_eint_off(RUBY_EINT_DOM_EN, i);
++		dval = ruby_rd32(g_eint_base, doff);
++		ruby_wr32(g_eint_base, doff, dval & ~bit);
++		ruby_wr32(g_eint_base,
++		    ruby_eint_off(RUBY_EINT_MASK_CLR, i), bit);
++		(void)ruby_rd32(g_eint_base, ruby_eint_off(RUBY_EINT_MASK, i));
++		e->state = RUBY_EINT_POLL_ONLY;
++		e->poll_only = 1;
++		e->seq++;
++	}
++	lck_spin_unlock(&g_eint_lock);
++	for (i = 0; i < RUBY_EINT_LINES; i++) {
++		if (g_eint_slots[i].used)
++			wakeup(&g_eint_slots[i].seq);
++	}
++}
++
+ void
+ ruby_eint_set_parent_owned(int owned)
+ {
+--- a/bsd/dev/ruby_eint.h
++++ b/bsd/dev/ruby_eint.h
+@@ -19,6 +19,40 @@
+ 	uint32_t pol;
+ };
+ 
++enum ruby_eint_state {
++	RUBY_EINT_FREE = 0,
++	RUBY_EINT_RESERVED,   /* registered, gated, init pending */
++	RUBY_EINT_ACTIVE,     /* DOM on, line unmasked */
++	RUBY_EINT_DEFERRED,   /* ISR gated the line and woke the owner */
++	RUBY_EINT_STUCK,      /* service failed; keep DOM off, poll */
++	RUBY_EINT_POLL_ONLY,  /* IRQ fused for this line; poll only */
++};
++
++struct ruby_eint_child {
++	const char *name;
++	int (*init)(void *cookie);
++	int (*service)(void *cookie);
++	void (*fault)(void *cookie, uint32_t reason);
++	void *cookie;
++};
++
++/* Chained-demux child API (0165).  The owner thread drives the state
++ * machine: attach -> (device init/clear) -> activate -> wait ->
++ * service_done.  Core never calls the child from interrupt context. */
++struct ruby_eint *ruby_eint_attach(uint32_t line,
++    enum ruby_eint_trigger trig, const struct ruby_eint_child *child);
++int ruby_eint_activate(struct ruby_eint *e);
++void ruby_eint_deactivate(struct ruby_eint *e);
++void ruby_eint_detach(struct ruby_eint *e);
++int ruby_eint_wait(struct ruby_eint *e, unsigned ms);
++void ruby_eint_service_done(struct ruby_eint *e, int ok, int source_clear);
++int ruby_eint_active(struct ruby_eint *e);
++int ruby_eint_poll_only(struct ruby_eint *e);
++void ruby_eint_force_poll(struct ruby_eint *e);
++int ruby_eint_demux_isr(void);
++void ruby_eint_all_poll_only(void);
++const char *ruby_eint_state_name(uint32_t state);
++
+ void ruby_eint_init(void);
+ struct ruby_eint *ruby_eint_acquire(uint32_t line,
+     enum ruby_eint_trigger trig);
+--- a/bsd/dev/ruby_irq.c
++++ b/bsd/dev/ruby_irq.c
+@@ -1,15 +1,16 @@
+ /*
+- * Ruby (MT6877) GIC SPI288 / EINT threaded-interrupt glue.
++ * Ruby (MT6877) GIC SPI288 parent-interrupt driver.
+  *
+  * The kernel's GICv3 init and the generic SPI dispatch already exist in
+- * pexpert/arm/pe_fiq.c and osfmk/arm64/sleh.c.  This module only configures
+- * the EINT parent SPI and installs a handler for it.
++ * pexpert/arm/pe_fiq.c and osfmk/arm64/sleh.c.  This module owns the
++ * chained EINT parent only: it checks the ATF secure view, enables the
++ * SPI and forwards every assertion to the EINT demux.  No touch logic
++ * lives here any more; children register with ruby_eint.c (0165).
+  *
+- * ruby_irq_status() is read-only.  ruby_irq_arm() is gated by rubyirq=1.
+- * When GICD_CTLR.DS is clear the NS view of IGROUPR is RAZ/WI, so the
+- * interrupt group can only come from the secure monitor: the preflight
+- * asks ATF (MTK_SIP_KERNEL_GIC_DUMP) and refuses a Group0 line.  The
+- * final proof is the NS ISENABLER readback after the enable write.
++ * ruby_irq_status() is read-only.  The parent starts lazily from the
++ * first child activation (rubyeintirq=1 by default; rubyeintpoll=1 or
++ * rubyeintirq=0 keeps every child in polling mode).  rubyirq=1 remains
++ * an explicit debug override for the "irq arm" command.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 
+@@ -34,9 +35,7 @@
+ 
+ #define RUBY_IRQ_GICD_PA      0x0c000000u
+ #define RUBY_IRQ_GICD_SIZE    0x10000u
+-#define RUBY_IRQ_TOUCH_LINE   14u
+ #define RUBY_IRQ_PRIO         0xa0u
+-#define RUBY_IRQ_WAIT_MS      100u
+ 
+ #define GICD_CTLR             0x0000u
+ #define GICD_TYPER            0x0004u
+@@ -57,52 +56,25 @@
+ /* MTK_SIP_SMC_CMD(0x201): ATF returns the secure GIC view of one INTID. */
+ #define RUBY_IRQ_SMC_GIC_DUMP 0xc2000201u
+ 
+-#define RUBY_IRQ_PF_NODEV     (1u << 0)
+-#define RUBY_IRQ_PF_GROUP     (1u << 1)
+-#define RUBY_IRQ_PF_CTLR      (1u << 2)
+-#define RUBY_IRQ_PF_SRE       (1u << 3)
+-#define RUBY_IRQ_PF_GRPEN     (1u << 4)
+-#define RUBY_IRQ_PF_PMR       (1u << 5)
+-#define RUBY_IRQ_PF_ENABLED   (1u << 6)
+-#define RUBY_IRQ_PF_PENDING   (1u << 7)
+-#define RUBY_IRQ_PF_ACTIVE    (1u << 8)
+-#define RUBY_IRQ_PF_CFG       (1u << 9)
+-#define RUBY_IRQ_PF_RWP       (1u << 10)
+-#define RUBY_IRQ_PF_NOOWNER   (1u << 11)
+-
++/* Parent state: 0 stopped, 1 starting, 2 running, 3 failed. */
+ static vm_offset_t g_gicd;
+ static lck_grp_t g_irq_lck_grp;
+ static lck_spin_t g_irq_lock;
+-static volatile int g_irq_state; /* 0 uninit, 1 init, 2 ready, 3 failed */
+-static int g_irq_gate;
+-
+-static volatile uint32_t g_armed;
++static volatile int g_irq_state;    /* GICD init: 0/1/2/3 */
++static volatile int g_parent_state; /* 0/1/2/3 */
++static int g_parent_gate = 1;       /* rubyeintirq, default on */
++static int g_force_poll;            /* rubyeintpoll */
++
++static volatile uint32_t g_parent_isr;
++static volatile uint32_t g_parent_spurious;
++static volatile uint32_t g_parent_nopending;
+ static volatile uint32_t g_fatal;
+-static volatile uint32_t g_event;
+-static volatile uint32_t g_isr_count;
+-static volatile uint32_t g_spurious_count;
+-static volatile uint32_t g_event_count;
+-static volatile uint32_t g_configured;
+ 
+ static uint32_t g_saved_prio;
+ static uint32_t g_saved_icfgr;
+ static uint32_t g_saved_enable9;
+ static uint64_t g_saved_router;
+ 
+-static int g_irq_chan;
+-
+-static void
+-ruby_irq_lock_raw(void)
+-{
+-	lck_spin_lock(&g_irq_lock);
+-}
+-
+-static void
+-ruby_irq_unlock_raw(void)
+-{
+-	lck_spin_unlock(&g_irq_lock);
+-}
+-
+ static uint64_t
+ ruby_rd64(uintptr_t base, uint32_t off)
+ {
+@@ -139,17 +111,22 @@
+ 	lck_grp_init(&g_irq_lck_grp, "ruby_irq", LCK_GRP_ATTR_NULL);
+ 	lck_spin_init(&g_irq_lock, &g_irq_lck_grp, LCK_ATTR_NULL);
+ 	g_gicd = ml_io_map(RUBY_IRQ_GICD_PA, RUBY_IRQ_GICD_SIZE);
+-	if (PE_parse_boot_argn("rubyirq", &v, sizeof(v)))
+-		g_irq_gate = v;
++	if (PE_parse_boot_argn("rubyeintirq", &v, sizeof(v)))
++		g_parent_gate = v;
++	if (PE_parse_boot_argn("rubyeintpoll", &v, sizeof(v)) && v == 1)
++		g_force_poll = 1;
++	if (PE_parse_boot_argn("rubyirq", &v, sizeof(v)) && v == 1)
++		g_parent_gate = 1;	/* explicit debug override */
+ 
+-	printf("RUBY IRQ: init gicd=%d gate=%d\n", g_gicd != 0, g_irq_gate);
++	printf("RUBY IRQ: init gicd=%d gate=%d force_poll=%d\n",
++	    g_gicd != 0, g_parent_gate, g_force_poll);
+ 	__atomic_store_n(&g_irq_state, g_gicd ? 2 : 3, __ATOMIC_RELEASE);
+ }
+ 
+ int
+-ruby_irq_armed(void)
++ruby_irq_parent_running(void)
+ {
+-	return __atomic_load_n(&g_armed, __ATOMIC_ACQUIRE) != 0;
++	return __atomic_load_n(&g_parent_state, __ATOMIC_ACQUIRE) == 2;
+ }
+ 
+ static uint64_t
+@@ -202,6 +179,145 @@
+ 	return 1;
+ }
+ 
++/*
++ * Start the chained parent.  Lines stay gated (DOM=0, MASK=1) and are
++ * opened only by ruby_eint_activate() after the child clears its source.
++ */
++int
++ruby_irq_parent_start(void)
++{
++	int expected = 0;
++	uint32_t ctlr, sre, igrpen1, pmr, prio, cfg, en9;
++	uint64_t smc = 0, mpidr, route;
++	long smc_rc;
++
++	ruby_irq_init();
++	ruby_eint_init();
++	if (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) != 2)
++		return ENODEV;
++	if (g_force_poll || g_parent_gate != 1) {
++		printf("RUBY IRQ: parent disabled (gate=%d poll=%d)\n",
++		    g_parent_gate, g_force_poll);
++		return EPERM;
++	}
++	if (__atomic_load_n(&g_fatal, __ATOMIC_ACQUIRE) != 0) {
++		printf("RUBY IRQ: parent fused; polling only until reboot\n");
++		return EPERM;
++	}
++	for (;;) {
++		int st = __atomic_load_n(&g_parent_state, __ATOMIC_ACQUIRE);
++
++		if (st == 2)
++			return 0;
++		if (st == 1)
++			return EBUSY;
++		expected = st;
++		if (__atomic_compare_exchange_n(&g_parent_state, &expected, 1,
++		    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++			break;
++	}
++
++	smc_rc = ruby_irq_smc_dump(RUBY_IRQ_INTID, &smc);
++	if (smc_rc >= 0 && ((smc >> 1) & 1u) == 0) {
++		printf("RUBY IRQ: SMC says INTID%u is Group0/secure; refusing\n",
++		    RUBY_IRQ_INTID);
++		__atomic_store_n(&g_parent_state, 3, __ATOMIC_RELEASE);
++		return EPERM;
++	}
++
++	ctlr = ruby_rd32(g_gicd, GICD_CTLR);
++	sre = (uint32_t)__builtin_arm_rsr64("ICC_SRE_EL1");
++	igrpen1 = (uint32_t)__builtin_arm_rsr64("ICC_IGRPEN1_EL1");
++	pmr = (uint32_t)__builtin_arm_rsr64("ICC_PMR_EL1");
++	cfg = ruby_rd32(g_gicd, GICD_ICFGR_288);
++	if ((ctlr & (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS)) !=
++	    (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS) || !(sre & 1u) ||
++	    !(igrpen1 & 1u) || (pmr & 0xffu) <= RUBY_IRQ_PRIO ||
++	    (cfg & 3u) != 0 || (ctlr & GICD_CTLR_RWP)) {
++		printf("RUBY IRQ: preflight failed ctlr=%08x sre=%x grpen1=%x pmr=%x cfg=%x\n",
++		    ctlr, sre, igrpen1, pmr, cfg & 3u);
++		__atomic_store_n(&g_parent_state, 3, __ATOMIC_RELEASE);
++		return EINVAL;
++	}
++
++	g_saved_enable9 = ruby_rd32(g_gicd, GICD_ISENABLER9);
++	g_saved_prio = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
++	g_saved_icfgr = ruby_rd32(g_gicd, GICD_ICFGR_288);
++	g_saved_router = ruby_rd64(g_gicd, GICD_IROUTER_288);
++
++	disable_preemption();
++	ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL,
++	    ruby_irq_isr, NULL);
++	mpidr = __builtin_arm_rsr64("MPIDR_EL1");
++	enable_preemption();
++	route = ruby_irq_route(mpidr);
++
++	__atomic_store_n(&g_fatal, 0, __ATOMIC_RELEASE);
++	__atomic_store_n(&g_parent_isr, 0, __ATOMIC_RELEASE);
++	__atomic_store_n(&g_parent_spurious, 0, __ATOMIC_RELEASE);
++	__atomic_store_n(&g_parent_nopending, 0, __ATOMIC_RELEASE);
++
++	prio = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
++	ruby_wr32(g_gicd, GICD_IPRIORITY_288,
++	    (prio & ~0xffu) | RUBY_IRQ_PRIO);
++	ruby_wr32(g_gicd, GICD_ICFGR_288, cfg & ~3u);
++	ruby_wr64(g_gicd, GICD_IROUTER_288, route);
++	ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
++
++	if (ruby_irq_rwp() != 0 ||
++	    (ruby_rd32(g_gicd, GICD_ISENABLER9) & 1u) == 0) {
++		en9 = ruby_rd32(g_gicd, GICD_ISENABLER9);
++		printf("RUBY IRQ: parent enable failed en9=%08x\n", en9);
++		ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
++		(void)ruby_irq_rwp();
++		ruby_wr32(g_gicd, GICD_IPRIORITY_288, g_saved_prio);
++		ruby_wr32(g_gicd, GICD_ICFGR_288, g_saved_icfgr);
++		ruby_wr64(g_gicd, GICD_IROUTER_288, g_saved_router);
++		if (g_saved_enable9 & 1u)
++			ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
++		(void)ruby_irq_rwp();
++		ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL,
++		    NULL, NULL);
++		__atomic_store_n(&g_parent_state, 3, __ATOMIC_RELEASE);
++		return EIO;
++	}
++
++	ruby_eint_set_parent_owned(1);
++	__atomic_store_n(&g_parent_state, 2, __ATOMIC_RELEASE);
++	printf("RUBY IRQ: parent running intid=%u mpidr=%016llx route=%016llx en9=%08x smc_group=%d\n",
++	    RUBY_IRQ_INTID, (unsigned long long)mpidr,
++	    (unsigned long long)route, ruby_rd32(g_gicd, GICD_ISENABLER9),
++	    smc_rc >= 0 ? (int)((smc >> 1) & 1u) : -1);
++	return 0;
++}
++
++void
++ruby_irq_parent_stop(void)
++{
++	int expected = 2;
++
++	ruby_irq_init();
++	if (!__atomic_compare_exchange_n(&g_parent_state, &expected, 1, false,
++	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++		return;
++
++	ruby_eint_all_poll_only();
++	ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
++	(void)ruby_irq_rwp();
++	ruby_wr32(g_gicd, GICD_IPRIORITY_288, g_saved_prio);
++	ruby_wr32(g_gicd, GICD_ICFGR_288, g_saved_icfgr);
++	ruby_wr64(g_gicd, GICD_IROUTER_288, g_saved_router);
++	if (g_saved_enable9 & 1u)
++		ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
++	else
++		ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
++	(void)ruby_irq_rwp();
++	ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL, NULL, NULL);
++	ruby_eint_set_parent_owned(0);
++	__atomic_store_n(&g_parent_state, 0, __ATOMIC_RELEASE);
++	printf("RUBY IRQ: parent stopped\n");
++}
++
+ int
+ ruby_irq_status(struct ruby_irq_status *out)
+ {
+@@ -250,263 +366,63 @@
+ 		out->icc_igrpen1 = __builtin_arm_rsr64("ICC_IGRPEN1_EL1");
+ 		out->icc_hppir1 = __builtin_arm_rsr64("ICC_HPPIR1_EL1");
+ 	}
+-	out->armed = __atomic_load_n(&g_armed, __ATOMIC_ACQUIRE);
++	out->armed = ruby_irq_parent_running();
+ 	out->fatal = __atomic_load_n(&g_fatal, __ATOMIC_ACQUIRE);
+-	out->isr_count = __atomic_load_n(&g_isr_count, __ATOMIC_ACQUIRE);
+-	out->spurious_count = __atomic_load_n(&g_spurious_count, __ATOMIC_ACQUIRE);
+-	out->event_count = __atomic_load_n(&g_event_count, __ATOMIC_ACQUIRE);
++	out->isr_count = __atomic_load_n(&g_parent_isr, __ATOMIC_ACQUIRE);
++	out->spurious_count = __atomic_load_n(&g_parent_spurious,
++	    __ATOMIC_ACQUIRE);
++	out->event_count = 0;	/* demux counters live in eint status */
+ 	return 0;
+ }
+ 
+-static uint32_t
+-ruby_irq_preflight(struct ruby_irq_status *st)
+-{
+-	uint32_t pf = 0;
+-
+-	if (ruby_irq_status(st) != 0)
+-		return RUBY_IRQ_PF_NODEV;
+-
+-	if ((st->gicd_ctlr & (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS)) !=
+-	    (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS))
+-		pf |= RUBY_IRQ_PF_CTLR;
+-	if ((st->icc_sre & 1u) == 0)
+-		pf |= RUBY_IRQ_PF_SRE;
+-	if ((st->icc_igrpen1 & 1u) == 0)
+-		pf |= RUBY_IRQ_PF_GRPEN;
+-	if ((st->icc_pmr & 0xffu) <= RUBY_IRQ_PRIO)
+-		pf |= RUBY_IRQ_PF_PMR;
+-	if (st->enable9 & 1u)
+-		pf |= RUBY_IRQ_PF_ENABLED;
+-	if (st->pending9 & 1u)
+-		pf |= RUBY_IRQ_PF_PENDING;
+-	if (st->active9 & 1u)
+-		pf |= RUBY_IRQ_PF_ACTIVE;
+-	if (st->icfgr & 3u)
+-		pf |= RUBY_IRQ_PF_CFG;
+-	if (st->gicd_ctlr & GICD_CTLR_RWP)
+-		pf |= RUBY_IRQ_PF_RWP;
+-	if (!ruby_eint_line_used(RUBY_IRQ_TOUCH_LINE))
+-		pf |= RUBY_IRQ_PF_NOOWNER;
+-	if (st->smc_valid) {
+-		if (st->smc_group == 0)
+-			pf |= RUBY_IRQ_PF_GROUP;
+-	} else {
+-		printf("RUBY IRQ: SMC denied; INTID%u group unknown\n",
+-		    RUBY_IRQ_INTID);
+-	}
+-
+-	printf("RUBY IRQ: preflight pf=%08x ctlr=%08x group9ns=%08x en9=%08x pnd9=%08x act9=%08x cfg=%08x pmr=%llx\n",
+-	    pf, st->gicd_ctlr, st->group9, st->enable9, st->pending9,
+-	    st->active9, st->icfgr & 3u,
+-	    (unsigned long long)(st->icc_pmr & 0xffu));
+-	if (st->smc_valid)
+-		printf("RUBY IRQ: SMC intid%u enable=%u group=%u prio=%02x sens=%u pend=%u active=%u target=%04x raw=%016llx\n",
+-		    RUBY_IRQ_INTID, st->smc_enable, st->smc_group,
+-		    st->smc_prio, st->smc_sens, st->smc_pending,
+-		    st->smc_active, st->smc_target,
+-		    (unsigned long long)st->smc_raw);
+-	if (pf & RUBY_IRQ_PF_GROUP)
+-		printf("RUBY IRQ: SMC says INTID%u is Group0/secure; refusing\n",
+-		    RUBY_IRQ_INTID);
+-	if (pf & RUBY_IRQ_PF_ENABLED)
+-		printf("RUBY IRQ: INTID%u already enabled; refusing\n",
+-		    RUBY_IRQ_INTID);
+-	if (pf & RUBY_IRQ_PF_PENDING)
+-		printf("RUBY IRQ: INTID%u pending; refusing\n", RUBY_IRQ_INTID);
+-	if (pf & RUBY_IRQ_PF_ACTIVE)
+-		printf("RUBY IRQ: INTID%u active; refusing\n", RUBY_IRQ_INTID);
+-	if (pf & RUBY_IRQ_PF_CFG)
+-		printf("RUBY IRQ: INTID%u is not level; refusing\n",
+-		    RUBY_IRQ_INTID);
+-	if (pf & RUBY_IRQ_PF_NOOWNER)
+-		printf("RUBY IRQ: touch does not own EINT%u; refusing\n",
+-		    RUBY_IRQ_TOUCH_LINE);
+-	return pf;
+-}
+-
+ int
+ ruby_irq_arm(void)
+ {
+-	struct ruby_irq_status st;
+-	uint32_t pf, prio, cfg;
+-	uint64_t mpidr, route;
+-
+-	ruby_irq_init();
+-	if (g_irq_gate != 1) {
+-		printf("RUBY IRQ: locked (rubyirq=1)\n");
+-		return EPERM;
+-	}
+-	if (ruby_irq_armed()) {
+-		printf("RUBY IRQ: already armed\n");
+-		return EBUSY;
+-	}
+-	if (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) != 2)
+-		return ENODEV;
+-
+-	pf = ruby_irq_preflight(&st);
+-	if (pf != 0)
+-		return EINVAL;
+-
+-	g_saved_enable9 = ruby_rd32(g_gicd, GICD_ISENABLER9);
+-	g_saved_prio = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
+-	g_saved_icfgr = ruby_rd32(g_gicd, GICD_ICFGR_288);
+-	g_saved_router = ruby_rd64(g_gicd, GICD_IROUTER_288);
+-	__atomic_store_n(&g_configured, 1, __ATOMIC_RELEASE);
+-
+-	disable_preemption();
+-	ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL,
+-	    ruby_irq_isr, NULL);
+-	mpidr = __builtin_arm_rsr64("MPIDR_EL1");
+-	enable_preemption();
+-	route = ruby_irq_route(mpidr);
+-
+-	__atomic_store_n(&g_fatal, 0, __ATOMIC_RELEASE);
+-	__atomic_store_n(&g_event, 0, __ATOMIC_RELEASE);
+-	__atomic_store_n(&g_isr_count, 0, __ATOMIC_RELEASE);
+-	__atomic_store_n(&g_spurious_count, 0, __ATOMIC_RELEASE);
+-	__atomic_store_n(&g_event_count, 0, __ATOMIC_RELEASE);
+-	/* The touch thread switches to the wait path before the SPI is on. */
+-	__atomic_store_n(&g_armed, 1, __ATOMIC_RELEASE);
+-
+-	prio = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
+-	ruby_wr32(g_gicd, GICD_IPRIORITY_288,
+-	    (prio & ~0xffu) | RUBY_IRQ_PRIO);
+-	cfg = ruby_rd32(g_gicd, GICD_ICFGR_288);
+-	ruby_wr32(g_gicd, GICD_ICFGR_288, cfg & ~3u);
+-	ruby_wr64(g_gicd, GICD_IROUTER_288, route);
+-	ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
+-
+-	if (ruby_irq_rwp() != 0) {
+-		printf("RUBY IRQ: RWP timeout after enable\n");
+-		ruby_irq_disarm();
+-		return ETIMEDOUT;
+-	}
+-	if ((ruby_rd32(g_gicd, GICD_ISENABLER9) & 1u) == 0) {
+-		printf("RUBY IRQ: enable readback failed\n");
+-		ruby_irq_disarm();
+-		return EIO;
+-	}
++	int rc = ruby_irq_parent_start();
+ 
+-	printf("RUBY IRQ: eint dom0=%08x line%u\n",
+-	    ruby_eint_dom_read(0), RUBY_IRQ_TOUCH_LINE);
+-	ruby_eint_dom_set(RUBY_IRQ_TOUCH_LINE, 1);
+-	printf("RUBY IRQ: eint dom0 armed=%08x\n", ruby_eint_dom_read(0));
+-	ruby_eint_set_parent_owned(1);
+-	printf("RUBY IRQ: armed intid=%u mpidr=%016llx route=%016llx en9=%08x smc_group=%d prio=%08x cfg=%08x\n",
+-	    RUBY_IRQ_INTID, (unsigned long long)mpidr,
+-	    (unsigned long long)route, ruby_rd32(g_gicd, GICD_ISENABLER9),
+-	    st.smc_valid ? (int)st.smc_group : -1,
+-	    ruby_rd32(g_gicd, GICD_IPRIORITY_288),
+-	    ruby_rd32(g_gicd, GICD_ICFGR_288) & 3u);
+-	return 0;
++	printf("RUBY IRQ: arm rc=%d\n", rc);
++	return rc;
+ }
+ 
+ void
+ ruby_irq_disarm(void)
+ {
+-	uint32_t was = __atomic_exchange_n(&g_armed, 0, __ATOMIC_ACQ_REL);
+-	uint32_t configured = __atomic_exchange_n(&g_configured, 0,
+-	    __ATOMIC_ACQ_REL);
+-
+-	if (configured && __atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) == 2 &&
+-	    g_gicd) {
+-		ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
+-		(void)ruby_irq_rwp();
+-		ruby_wr32(g_gicd, GICD_IPRIORITY_288, g_saved_prio);
+-		ruby_wr32(g_gicd, GICD_ICFGR_288, g_saved_icfgr);
+-		ruby_wr64(g_gicd, GICD_IROUTER_288, g_saved_router);
+-		if (g_saved_enable9 & 1u)
+-			ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
+-		else
+-			ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
+-		(void)ruby_irq_rwp();
+-		/*
+-		 * ml_install_interrupt_handler() is per-CPU and arm/disarm
+-		 * usually run from the same probe thread.  A stale handler on
+-		 * another CPU is inert: it checks g_armed and the INTID before
+-		 * touching anything.
+-		 */
+-		ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL, NULL, NULL);
+-		ruby_eint_set_parent_owned(0);
+-		ruby_eint_dom_set(RUBY_IRQ_TOUCH_LINE, 0);
+-		printf("RUBY IRQ: eint dom0 disarmed=%08x\n",
+-		    ruby_eint_dom_read(0));
+-	}
+-	ruby_eint_unmask(RUBY_IRQ_TOUCH_LINE);
+-	wakeup(&g_irq_chan);
+-	printf("RUBY IRQ: disarmed (was=%u)\n", was);
+-}
+-
+-int
+-ruby_irq_wait(unsigned ms)
+-{
+-	boolean_t intr;
+-	uint64_t deadline = 0;
+-	int ev;
+-
+-	if (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) != 2)
+-		return 0;
+-	if (!ruby_irq_armed())
+-		return 0;
+-	if (ms == 0)
+-		ms = RUBY_IRQ_WAIT_MS;
+-	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+-
+-	intr = ml_set_interrupts_enabled(FALSE);
+-	lck_spin_lock(&g_irq_lock);
+-	if (g_event) {
+-		g_event = 0;
+-		lck_spin_unlock(&g_irq_lock);
+-		ml_set_interrupts_enabled(intr);
+-		return 1;
+-	}
+-	assert_wait_deadline(&g_irq_chan, THREAD_UNINT, deadline);
+-	lck_spin_unlock(&g_irq_lock);
+-	ml_set_interrupts_enabled(intr);
+-	thread_block(THREAD_CONTINUE_NULL);
+-
+-	lck_spin_lock(&g_irq_lock);
+-	ev = g_event;
+-	g_event = 0;
+-	lck_spin_unlock(&g_irq_lock);
+-	return ev;
++	ruby_irq_parent_stop();
+ }
+ 
+ void
+ ruby_irq_isr(void *target, void *refCon, void *nub, int source)
+ {
++	int handled;
++
+ 	(void)target;
+ 	(void)refCon;
+ 	(void)nub;
+ 
+ 	if (source != (int)RUBY_IRQ_INTID) {
+-		__atomic_add_fetch(&g_spurious_count, 1, __ATOMIC_RELAXED);
++		__atomic_add_fetch(&g_parent_spurious, 1, __ATOMIC_RELAXED);
+ 		return;
+ 	}
+-	if (!ruby_irq_armed())
+-		return;
+ 
+-	if (ruby_eint_isr_handle(RUBY_IRQ_TOUCH_LINE)) {
+-		ruby_irq_lock_raw();
+-		g_event = 1;
+-		g_event_count++;
+-		g_isr_count++;
+-		ruby_irq_unlock_raw();
+-		wakeup(&g_irq_chan);
++	handled = ruby_eint_demux_isr();
++	if (handled > 0) {
++		__atomic_add_fetch(&g_parent_isr, handled, __ATOMIC_RELAXED);
++		__atomic_store_n(&g_parent_nopending, 0, __ATOMIC_RELEASE);
+ 		return;
+ 	}
+ 
+ 	/*
+-	 * The parent asserted but our line has no pending bit.  Fail closed:
+-	 * disable the SPI and let the polling path recover.
++	 * Parent asserted with no EINT line pending.  Keep the parent for
++	 * the other children; only a sustained run of such entries fuses
++	 * it and leaves every child polling.
+ 	 */
+-	ruby_irq_lock_raw();
+-	g_spurious_count++;
+-	g_fatal = 1;
+-	ruby_irq_unlock_raw();
++	__atomic_add_fetch(&g_parent_spurious, 1, __ATOMIC_RELAXED);
++	if (__atomic_add_fetch(&g_parent_nopending, 1, __ATOMIC_RELAXED) < 16)
++		return;
++
++	__atomic_store_n(&g_fatal, 1, __ATOMIC_RELEASE);
+ 	ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
+-	__atomic_store_n(&g_armed, 0, __ATOMIC_RELEASE);
+-	wakeup(&g_irq_chan);
++	ruby_eint_all_poll_only();
+ }
+ 
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/ruby_irq.h
++++ b/bsd/dev/ruby_irq.h
+@@ -41,10 +41,11 @@
+ };
+ 
+ int ruby_irq_status(struct ruby_irq_status *out);
+-int ruby_irq_armed(void);
++int ruby_irq_parent_start(void);
++void ruby_irq_parent_stop(void);
++int ruby_irq_parent_running(void);
+ int ruby_irq_arm(void);
+ void ruby_irq_disarm(void);
+-int ruby_irq_wait(unsigned ms);
+ void ruby_irq_isr(void *target, void *refCon, void *nub, int source);
+ 
+ #endif /* RUBY_IRQ_H */
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -79,6 +79,14 @@
+ 
+ static int gt_sleep_chan;
+ 
++static const struct ruby_eint_child gt_eint_child = {
++	.name = "goodix",
++	.init = NULL,
++	.service = NULL,
++	.fault = NULL,
++	.cookie = NULL,
++};
++
+ static uint32_t
+ gt_rd(uint32_t off)
+ {
+@@ -689,6 +697,8 @@
+ gt_thread(void *arg, wait_result_t wr)
+ {
+ 	int bad = 0;
++	int miss = 0;
++	int good_polls = 0;
+ 	uint32_t idle = 8;
+ 
+ 	(void)arg;
+@@ -697,32 +707,48 @@
+ 	if (!gt_hw_init()) {
+ 		goto out;
+ 	}
+-	gt.eint = ruby_eint_acquire(14, RUBY_EINT_EDGE_FALLING);
+-	printf("SWEET GT: EINT14 %s\n",
+-	    gt.eint ? "armed" : "unavailable; 8 ms polling");
++	gt.eint = ruby_eint_attach(14, RUBY_EINT_EDGE_FALLING,
++	    &gt_eint_child);
++	if (gt.eint && ruby_eint_activate(gt.eint) == 0)
++		printf("SWEET GT: EINT14 irq active\n");
++	else if (gt.eint)
++		printf("SWEET GT: EINT14 poll fallback\n");
++	else
++		printf("SWEET GT: EINT14 unavailable; 8 ms polling\n");
++
+ 	for (;;) {
+ 		bool ev;
+ 
+-		if (ruby_irq_armed()) {
+-			int irq_ev = ruby_irq_wait(100);
++		if (gt.eint && ruby_eint_active(gt.eint)) {
++			if (ruby_eint_wait(gt.eint, 8)) {
++				int ok = (gt_frame() == 0);
+ 
+-			if (gt_frame() != 0) {
+-				if (++bad >= 50) {
++				if (ok) {
++					bad = 0;
++				} else if (++bad >= 50) {
+ 					gt_release_all();
+ 					bad = 0;
+-					ruby_eint_unmask(14);
+ 				}
+-				if (irq_ev)
+-					gt_wait(1);
++				/* No bottom-half ACK: the demux ACKed in
++				 * the ISR; a new edge must survive. */
++				ruby_eint_service_done(gt.eint, ok, ok);
++				miss = 0;
++				continue;
++			}
++			/* IRQ quiet but EINT shows an edge the parent
++			 * missed: fall back after three periods. */
++			if (ruby_eint_pending(gt.eint)) {
++				if (++miss >= 3) {
++					ruby_eint_force_poll(gt.eint);
++					miss = 0;
++				}
+ 			} else {
+-				bad = 0;
+-				if (!irq_ev && gt.eint)
+-					ruby_eint_ack(gt.eint);
+-				ruby_eint_unmask(14);
++				miss = 0;
+ 			}
+ 			continue;
+ 		}
+ 
++		/* Polling path: legacy operation or demux fallback. */
+ 		ev = gt.eint && ruby_eint_pending(gt.eint);
+ 
+ 		if (ev || idle >= 8) {
+@@ -735,6 +761,15 @@
+ 				bad = 0;
+ 				if (ev)
+ 					ruby_eint_ack(gt.eint);
++				if (gt.eint && ruby_eint_poll_only(gt.eint)) {
++					/* Hand the line back to IRQ after a
++					 * few clean polls. */
++					if (++good_polls >= 3) {
++						good_polls = 0;
++						(void)ruby_eint_activate(
++						    gt.eint);
++					}
++				}
+ 			}
+ 			idle = 0;
+ 		}
+@@ -749,9 +784,7 @@
+ 	}
+ 
+ out:
+-	if (ruby_irq_armed())
+-		ruby_irq_disarm();
+-	ruby_eint_release(gt.eint);
++	ruby_eint_detach(gt.eint);
+ 	gt.eint = NULL;
+ 	printf("SWEET GT: stopped\n");
+ 	(void)thread_terminate(current_thread());
