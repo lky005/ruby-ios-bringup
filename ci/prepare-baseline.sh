@@ -158,8 +158,8 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0167-ruby-gt-diag.patch" \
     "$ROOT/patches/0168-ruby-spi3-touch.patch" \
     "$ROOT/patches/0169-ruby-kpd-irq.patch" \
-    "$ROOT/patches/0170-ruby-battery-1s.patch" \
     "$ROOT/patches/0171-ruby-usb-hotplug.patch" \
+    "$ROOT/patches/0172-ruby-usb-hotplug-diag.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
@@ -180,6 +180,16 @@ done
 git -C "$DEST" apply --whitespace=nowarn "$ROOT/ci/baseline-changes.patch"
 
 "$PYTHON" "$ROOT/ci/normalize_lf.py" "$DEST/xnu/patches"
+
+# Reject malformed diffs here.  The upstream build applies patches with GNU
+# patch and can otherwise skip a corrupt file without failing (0170 did).
+for p in "$DEST"/xnu/patches/*.patch; do
+    if ! git -C "$DEST" apply --stat "xnu/patches/$(basename "$p")" \
+        >/dev/null 2>&1; then
+        echo "prepare-baseline: malformed patch: $(basename "$p")" >&2
+        exit 6
+    fi
+done
 actual_hash=$("$PYTHON" "$ROOT/ci/patchset_hash.py" "$DEST/xnu/patches")
 echo "patchset: $actual_hash"
 
