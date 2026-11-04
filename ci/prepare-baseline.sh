@@ -159,6 +159,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0168-ruby-spi3-touch.patch" \
     "$ROOT/patches/0169-ruby-kpd-irq.patch" \
     "$ROOT/patches/0170-ruby-battery-1s.patch" \
+    "$ROOT/patches/0171-ruby-usb-hotplug.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
