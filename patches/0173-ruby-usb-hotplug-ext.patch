@@ -1,0 +1,40 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2898,7 +2898,15 @@
+ {
+     static uint32_t stable, cand, count, seen_detach, attaches;
+     uint32_t v = ruby_rd32(ippc, IPPC_OTG_STS_OFF);
+-    uint32_t present = (v & OTG_VBUS_VALID) ? 1 : 0;
++    uint32_t seq = ruby_battery_poll_seq();
++    /*
++     * 0173: IPPC OTG bit9 does not follow VBUS on this board (0172
++     * heartbeat: constant 0x1ec01ec0 through a 10 s unplug).  Use the
++     * MT6360 CHRDET_EXT cache instead; assume present until the battery
++     * driver has produced its first sample.
++     */
++    uint32_t present = seq ?
++        (uint32_t)(ruby_battery_last_external() != 0) : 1;
+ 
+     if (present != cand) {
+         cand = present;
+@@ -2915,7 +2923,8 @@
+     if (!present) {
+         seen_detach = 1;
+         ruby_trace(0, RUBY_TR_STATE, 8, v, 0, 0);
+-        printf("RUBY USB: t=%u VBUS detached\n", ruby_ms);
++        printf("RUBY USB: t=%u VBUS detached (ext=0 seq=%u otg=%08x)\n",
++            ruby_ms, seq, v);
+         return;
+     }
+     if (!seen_detach)
+@@ -2929,8 +2938,8 @@
+      */
+     ruby_usb_reattach(mac, ruby_phy_base);
+     ruby_trace(0, RUBY_TR_STATE, 9, v, attaches, 0);
+-    printf("RUBY USB: t=%u VBUS attached, device re-attached "
+-        "(otg=%08x pm=%08x misc=%08x acr3=%08x)\n", ruby_ms,
++    printf("RUBY USB: t=%u VBUS attached (ext=1 seq=%u), device re-attached "
++        "(otg=%08x pm=%08x misc=%08x acr3=%08x)\n", ruby_ms, seq,
+         ruby_rd32(ippc, IPPC_OTG_STS_OFF),
+         ruby_rd32(mac, PM_CTRL - MTU3_PA),
+         ruby_rd32(mac, MISC_CTRL - MTU3_PA),
