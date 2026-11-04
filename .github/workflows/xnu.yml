@@ -166,6 +166,11 @@ jobs:
         env:
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
+          # bearssl.org intermittently returns 502; this mirror carries the
+          # same pinned commit and the SHA check in 0020-stage-bearssl.sh.
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://github.com/status-im/BearSSL.insteadOf
+          GIT_CONFIG_VALUE_0: https://www.bearssl.org/git/BearSSL
         run: |
           ccache -z
           bash build.sh
