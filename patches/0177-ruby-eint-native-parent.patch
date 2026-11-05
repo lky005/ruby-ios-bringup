@@ -1,0 +1,500 @@
+diff --git a/bsd/dev/ruby_eint.c b/bsd/dev/ruby_eint.c
+index 2ac9a4a..48ad0ba 100644
+--- a/bsd/dev/ruby_eint.c
++++ b/bsd/dev/ruby_eint.c
+@@ -23,6 +23,8 @@
+ #include "ruby_hal.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern int ruby_eint_native_ready(void);
++extern int ruby_eint_native_fused(void);
+ 
+ #define RUBY_EINT0_PA        0x1000b000u
+ #define RUBY_EINT_GICD_PA    0x0c000000u
+@@ -477,6 +479,8 @@ ruby_eint_status(void)
+ 	printf("RUBY EINT: gic ctlr=%08x isen=%08x pnd=%08x spi256=%u\n",
+ 	    ctl, isen, pnd,
+ 	    (isen & RUBY_EINT_GIC_SPI256_BIT) != 0);
++	printf("RUBY EINT: native ready=%d fused=%d\n",
++	    ruby_eint_native_ready(), ruby_eint_native_fused());
+ 	if (n == 0) {
+ 		printf("RUBY EINT: used=none\n");
+ 		return;
+@@ -1077,9 +1081,11 @@ ruby_eint_all_poll_only(void)
+ 		e->seq++;
+ 	}
+ 	lck_spin_unlock(&g_eint_lock);
+-	for (i = 0; i < RUBY_EINT_LINES; i++) {
+-		if (g_eint_slots[i].used)
+-			wakeup(&g_eint_slots[i].seq);
++	if (!g_b1_no_wakeup) {
++		for (i = 0; i < RUBY_EINT_LINES; i++) {
++			if (g_eint_slots[i].used)
++				wakeup(&g_eint_slots[i].seq);
++		}
+ 	}
+ }
+ 
+diff --git a/bsd/dev/ruby_eint.h b/bsd/dev/ruby_eint.h
+index 9e4b410..4e3a3a2 100644
+--- a/bsd/dev/ruby_eint.h
++++ b/bsd/dev/ruby_eint.h
+@@ -3,6 +3,10 @@
+ 
+ #include <stdint.h>
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
++
+ enum ruby_eint_trigger {
+ 	RUBY_EINT_EDGE_FALLING = 0,
+ 	RUBY_EINT_EDGE_RISING,
+@@ -73,4 +77,8 @@ void ruby_eint_dom_set(uint32_t line, int enable);
+ void ruby_eint_status(void);
+ int ruby_eint_selftest(uint32_t line, uint32_t ms);
+ 
++#ifdef __cplusplus
++}
++#endif
++
+ #endif /* RUBY_EINT_H */
+diff --git a/bsd/dev/ruby_irq.c b/bsd/dev/ruby_irq.c
+index f28f7af..ac7b3a5 100644
+--- a/bsd/dev/ruby_irq.c
++++ b/bsd/dev/ruby_irq.c
+@@ -33,6 +33,9 @@
+ #include "ruby_gic.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern int ruby_eint_native_ready(void);
++extern int ruby_eint_native_enable(int on);
++extern int ruby_eint_native_fused(void);
+ 
+ #define RUBY_IRQ_GICD_PA      0x0c000000u
+ #define RUBY_IRQ_GICD_SIZE    0x10000u
+@@ -65,6 +68,7 @@ static volatile int g_irq_state;    /* GICD init: 0/1/2/3 */
+ static volatile int g_parent_state; /* 0/1/2/3 */
+ static int g_parent_gate = 1;       /* rubyeintirq, default on */
+ static int g_force_poll;            /* rubyeintpoll */
++static int g_legacy_parent;         /* rubyeintlegacy */
+ 
+ static volatile uint32_t g_parent_isr;
+ static volatile uint32_t g_parent_spurious;
+@@ -118,9 +122,11 @@ ruby_irq_init(void)
+ 		g_force_poll = 1;
+ 	if (PE_parse_boot_argn("rubyirq", &v, sizeof(v)) && v == 1)
+ 		g_parent_gate = 1;	/* explicit debug override */
++	if (PE_parse_boot_argn("rubyeintlegacy", &v, sizeof(v)) && v == 1)
++		g_legacy_parent = 1;
+ 
+-	printf("RUBY IRQ: init gicd=%d gate=%d force_poll=%d\n",
+-	    g_gicd != 0, g_parent_gate, g_force_poll);
++	printf("RUBY IRQ: init gicd=%d gate=%d force_poll=%d legacy=%d\n",
++	    g_gicd != 0, g_parent_gate, g_force_poll, g_legacy_parent);
+ 	__atomic_store_n(&g_irq_state, g_gicd ? 2 : 3, __ATOMIC_RELEASE);
+ }
+ 
+@@ -213,6 +219,47 @@ ruby_irq_parent_start(void)
+ 			break;
+ 	}
+ 
++	if (!g_legacy_parent) {
++		if (!ruby_eint_native_ready()) {
++			printf("RUBY IRQ: native parent unavailable; poll\n");
++			__atomic_store_n(&g_parent_state, 3, __ATOMIC_RELEASE);
++			return ENODEV;
++		}
++		if (ruby_eint_native_fused()) {
++			printf("RUBY IRQ: native parent fused; poll\n");
++			__atomic_store_n(&g_parent_state, 3, __ATOMIC_RELEASE);
++			return EPERM;
++		}
++		if (!ruby_eint_b1_mode()) {
++			printf("RUBY IRQ: native parent needs b1; poll\n");
++			__atomic_store_n(&g_parent_state, 3, __ATOMIC_RELEASE);
++			return EPERM;
++		}
++		ctlr = ruby_rd32(g_gicd, GICD_CTLR);
++		sre = (uint32_t)__builtin_arm_rsr64("ICC_SRE_EL1");
++		igrpen1 = (uint32_t)__builtin_arm_rsr64("ICC_IGRPEN1_EL1");
++		pmr = (uint32_t)__builtin_arm_rsr64("ICC_PMR_EL1");
++		if ((ctlr & (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS)) !=
++		    (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS) || !(sre & 1u) ||
++		    !(igrpen1 & 1u) || (pmr & 0xffu) <= RUBY_IRQ_PRIO ||
++		    (ctlr & GICD_CTLR_RWP)) {
++			printf("RUBY IRQ: native preflight failed ctlr=%08x sre=%x grpen1=%x pmr=%x\n",
++			    ctlr, sre, igrpen1, pmr);
++			__atomic_store_n(&g_parent_state, 3, __ATOMIC_RELEASE);
++			return EINVAL;
++		}
++		if (ruby_eint_native_enable(1) != 0) {
++			printf("RUBY IRQ: native parent enable failed\n");
++			__atomic_store_n(&g_parent_state, 3, __ATOMIC_RELEASE);
++			return EIO;
++		}
++		ruby_eint_set_parent_owned(1);
++		__atomic_store_n(&g_parent_state, 2, __ATOMIC_RELEASE);
++		printf("RUBY IRQ: native parent running intid=%u\n",
++		    RUBY_IRQ_INTID);
++		return 0;
++	}
++
+ 	smc_rc = ruby_irq_smc_dump(RUBY_IRQ_INTID, &smc);
+ 	if (smc_rc >= 0 && ((smc >> 1) & 1u) == 0) {
+ 		printf("RUBY IRQ: SMC says INTID%u is Group0/secure; refusing\n",
+@@ -297,6 +344,19 @@ ruby_irq_parent_stop(void)
+ 	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+ 		return;
+ 
++	if (!g_legacy_parent) {
++		if (!ruby_eint_native_ready()) {
++			__atomic_store_n(&g_parent_state, 0, __ATOMIC_RELEASE);
++			return;
++		}
++		ruby_eint_all_poll_only();
++		(void)ruby_eint_native_enable(0);
++		ruby_eint_set_parent_owned(0);
++		__atomic_store_n(&g_parent_state, 0, __ATOMIC_RELEASE);
++		printf("RUBY IRQ: native parent stopped\n");
++		return;
++	}
++
+ 	ruby_eint_all_poll_only();
+ 	ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
+ 	(void)ruby_irq_rwp();
+diff --git a/iokit/Kernel/arm/RubyEINTParent.cpp b/iokit/Kernel/arm/RubyEINTParent.cpp
+new file mode 100644
+index 0000000..341aa50
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyEINTParent.cpp
+@@ -0,0 +1,222 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(SWEET)
++/*
++ * SWEET: EINT SPI288 parent as a RubyGIC vector.
++ *
++ * The filter runs in primary interrupt context and only calls the bounded
++ * EINT demux.  It never wakes a thread: under B1 the touch owner polls the
++ * DEFERRED state and calls ruby_eint_service_done().  The event source
++ * action is a no-op; the filter always returns false.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOFilterInterruptEventSource.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSSymbol.h>
++#include <pexpert/pexpert.h>
++#include <sys/errno.h>
++
++#include "../../../bsd/dev/ruby_gic.h"
++#include "../../../bsd/dev/ruby_eint.h"
++
++#include "RubyEINTParent.h"
++
++#define super IOService
++OSDefineMetaClassAndStructors(RubyEINTParent, IOService);
++
++#define RUBY_EINT_PARENT_INTID 288u
++#define RUBY_EINT_FUSE_LIMIT   16u
++
++static RubyEINTParent *gRubyEINTParent;
++
++bool
++RubyEINTParent::init(OSDictionary *dictionary)
++{
++	fWorkLoop = NULL;
++	fIRQ = NULL;
++	fHits = 0;
++	fNoPending = 0;
++	fFused = 0;
++	fEnableCount = 0;
++	fDisableCount = 0;
++	return super::init(dictionary);
++}
++
++bool
++RubyEINTParent::publishInterruptSource(void)
++{
++	OSArray *controllers = NULL;
++	OSArray *specifiers = NULL;
++	OSSymbol *name = NULL;
++	OSData *data = NULL;
++	struct ruby_gic_spec spec = {
++		.intid = RUBY_EINT_PARENT_INTID,
++		.flags = RUBY_GIC_LEVEL,
++	};
++	bool ok = false;
++
++	controllers = OSArray::withCapacity(1);
++	specifiers = OSArray::withCapacity(1);
++	name = (OSSymbol *)OSSymbol::withCStringNoCopy("RubyGIC");
++	data = OSData::withBytes(&spec, sizeof(spec));
++	if (!controllers || !specifiers || !name || !data) {
++		goto out;
++	}
++	if (!controllers->setObject(name) || !specifiers->setObject(data)) {
++		goto out;
++	}
++	ok = setProperty("IOInterruptControllers", controllers) &&
++	    setProperty("IOInterruptSpecifiers", specifiers);
++out:
++	OSSafeRelease(controllers);
++	OSSafeRelease(specifiers);
++	OSSafeRelease(name);
++	OSSafeRelease(data);
++	return ok;
++}
++
++bool
++RubyEINTParent::start(IOService *provider)
++{
++	int eint = 0;
++	int irq = 0;
++	int b1 = 0;
++	int legacy = 0;
++
++	if (!super::start(provider)) {
++		return false;
++	}
++	PE_parse_boot_argn("rubyeint", &eint, sizeof(eint));
++	PE_parse_boot_argn("rubyeintirq", &irq, sizeof(irq));
++	PE_parse_boot_argn("rubyeintb1", &b1, sizeof(b1));
++	PE_parse_boot_argn("rubyeintlegacy", &legacy, sizeof(legacy));
++	if (eint != 1 || irq != 1 || b1 != 1 || legacy != 0) {
++		return false;
++	}
++	fWorkLoop = getWorkLoop();
++	if (!fWorkLoop) {
++		return false;
++	}
++	fWorkLoop->retain();
++	if (!publishInterruptSource()) {
++		return false;
++	}
++	fIRQ = IOFilterInterruptEventSource::filterInterruptEventSource(
++	    this, &RubyEINTParent::noopAction, &RubyEINTParent::filter,
++	    this, 0);
++	if (!fIRQ ||
++	    fWorkLoop->addEventSource(fIRQ) != kIOReturnSuccess) {
++		return false;
++	}
++	/* Keep 288 masked until ruby_irq_parent_start() enables it. */
++	fIRQ->disable();
++	gRubyEINTParent = this;
++	IOLog("RUBY EINT: native parent intid=%u ready\n",
++	    RUBY_EINT_PARENT_INTID);
++	return true;
++}
++
++void
++RubyEINTParent::free(void)
++{
++	if (gRubyEINTParent == this) {
++		gRubyEINTParent = NULL;
++	}
++	if (fIRQ) {
++		fIRQ->disable();
++		if (fWorkLoop) {
++			fWorkLoop->removeEventSource(fIRQ);
++		}
++		OSSafeRelease(fIRQ);
++		fIRQ = NULL;
++	}
++	if (fWorkLoop) {
++		fWorkLoop->release();
++		fWorkLoop = NULL;
++	}
++	super::free();
++}
++
++int
++RubyEINTParent::setEnabled(int on)
++{
++	if (!fIRQ) {
++		return ENODEV;
++	}
++	if (on) {
++		fIRQ->enable();
++		fEnableCount++;
++	} else {
++		fIRQ->disable();
++		fDisableCount++;
++	}
++	return 0;
++}
++
++bool
++RubyEINTParent::isFused(void) const
++{
++	return fFused != 0;
++}
++
++bool
++RubyEINTParent::filter(OSObject *owner,
++    IOFilterInterruptEventSource *sender)
++{
++	RubyEINTParent *self = (RubyEINTParent *)owner;
++	int handled;
++
++	handled = ruby_eint_demux_isr();
++	if (handled > 0) {
++		self->fHits++;
++		self->fNoPending = 0;
++		return false;
++	}
++	if (++self->fNoPending < RUBY_EINT_FUSE_LIMIT) {
++		return false;
++	}
++
++	/*
++	 * Parent asserted without an EINT line.  Mirror the legacy fuse:
++	 * mask the parent and leave every child polling.  B1 keeps this
++	 * path free of wakeup().
++	 */
++	self->fNoPending = 0;
++	self->fFused = 1;
++	sender->disable();
++	ruby_eint_all_poll_only();
++	return false;
++}
++
++void
++RubyEINTParent::noopAction(OSObject *owner,
++    IOInterruptEventSource *sender, int count)
++{
++	(void)owner;
++	(void)sender;
++	(void)count;
++}
++
++extern "C" int
++ruby_eint_native_ready(void)
++{
++	return gRubyEINTParent ? 1 : 0;
++}
++
++extern "C" int
++ruby_eint_native_enable(int on)
++{
++	return gRubyEINTParent ?
++	    gRubyEINTParent->setEnabled(on) : ENODEV;
++}
++
++extern "C" int
++ruby_eint_native_fused(void)
++{
++	return (gRubyEINTParent && gRubyEINTParent->isFused()) ? 1 : 0;
++}
++
++#endif /* SWEET */
+diff --git a/iokit/Kernel/arm/RubyEINTParent.h b/iokit/Kernel/arm/RubyEINTParent.h
+new file mode 100644
+index 0000000..2bd83c8
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyEINTParent.h
+@@ -0,0 +1,41 @@
++#ifndef _IOKIT_RUBY_EINT_PARENT_H
++#define _IOKIT_RUBY_EINT_PARENT_H
++
++#include <IOKit/IOService.h>
++#include <mach/vm_types.h>
++#include <stdint.h>
++
++class OSDictionary;
++class IOWorkLoop;
++class IOFilterInterruptEventSource;
++class IOInterruptEventSource;
++
++class RubyEINTParent : public IOService
++{
++	OSDeclareDefaultStructors(RubyEINTParent);
++
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++
++	int setEnabled(int on);
++	bool isFused(void) const;
++
++private:
++	IOWorkLoop *fWorkLoop;
++	IOFilterInterruptEventSource *fIRQ;
++	uint32_t fHits;
++	uint32_t fNoPending;
++	uint32_t fFused;
++	uint32_t fEnableCount;
++	uint32_t fDisableCount;
++
++	bool publishInterruptSource(void);
++	static bool filter(OSObject *owner,
++	    IOFilterInterruptEventSource *sender);
++	static void noopAction(OSObject *owner,
++	    IOInterruptEventSource *sender, int count);
++};
++
++#endif /* _IOKIT_RUBY_EINT_PARENT_H */
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 1517696..af20222 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -11,9 +11,11 @@
+ #include <IOKit/IOLib.h>
+ #include <pexpert/pexpert.h>
+ 
++#include "RubyEINTParent.h"
+ #include "RubyGICInterruptController.h"
+ #include "SweetKPD.h"
+ 
++static RubyEINTParent *gRubyEINTParent;
+ static RubyGICInterruptController *gRubyGIC;
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+@@ -56,6 +58,31 @@ SweetPlatformExpert::start(IOService *provider)
+ 		}
+ 	}
+ 
++	if (gRubyGIC) {
++		int eint = 0;
++		int eintirq = 0;
++		int eintb1 = 0;
++		int eintlegacy = 0;
++
++		PE_parse_boot_argn("rubyeint", &eint, sizeof(eint));
++		PE_parse_boot_argn("rubyeintirq", &eintirq, sizeof(eintirq));
++		PE_parse_boot_argn("rubyeintb1", &eintb1, sizeof(eintb1));
++		PE_parse_boot_argn("rubyeintlegacy", &eintlegacy,
++		    sizeof(eintlegacy));
++		if (eint == 1 && eintirq == 1 && eintb1 == 1 &&
++		    eintlegacy == 0) {
++			RubyEINTParent *eintp = new RubyEINTParent;
++			if (eintp && eintp->init() && eintp->attach(this) &&
++			    eintp->start(this)) {
++				eintp->registerService();
++				gRubyEINTParent = eintp;
++			} else {
++				IOLog("SWEET: RubyEINTParent start failed\n");
++				OSSafeRelease(eintp);
++			}
++		}
++	}
++
+ 	gate = 0;
+ 	if (gRubyGIC &&
+ 	    PE_parse_boot_argn("rubykpdirq", &gate, sizeof(gate)) &&
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 4a7e4f2..de65f1a 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -9,6 +9,7 @@ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+ # SWEET device-tree platform (empty translation unit on other boards)
+ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
+ iokit/Kernel/arm/RubyGICInterruptController.cpp                  optional iokitcpp
++iokit/Kernel/arm/RubyEINTParent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/SweetKPD.cpp                                    optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
