@@ -359,7 +359,8 @@
 +#endif /* _IOKIT_RUBY_GIC_INTERRUPT_CONTROLLER_H */
 --- /dev/null
 +++ b/iokit/Kernel/arm/RubyGICInterruptController.cpp
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,546 @@
++#include <pexpert/arm64/board_config.h>
 +#if defined(SWEET)
 +/*
 + * SWEET: board-level GICv3 SPI controller.
@@ -950,7 +951,8 @@
 +#endif /* _IOKIT_SWEET_KPD_H */
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetKPD.cpp
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,218 @@
++#include <pexpert/arm64/board_config.h>
 +#if defined(SWEET)
 +/*
 + * SWEET: KPD volume-down button as an IOKit interrupt client.
