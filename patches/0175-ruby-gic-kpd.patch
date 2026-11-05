@@ -235,12 +235,16 @@
  
 --- /dev/null
 +++ b/pexpert/pexpert/arm/pe_irq.h
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,25 @@
 +#ifndef _PEXPERT_ARM_PE_IRQ_H_
 +#define _PEXPERT_ARM_PE_IRQ_H_
 +
 +#include <mach/boolean.h>
 +#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
 +
 +typedef boolean_t (*sweet_irq_dispatch_fn)(uint32_t intid, void *ctx);
 +
@@ -251,6 +255,10 @@
 + */
 +extern boolean_t sweet_irq_dispatch(uint32_t intid);
 +extern void sweet_irq_set_handler(sweet_irq_dispatch_fn fn, void *ctx);
++
++#ifdef __cplusplus
++}
++#endif
 +
 +#endif /* _PEXPERT_ARM_PE_IRQ_H_ */
 --- /dev/null
