@@ -983,7 +983,6 @@
 +#include <pexpert/pexpert.h>
 +
 +#include "../../../bsd/dev/ruby_gic.h"
-+#include "hid/IOHIDUsageTables.h"
 +#include "SweetKPD.h"
 +
 +#define SWEET_KPD_PA     0x10010000u
@@ -991,6 +990,7 @@
 +#define SWEET_KPD_MEM1   0x0004u
 +#define SWEET_KPD_INTID  138u
 +#define SWEET_KPD_POLL_MS 10u
++#define SWEET_KPD_HID_VOLUME_DOWN 2
 +
 +#define super IOService
 +OSDefineMetaClassAndStructors(SweetKPD, IOService);
@@ -1134,7 +1134,7 @@
 +SweetKPD::report(bool down)
 +{
 +	IOLog("SWEET KPD: volume down %s\n", down ? "down" : "up");
-+	sweet_hid_key(kHIDUsage_Csmr_VolumeDecrement, down ? 1 : 0);
++	sweet_hid_key(SWEET_KPD_HID_VOLUME_DOWN, down ? 1 : 0);
 +}
 +
 +void
