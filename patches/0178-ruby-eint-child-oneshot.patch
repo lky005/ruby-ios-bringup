@@ -1,0 +1,1458 @@
+diff --git a/bsd/dev/ruby_eint.c b/bsd/dev/ruby_eint.c
+index 48ad0ba..ca55d29 100644
+--- a/bsd/dev/ruby_eint.c
++++ b/bsd/dev/ruby_eint.c
+@@ -112,6 +112,8 @@ static volatile int g_eint_state; /* 0 uninit, 1 init, 2 ready, 3 failed */
+ static bool g_eint_enabled;
+ static volatile uint32_t g_parent_owned;
+ static int g_b1_no_wakeup;
++static ruby_eint_raise_fn g_raise_fn;
++static void *g_raise_ctx;
+ 
+ #define RUBY_EINT_LOCK() \
+ 	boolean_t _eint_irq = ml_set_interrupts_enabled(FALSE); \
+@@ -975,6 +977,8 @@ ruby_eint_demux_isr(void)
+ 	uint32_t port, sta, bit, line, wake[RUBY_EINT_LINE_PORTS] = { 0 };
+ 	uint64_t now;
+ 	struct ruby_eint *e;
++	ruby_eint_raise_fn raise;
++	void *raise_ctx;
+ 	int handled = 0, p;
+ 
+ 	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
+@@ -1042,13 +1046,18 @@ ruby_eint_demux_isr(void)
+ 	}
+ 	lck_spin_unlock(&g_eint_lock);
+ 
+-	if (!g_b1_no_wakeup) {
+-		for (p = 0; p < (int)RUBY_EINT_LINE_PORTS; p++) {
+-			uint32_t w = wake[p];
+-			while (w != 0) {
+-				uint32_t b = __builtin_ctz(w);
+-				w &= ~(1u << b);
+-				wakeup(&g_eint_slots[p * 32u + b].seq);
++	raise = __atomic_load_n(&g_raise_fn, __ATOMIC_ACQUIRE);
++	raise_ctx = g_raise_ctx;
++	for (p = 0; p < (int)RUBY_EINT_LINE_PORTS; p++) {
++		uint32_t w = wake[p];
++		while (w != 0) {
++			uint32_t b = __builtin_ctz(w);
++			line = p * 32u + b;
++			w &= ~(1u << b);
++			if (raise) {
++				raise(line, raise_ctx);
++			} else if (!g_b1_no_wakeup) {
++				wakeup(&g_eint_slots[line].seq);
+ 			}
+ 		}
+ 	}
+@@ -1096,6 +1105,18 @@ ruby_eint_set_parent_owned(int owned)
+ 	    __ATOMIC_RELEASE);
+ }
+ 
++void
++ruby_eint_set_raise_handler(ruby_eint_raise_fn fn, void *ctx)
++{
++	if (fn) {
++		g_raise_ctx = ctx;
++		__atomic_store_n(&g_raise_fn, fn, __ATOMIC_RELEASE);
++	} else {
++		__atomic_store_n(&g_raise_fn, NULL, __ATOMIC_RELEASE);
++		g_raise_ctx = NULL;
++	}
++}
++
+ int
+ ruby_eint_b1_mode(void)
+ {
+diff --git a/bsd/dev/ruby_eint.h b/bsd/dev/ruby_eint.h
+index 4e3a3a2..86ec082 100644
+--- a/bsd/dev/ruby_eint.h
++++ b/bsd/dev/ruby_eint.h
+@@ -40,6 +40,15 @@ struct ruby_eint_child {
+ 	void *cookie;
+ };
+ 
++/* IOInterruptController child spec: first word is the vector number. */
++struct ruby_eint_spec {
++	uint32_t line;
++	uint32_t flags;
++};
++
++#define RUBY_EINT_EDGE  0u
++#define RUBY_EINT_LEVEL 1u
++
+ /* Chained-demux child API (0165).  The owner thread drives the state
+  * machine: attach -> (device init/clear) -> activate -> wait ->
+  * service_done.  Core never calls the child from interrupt context. */
+@@ -69,6 +78,8 @@ void ruby_eint_unmask(uint32_t line);
+ int ruby_eint_line_used(uint32_t line);
+ int ruby_eint_isr_handle(uint32_t line);
+ void ruby_eint_set_parent_owned(int owned);
++typedef void (*ruby_eint_raise_fn)(uint32_t line, void *ctx);
++void ruby_eint_set_raise_handler(ruby_eint_raise_fn fn, void *ctx);
+ int ruby_eint_b1_mode(void);
+ int ruby_eint_safe(void);
+ int ruby_eint_read_port(uint32_t port, struct ruby_eint_port *out);
+diff --git a/bsd/dev/sweet_goodix_spi.c b/bsd/dev/sweet_goodix_spi.c
+index a9d072e..2eca36b 100644
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -28,8 +28,10 @@
+ #include "ruby_spi3.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+-extern kern_return_t thread_terminate(thread_t);
+ extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern int sweet_goodix_service_cmd(char *cmd);
++extern int sweet_goodix_service_kick(void);
++extern int sweet_goodix_irq_set_direct(int on);
+ 
+ #define GT_MAX		10
+ #define GT_FRAME_DATA_MAX	(8 + GT_MAX * 8 + 2 + 8)
+@@ -1346,24 +1348,52 @@ gt_service_frame(void)
+ 	return 0;
+ }
+ 
+-static void
+-gt_thread(void *arg, wait_result_t wr)
++static const char *
++gt_bus_name(enum gt_bus_mode bus)
+ {
+-	int bad = 0;
+-	int miss = 0;
+-	int good_polls = 0;
+-	int b1 = 0;
+-	uint32_t idle = 8;
++	switch (bus) {
++	case GT_BUS_BB_LEGACY:
++		return "bb-legacy";
++	case GT_BUS_BB_FAST:
++		return "bb-fast";
++	case GT_BUS_SPI3:
++		return "spi3";
++	default:
++		return "off";
++	}
++}
+ 
+-	(void)arg;
+-	(void)wr;
++static int
++gt_parse_uint(const char *s, uint32_t *out)
++{
++	uint32_t v = 0;
++	int any = 0;
+ 
+-	gt.bus = GT_BUS_BB_LEGACY;
++	while (*s == ' ' || *s == '\t') {
++		s++;
++	}
++	while (*s >= '0' && *s <= '9') {
++		v = v * 10 + (uint32_t)(*s - '0');
++		s++;
++		any = 1;
++	}
++	if (!any) {
++		return EINVAL;
++	}
++	*out = v;
++	return 0;
++}
++
++int
++sweet_gt_hw_start(void)
++{
++	if (!gt.started || !gt.gpio || gt.bus == GT_BUS_OFF) {
++		return 0;
++	}
+ 	if (!gt_hw_init()) {
+-		goto out;
++		return 0;
+ 	}
+ 	bb_fast_init();
+-
+ 	switch (gt.boot_mode) {
+ 	case 1:
+ 		gt_apply_mode(GT_REQ_AUTO);
+@@ -1381,192 +1411,76 @@ gt_thread(void *arg, wait_result_t wr)
+ 		gt_apply_mode(GT_REQ_AUTO);
+ 		break;
+ 	}
+-	if (__atomic_load_n(&gt.stop_requested, __ATOMIC_ACQUIRE) ||
+-	    gt.bus == GT_BUS_OFF) {
+-		goto out;
+-	}
++	return gt.bus != GT_BUS_OFF;
++}
+ 
++int
++sweet_gt_eint_attach(void)
++{
+ 	gt.eint = ruby_eint_attach(14, RUBY_EINT_EDGE_FALLING,
+ 	    &gt_eint_child);
+-	if (gt.eint && ruby_eint_activate(gt.eint) == 0)
+-		printf("SWEET GT: EINT14 irq active\n");
+-	else if (gt.eint)
+-		printf("SWEET GT: EINT14 poll fallback\n");
+-	else
+-		printf("SWEET GT: EINT14 unavailable; 8 ms polling\n");
+-	b1 = ruby_eint_b1_mode();
+-	if (gt.eint && b1)
+-		printf("SWEET GT: EINT14 b1 poll-service\n");
+-
+-	for (;;) {
+-		bool ev;
+-		int req, ok;
+-		uint32_t sp;
+-
+-		req = (int)__atomic_exchange_n(&gt.mode_request, GT_REQ_NONE,
+-		    __ATOMIC_ACQ_REL);
+-		if (req != GT_REQ_NONE) {
+-			gt_apply_mode(req);
+-		}
+-		if (__atomic_load_n(&gt.stop_requested, __ATOMIC_ACQUIRE)) {
+-			break;
+-		}
+-		if (__atomic_exchange_n(&gt.recover_request, 0,
+-		    __ATOMIC_ACQ_REL)) {
+-			gt_recover();
+-		}
+-		sp = __atomic_exchange_n(&gt.speed_request, 0, __ATOMIC_ACQ_REL);
+-		if (sp && gt.bus == GT_BUS_SPI3) {
+-			(void)ruby_spi3_set_speed(sp);
+-		}
+-		if (gt.bus == GT_BUS_OFF) {
+-			break;
+-		}
+-
+-		if (gt.eint && b1 &&
+-		    (ruby_eint_active(gt.eint) ||
+-		    ruby_eint_deferred(gt.eint))) {
+-			/*
+-			 * B1: no wakeup from the demux.  Poll the deferred
+-			 * state and service the frame here; the parent stays
+-			 * gated until service_done() reopens the line.
+-			 */
+-			if (ruby_eint_deferred(gt.eint)) {
+-				ok = gt_service_frame();
+-				ruby_eint_service_done(gt.eint, ok, ok);
+-				miss = 0;
+-			} else if (ruby_eint_pending(gt.eint)) {
+-				if (++miss >= 3) {
+-					ruby_eint_force_poll(gt.eint);
+-					miss = 0;
+-				}
+-			} else {
+-				miss = 0;
+-			}
+-			gt_wait(1);
+-			continue;
+-		}
++	if (!gt.eint) {
++		printf("SWEET GT: EINT14 unavailable\n");
++		return 0;
++	}
++	return 1;
++}
+ 
+-		if (gt.eint && (ruby_eint_active(gt.eint) ||
+-		    ruby_eint_deferred(gt.eint))) {
+-			if (ruby_eint_wait(gt.eint, 8)) {
+-				ok = gt_service_frame();
++int
++sweet_gt_eint_activate(void)
++{
++	if (!gt.eint) {
++		return 0;
++	}
++	if (ruby_eint_activate(gt.eint) == 0) {
++		printf("SWEET GT: EINT14 oneshot active\n");
++		return 1;
++	}
++	printf("SWEET GT: EINT14 activate failed\n");
++	return 0;
++}
+ 
+-				if (ok) {
+-					bad = 0;
+-				} else if (++bad >= 50) {
+-					gt_release_all();
+-					bad = 0;
+-				}
+-				/* No bottom-half ACK: the demux ACKed in
+-				 * the ISR; a new edge must survive. */
+-				ruby_eint_service_done(gt.eint, ok, ok);
+-				miss = 0;
+-				continue;
+-			}
+-			if (ruby_eint_deferred(gt.eint)) {
+-				/* Wait should have returned the event. */
+-				ruby_eint_service_done(gt.eint, 0, 0);
+-				continue;
+-			}
+-			/* IRQ quiet but EINT shows an edge the parent
+-			 * missed: fall back after three periods. */
+-			if (ruby_eint_pending(gt.eint)) {
+-				if (++miss >= 3) {
+-					ruby_eint_force_poll(gt.eint);
+-					miss = 0;
+-				}
+-			} else {
+-				miss = 0;
+-			}
+-			continue;
+-		}
++static int g_service_bad;
+ 
+-		/* Polling path: legacy operation or demux fallback. */
+-		ev = gt.eint && ruby_eint_pending(gt.eint);
++int
++sweet_gt_service_frame(void)
++{
++	int ok = gt_service_frame();
+ 
+-		if (ev || idle >= 8) {
+-			ok = gt_service_frame();
+-			if (!ok) {
+-				if (++bad >= 50) {
+-					gt_release_all();
+-					bad = 0;
+-				}
+-			} else {
+-				bad = 0;
+-				if (ev)
+-					ruby_eint_ack(gt.eint);
+-				if (gt.eint && ruby_eint_poll_only(gt.eint)) {
+-					/* Hand the line back to IRQ after a
+-					 * few clean polls. */
+-					if (++good_polls >= 3) {
+-						good_polls = 0;
+-						(void)ruby_eint_activate(
+-						    gt.eint);
+-					}
+-				}
+-			}
+-			idle = 0;
+-		}
+-		if (!gt.eint) {
+-			gt_wait(8);
+-			idle = 8;
+-			continue;
++	if (!ok) {
++		if (++g_service_bad >= 50) {
++			gt_release_all();
++			g_service_bad = 0;
+ 		}
+-		gt_wait(1);
+-		if (idle < 8)
+-			idle++;
+-	}
+-
+-out:
+-	if (gt.bus != GT_BUS_OFF) {
+-		gt_stop();
++	} else {
++		g_service_bad = 0;
+ 	}
+-	ruby_eint_detach(gt.eint);
+-	gt.eint = NULL;
+-	printf("SWEET GT: stopped\n");
+-	(void)thread_terminate(current_thread());
+-	thread_block(THREAD_CONTINUE_NULL);
++	return ok;
+ }
+ 
+-static const char *
+-gt_bus_name(enum gt_bus_mode bus)
++void
++sweet_gt_service_done(int ok)
+ {
+-	switch (bus) {
+-	case GT_BUS_BB_LEGACY:
+-		return "bb-legacy";
+-	case GT_BUS_BB_FAST:
+-		return "bb-fast";
+-	case GT_BUS_SPI3:
+-		return "spi3";
+-	default:
+-		return "off";
++	if (gt.eint) {
++		ruby_eint_service_done(gt.eint, ok, ok);
+ 	}
+ }
+ 
+-static int
+-gt_parse_uint(const char *s, uint32_t *out)
++void
++sweet_gt_stop_service(void)
+ {
+-	uint32_t v = 0;
+-	int any = 0;
+-
+-	while (*s == ' ' || *s == '\t') {
+-		s++;
+-	}
+-	while (*s >= '0' && *s <= '9') {
+-		v = v * 10 + (uint32_t)(*s - '0');
+-		s++;
+-		any = 1;
++	if (gt.gpio && gt.bus != GT_BUS_OFF) {
++		gt_stop();
+ 	}
+-	if (!any) {
+-		return EINVAL;
++	if (gt.eint) {
++		ruby_eint_detach(gt.eint);
++		gt.eint = NULL;
+ 	}
+-	*out = v;
+-	return 0;
++	printf("SWEET GT: stopped\n");
+ }
+ 
+ int
+-sweet_goodix_cmd(char *cmd)
++sweet_goodix_cmd_internal(char *cmd)
+ {
+ 	char *p = cmd;
+ 	char *q;
+@@ -1591,30 +1505,28 @@ sweet_goodix_cmd(char *cmd)
+ 		return 1;
+ 	}
+ 	if (!strcmp(p, "recover")) {
+-		__atomic_store_n(&gt.recover_request, 1, __ATOMIC_RELEASE);
+-		printf("SWEET GT: recover requested\n");
++		gt_recover();
++		printf("SWEET GT: recovered\n");
+ 		return 1;
+ 	}
++	if (!strcmp(p, "irq on") || !strcmp(p, "irq off")) {
++		return sweet_goodix_irq_set_direct(p[5] == 'n');
++	}
+ 	if (!strncmp(p, "bus ", 4)) {
+ 		p += 4;
+ 		while (*p == ' ') {
+ 			p++;
+ 		}
+ 		if (!strcmp(p, "bb")) {
+-			__atomic_store_n(&gt.mode_request, GT_REQ_BB_FAST,
+-			    __ATOMIC_RELEASE);
++			gt_apply_mode(GT_REQ_BB_FAST);
+ 		} else if (!strcmp(p, "legacy")) {
+-			__atomic_store_n(&gt.mode_request, GT_REQ_BB_LEGACY,
+-			    __ATOMIC_RELEASE);
++			gt_apply_mode(GT_REQ_BB_LEGACY);
+ 		} else if (!strcmp(p, "hw")) {
+-			__atomic_store_n(&gt.mode_request, GT_REQ_HW,
+-			    __ATOMIC_RELEASE);
++			gt_apply_mode(GT_REQ_HW);
+ 		} else if (!strcmp(p, "auto")) {
+-			__atomic_store_n(&gt.mode_request, GT_REQ_AUTO,
+-			    __ATOMIC_RELEASE);
++			gt_apply_mode(GT_REQ_AUTO);
+ 		} else if (!strcmp(p, "off")) {
+-			__atomic_store_n(&gt.mode_request, GT_REQ_OFF,
+-			    __ATOMIC_RELEASE);
++			gt_apply_mode(GT_REQ_OFF);
+ 		} else {
+ 			printf("SWEET GT: bus bb|legacy|hw|auto|off\n");
+ 			return 1;
+@@ -1663,9 +1575,9 @@ sweet_goodix_cmd(char *cmd)
+ 			printf("SWEET GT: spi speed 100..5000 kHz\n");
+ 			return 1;
+ 		}
+-		__atomic_store_n(&gt.hw_speed_khz, v, __ATOMIC_RELEASE);
+-		__atomic_store_n(&gt.speed_request, v, __ATOMIC_RELEASE);
+-		printf("SWEET GT: spi speed request=%u kHz\n", v);
++		gt.hw_speed_khz = v;
++		(void)ruby_spi3_set_speed(v);
++		printf("SWEET GT: spi speed=%u kHz\n", v);
+ 		return 1;
+ 	}
+ 	if (!strncmp(p, "spi failtest ", 13)) {
+@@ -1691,17 +1603,27 @@ sweet_goodix_cmd(char *cmd)
+ 		printf("SWEET GT: failtest=%s\n", p);
+ 		return 1;
+ 	}
+-	printf("SWEET GT: gt diag | bus [bb|legacy|hw|auto|off] | recover | log 0|1 | hwfail <1..100> | bb delay <us> | bb bar <0..15> | spi speed <khz>\n");
++	printf("SWEET GT: gt diag | bus [bb|legacy|hw|auto|off] | recover | irq on|off | log 0|1 | hwfail <1..100> | bb delay <us> | bb bar <0..15> | spi speed <khz>\n");
+ 	return 1;
+ }
+ 
++int
++sweet_goodix_cmd(char *cmd)
++{
++	return sweet_goodix_service_cmd(cmd);
++}
++
++void
++sweet_goodix_spi_kick(void)
++{
++	(void)sweet_goodix_service_kick();
++}
++
+ void
+ sweet_goodix_spi_init(void)
+ {
+ 	int enabled = 1;
+ 	int val;
+-	thread_t thread;
+-	kern_return_t kr;
+ 
+ 	if (gt.started) {
+ 		return;
+@@ -1760,12 +1682,6 @@ sweet_goodix_spi_init(void)
+ 		printf("SWEET GT: GPIO mapping failed\n");
+ 		return;
+ 	}
+-	kr = kernel_thread_start(gt_thread, NULL, &thread);
+-	if (kr == KERN_SUCCESS) {
+-		thread_deallocate(thread);
+-	} else {
+-		printf("SWEET GT: thread start failed %d\n", kr);
+-	}
+ }
+ 
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 698868b..61498c9 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,7 +53,7 @@ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void ruby_keys_init(void);
+ extern void sweet_touch_init(void);
+-extern void sweet_goodix_spi_init(void);
++extern void sweet_goodix_spi_kick(void);
+ extern void sweet_usb_probe(void);
+ extern void ruby_usb_probe(void);
+ 
+@@ -705,7 +705,7 @@ sweet_ufs_init(void)
+ 	int keys = 0;
+ 	if (PE_parse_boot_argn("rubkeys", &keys, sizeof(keys)) && keys == 1)
+ 		ruby_keys_init();
+-	sweet_goodix_spi_init();
++	sweet_goodix_spi_kick();
+ 	return 0;
+ }
+ 
+diff --git a/iokit/Kernel/arm/RubyEINTInterruptController.cpp b/iokit/Kernel/arm/RubyEINTInterruptController.cpp
+new file mode 100644
+index 0000000..4240745
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyEINTInterruptController.cpp
+@@ -0,0 +1,305 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(SWEET)
++/*
++ * SWEET: EINT line domain behind the SPI288 parent.
++ *
++ * vectorNumber = EINT line.  The parent filter raises a line after the
++ * demux has physically masked and ACKed it; this controller only maps the
++ * line to the child IOInterruptEventSource and schedules its workloop.
++ * It never touches GICD or the parent vector.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOInterruptController.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <IOKit/IOService.h>
++#include <libkern/c++/OSSymbol.h>
++#include <string.h>
++#include <pexpert/pexpert.h>
++
++#include "../../../bsd/dev/ruby_eint.h"
++#include "RubyEINTInterruptController.h"
++
++#define super IOInterruptController
++OSDefineMetaClassAndStructors(RubyEINTInterruptController, IOInterruptController);
++
++#define RUBY_EINT_CTRL_LINES 128u
++
++bool
++RubyEINTInterruptController::init(OSDictionary *dictionary)
++{
++	vectors = NULL;
++	fNumVectors = 0;
++	fSpurious = 0;
++	fUnhandled = 0;
++	memset(fLevel, 0, sizeof(fLevel));
++	return super::init(dictionary);
++}
++
++bool
++RubyEINTInterruptController::start(IOService *provider)
++{
++	OSSymbol *name;
++
++	if (!super::start(provider)) {
++		return false;
++	}
++	fNumVectors = RUBY_EINT_CTRL_LINES;
++	vectors = IONewZero(IOInterruptVector, fNumVectors);
++	if (!vectors) {
++		return false;
++	}
++	for (uint32_t i = 0; i < fNumVectors; i++) {
++		vectors[i].interruptLock = IOLockAlloc();
++		if (!vectors[i].interruptLock) {
++			releaseVectors();
++			return false;
++		}
++	}
++	name = (OSSymbol *)OSSymbol::withCStringNoCopy("RubyEINT");
++	if (!name || !getPlatform() ||
++	    getPlatform()->registerInterruptController(name, this) !=
++	    kIOReturnSuccess) {
++		releaseVectors();
++		return false;
++	}
++	IOLog("RUBY EINT: child controller ready vectors=%u\n", fNumVectors);
++	return true;
++}
++
++void
++RubyEINTInterruptController::releaseVectors(void)
++{
++	if (!vectors) {
++		return;
++	}
++	for (uint32_t i = 0; i < fNumVectors; i++) {
++		if (vectors[i].interruptLock) {
++			IOLockFree(vectors[i].interruptLock);
++			vectors[i].interruptLock = NULL;
++		}
++	}
++	IODelete(vectors, IOInterruptVector, fNumVectors);
++	vectors = NULL;
++}
++
++void
++RubyEINTInterruptController::free(void)
++{
++	releaseVectors();
++	super::free();
++}
++
++bool
++RubyEINTInterruptController::specForSource(IOService *nub, int source,
++    uint32_t *line, uint32_t *flags)
++{
++	IOInterruptSource *src;
++	OSData *data;
++	const struct ruby_eint_spec *spec;
++
++	if (!nub || !nub->_interruptSources || source < 0 ||
++	    source >= nub->_numInterruptSources) {
++		return false;
++	}
++	src = &nub->_interruptSources[source];
++	data = src->vectorData;
++	if (!data || data->getLength() < sizeof(struct ruby_eint_spec)) {
++		return false;
++	}
++	spec = (const struct ruby_eint_spec *)data->getBytesNoCopy();
++	*line = spec->line;
++	*flags = spec->flags;
++	return true;
++}
++
++IOInterruptVector *
++RubyEINTInterruptController::vectorForSource(IOService *nub, int source)
++{
++	uint32_t line;
++	uint32_t flags;
++
++	if (!specForSource(nub, source, &line, &flags) ||
++	    line >= fNumVectors) {
++		return NULL;
++	}
++	return &vectors[line];
++}
++
++IOReturn
++RubyEINTInterruptController::registerInterrupt(IOService *nub, int source,
++    void *target, IOInterruptHandler handler, void *refCon)
++{
++	uint32_t line;
++	uint32_t flags;
++
++	if (!vectors || !specForSource(nub, source, &line, &flags) ||
++	    line >= fNumVectors) {
++		return kIOReturnBadArgument;
++	}
++	fLevel[line] = (flags & RUBY_EINT_LEVEL) ? 1 : 0;
++	return super::registerInterrupt(nub, source, target, handler, refCon);
++}
++
++IOReturn
++RubyEINTInterruptController::unregisterInterrupt(IOService *nub, int source)
++{
++	return super::unregisterInterrupt(nub, source);
++}
++
++IOReturn
++RubyEINTInterruptController::getInterruptType(IOService *nub, int source,
++    int *interruptType)
++{
++	uint32_t line;
++	uint32_t flags;
++
++	if (!interruptType ||
++	    !specForSource(nub, source, &line, &flags)) {
++		return kIOReturnBadArgument;
++	}
++	*interruptType = (flags & RUBY_EINT_LEVEL) ?
++	    kIOInterruptTypeLevel : kIOInterruptTypeEdge;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyEINTInterruptController::enableInterrupt(IOService *nub, int source)
++{
++	IOInterruptVector *vec = vectorForSource(nub, source);
++
++	if (!vec) {
++		return kIOReturnBadArgument;
++	}
++	vec->interruptDisabledSoft = 0;
++	OSMemoryBarrier();
++	if (!getPlatform()->atInterruptLevel()) {
++		while (vec->interruptActive) {
++		}
++	}
++	if (vec->interruptDisabledHard) {
++		vec->interruptDisabledHard = 0;
++		OSSynchronizeIO();
++		ruby_eint_unmask((uint32_t)(vec - vectors));
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyEINTInterruptController::disableInterrupt(IOService *nub, int source)
++{
++	IOInterruptVector *vec = vectorForSource(nub, source);
++
++	if (!vec) {
++		return kIOReturnBadArgument;
++	}
++	vec->interruptDisabledSoft = 1;
++	OSMemoryBarrier();
++	if (!getPlatform()->atInterruptLevel()) {
++		while (vec->interruptActive) {
++		}
++	}
++	if (!vec->interruptDisabledHard) {
++		vec->interruptDisabledHard = 1;
++		ruby_eint_mask((uint32_t)(vec - vectors));
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyEINTInterruptController::handleInterrupt(void *refCon, IOService *nub,
++    int source)
++{
++	IOInterruptVector *vec;
++
++	(void)refCon;
++	(void)nub;
++
++	if (source < 0 || (uint32_t)source >= fNumVectors || !vectors) {
++		__atomic_add_fetch(&fSpurious, 1, __ATOMIC_RELAXED);
++		return kIOReturnInvalid;
++	}
++	vec = &vectors[source];
++	if (!vec->interruptRegistered) {
++		__atomic_add_fetch(&fSpurious, 1, __ATOMIC_RELAXED);
++		return kIOReturnInvalid;
++	}
++	if (vec->interruptDisabledSoft || vec->interruptDisabledHard ||
++	    !vec->handler) {
++		__atomic_add_fetch(&fUnhandled, 1, __ATOMIC_RELAXED);
++		return kIOReturnSuccess;
++	}
++	vec->interruptActive = 1;
++	OSMemoryBarrier();
++	vec->handler(vec->target, vec->refCon, vec->nub, vec->source);
++	OSMemoryBarrier();
++	vec->interruptActive = 0;
++	return kIOReturnSuccess;
++}
++
++bool
++RubyEINTInterruptController::vectorCanBeShared(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vectorNumber;
++	(void)vector;
++	return false;
++}
++
++void
++RubyEINTInterruptController::initVector(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vectorNumber;
++	(void)vector;
++}
++
++int
++RubyEINTInterruptController::getVectorType(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vector;
++
++	if (vectorNumber < 0 || (uint32_t)vectorNumber >= fNumVectors) {
++		return kIOInterruptTypeEdge;
++	}
++	return fLevel[vectorNumber] ?
++	    kIOInterruptTypeLevel : kIOInterruptTypeEdge;
++}
++
++void
++RubyEINTInterruptController::disableVectorHard(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vector;
++
++	if (vectorNumber < 0 || (uint32_t)vectorNumber >= fNumVectors) {
++		return;
++	}
++	ruby_eint_mask((uint32_t)vectorNumber);
++}
++
++void
++RubyEINTInterruptController::enableVector(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vector;
++
++	if (vectorNumber < 0 || (uint32_t)vectorNumber >= fNumVectors) {
++		return;
++	}
++	ruby_eint_unmask((uint32_t)vectorNumber);
++}
++
++void
++RubyEINTInterruptController::causeVector(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vector;
++
++	if (vectorNumber < 0 || (uint32_t)vectorNumber >= fNumVectors) {
++		return;
++	}
++	handleInterrupt(NULL, NULL, (int)vectorNumber);
++}
++
++#endif /* SWEET */
+diff --git a/iokit/Kernel/arm/RubyEINTInterruptController.h b/iokit/Kernel/arm/RubyEINTInterruptController.h
+new file mode 100644
+index 0000000..34d3516
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyEINTInterruptController.h
+@@ -0,0 +1,58 @@
++#ifndef _IOKIT_RUBY_EINT_INTERRUPT_CONTROLLER_H
++#define _IOKIT_RUBY_EINT_INTERRUPT_CONTROLLER_H
++
++#include <IOKit/IOInterruptController.h>
++#include <IOKit/IOService.h>
++#include <mach/vm_types.h>
++#include <stdint.h>
++
++class OSDictionary;
++
++class RubyEINTInterruptController : public IOInterruptController
++{
++	OSDeclareDefaultStructors(RubyEINTInterruptController);
++
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++
++	IOReturn registerInterrupt(IOService *nub, int source, void *target,
++	    IOInterruptHandler handler, void *refCon) APPLE_KEXT_OVERRIDE;
++	IOReturn unregisterInterrupt(IOService *nub,
++	    int source) APPLE_KEXT_OVERRIDE;
++	IOReturn getInterruptType(IOService *nub, int source,
++	    int *interruptType) APPLE_KEXT_OVERRIDE;
++	IOReturn enableInterrupt(IOService *nub,
++	    int source) APPLE_KEXT_OVERRIDE;
++	IOReturn disableInterrupt(IOService *nub,
++	    int source) APPLE_KEXT_OVERRIDE;
++	IOReturn handleInterrupt(void *refCon, IOService *nub,
++	    int source) APPLE_KEXT_OVERRIDE;
++
++	bool vectorCanBeShared(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	void initVector(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	int getVectorType(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	void disableVectorHard(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	void enableVector(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	void causeVector(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++
++private:
++	uint32_t fNumVectors;
++	uint32_t fSpurious;
++	uint32_t fUnhandled;
++	uint8_t fLevel[128];
++
++	bool specForSource(IOService *nub, int source, uint32_t *line,
++	    uint32_t *flags);
++	IOInterruptVector *vectorForSource(IOService *nub, int source);
++	void releaseVectors(void);
++};
++
++#endif /* _IOKIT_RUBY_EINT_INTERRUPT_CONTROLLER_H */
+diff --git a/iokit/Kernel/arm/RubyEINTParent.cpp b/iokit/Kernel/arm/RubyEINTParent.cpp
+index 341aa50..cb7238e 100644
+--- a/iokit/Kernel/arm/RubyEINTParent.cpp
++++ b/iokit/Kernel/arm/RubyEINTParent.cpp
+@@ -22,6 +22,7 @@
+ #include "../../../bsd/dev/ruby_gic.h"
+ #include "../../../bsd/dev/ruby_eint.h"
+ 
++#include "RubyEINTInterruptController.h"
+ #include "RubyEINTParent.h"
+ 
+ #define super IOService
+@@ -32,11 +33,15 @@ OSDefineMetaClassAndStructors(RubyEINTParent, IOService);
+ 
+ static RubyEINTParent *gRubyEINTParent;
+ 
++extern "C" void ruby_eint_parent_raise(uint32_t line, void *ctx);
++
+ bool
+ RubyEINTParent::init(OSDictionary *dictionary)
+ {
+ 	fWorkLoop = NULL;
+ 	fIRQ = NULL;
++	fEINT = NULL;
++	fEINTReady = false;
+ 	fHits = 0;
+ 	fNoPending = 0;
+ 	fFused = 0;
+@@ -96,6 +101,17 @@ RubyEINTParent::start(IOService *provider)
+ 	if (eint != 1 || irq != 1 || b1 != 1 || legacy != 0) {
+ 		return false;
+ 	}
++	fEINT = new RubyEINTInterruptController;
++	if (!fEINT || !fEINT->init() || !fEINT->attach(provider) ||
++	    !fEINT->start(provider)) {
++		IOLog("RUBY EINT: child controller start failed\n");
++		OSSafeRelease(fEINT);
++		fEINT = NULL;
++		return false;
++	}
++	fEINT->registerService();
++	fEINTReady = true;
++
+ 	fWorkLoop = getWorkLoop();
+ 	if (!fWorkLoop) {
+ 		return false;
+@@ -114,17 +130,41 @@ RubyEINTParent::start(IOService *provider)
+ 	/* Keep 288 masked until ruby_irq_parent_start() enables it. */
+ 	fIRQ->disable();
+ 	gRubyEINTParent = this;
++	ruby_eint_set_raise_handler(ruby_eint_parent_raise, this);
+ 	IOLog("RUBY EINT: native parent intid=%u ready\n",
+ 	    RUBY_EINT_PARENT_INTID);
+ 	return true;
+ }
+ 
++void
++RubyEINTParent::raiseLine(uint32_t line)
++{
++	if (fEINT) {
++		fEINT->handleInterrupt(NULL, NULL, (int)line);
++	}
++}
++
++extern "C" void
++ruby_eint_parent_raise(uint32_t line, void *ctx)
++{
++	RubyEINTParent *self = (RubyEINTParent *)ctx;
++
++	if (self && self == gRubyEINTParent) {
++		self->raiseLine(line);
++	}
++}
++
+ void
+ RubyEINTParent::free(void)
+ {
++	ruby_eint_set_raise_handler(NULL, NULL);
+ 	if (gRubyEINTParent == this) {
+ 		gRubyEINTParent = NULL;
+ 	}
++	if (fEINT && !fEINTReady) {
++		OSSafeRelease(fEINT);
++	}
++	fEINT = NULL;
+ 	if (fIRQ) {
+ 		fIRQ->disable();
+ 		if (fWorkLoop) {
+diff --git a/iokit/Kernel/arm/RubyEINTParent.h b/iokit/Kernel/arm/RubyEINTParent.h
+index 2bd83c8..f19a838 100644
+--- a/iokit/Kernel/arm/RubyEINTParent.h
++++ b/iokit/Kernel/arm/RubyEINTParent.h
+@@ -9,6 +9,7 @@ class OSDictionary;
+ class IOWorkLoop;
+ class IOFilterInterruptEventSource;
+ class IOInterruptEventSource;
++class RubyEINTInterruptController;
+ 
+ class RubyEINTParent : public IOService
+ {
+@@ -21,10 +22,13 @@ public:
+ 
+ 	int setEnabled(int on);
+ 	bool isFused(void) const;
++	void raiseLine(uint32_t line);
+ 
+ private:
+ 	IOWorkLoop *fWorkLoop;
+ 	IOFilterInterruptEventSource *fIRQ;
++	RubyEINTInterruptController *fEINT;
++	bool fEINTReady;
+ 	uint32_t fHits;
+ 	uint32_t fNoPending;
+ 	uint32_t fFused;
+diff --git a/iokit/Kernel/arm/SweetGoodixTouch.cpp b/iokit/Kernel/arm/SweetGoodixTouch.cpp
+new file mode 100644
+index 0000000..6b0581e
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetGoodixTouch.cpp
+@@ -0,0 +1,317 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(SWEET)
++/*
++ * SWEET: Goodix touch as the EINT14 child.
++ *
++ * The parent filter masks and ACKs the line in primary.  This service's
++ * event source only schedules its dedicated workloop; the action does the
++ * SPI3 frame read and HID submission, then service_done() reopens the
++ * physical line.  All control/diag commands run through the command gate
++ * on the same workloop.  There is no gt_thread.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOCommandGate.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOWorkLoop.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSSymbol.h>
++#include <pexpert/pexpert.h>
++#include <sys/errno.h>
++
++#include "../../../bsd/dev/ruby_eint.h"
++#include "SweetGoodixTouch.h"
++
++#define super IOService
++OSDefineMetaClassAndStructors(SweetGoodixTouch, IOService);
++
++#define SWEET_GT_EINT_LINE 14u
++#define SWEET_GT_GATE_COMMAND 1u
++
++static SweetGoodixTouch *gSweetGoodixTouch;
++
++extern "C" {
++int sweet_gt_hw_start(void);
++int sweet_gt_eint_attach(void);
++int sweet_gt_eint_activate(void);
++int sweet_gt_service_frame(void);
++void sweet_gt_service_done(int ok);
++void sweet_gt_stop_service(void);
++int sweet_goodix_cmd_internal(char *cmd);
++void sweet_goodix_spi_init(void);
++}
++
++bool
++SweetGoodixTouch::init(OSDictionary *dictionary)
++{
++	fWorkLoop = NULL;
++	fGate = NULL;
++	fIRQ = NULL;
++	fInitTimer = NULL;
++	fInitDone = false;
++	fIrqEnabled = false;
++	fReady = false;
++	return super::init(dictionary);
++}
++
++bool
++SweetGoodixTouch::publishInterruptSource(void)
++{
++	OSArray *controllers = NULL;
++	OSArray *specifiers = NULL;
++	OSSymbol *name = NULL;
++	OSData *data = NULL;
++	struct ruby_eint_spec spec = {
++		.line = SWEET_GT_EINT_LINE,
++		.flags = RUBY_EINT_EDGE,
++	};
++	bool ok = false;
++
++	controllers = OSArray::withCapacity(1);
++	specifiers = OSArray::withCapacity(1);
++	name = (OSSymbol *)OSSymbol::withCStringNoCopy("RubyEINT");
++	data = OSData::withBytes(&spec, sizeof(spec));
++	if (!controllers || !specifiers || !name || !data) {
++		goto out;
++	}
++	if (!controllers->setObject(name) || !specifiers->setObject(data)) {
++		goto out;
++	}
++	ok = setProperty("IOInterruptControllers", controllers) &&
++	    setProperty("IOInterruptSpecifiers", specifiers);
++out:
++	OSSafeRelease(controllers);
++	OSSafeRelease(specifiers);
++	OSSafeRelease(name);
++	OSSafeRelease(data);
++	return ok;
++}
++
++bool
++SweetGoodixTouch::start(IOService *provider)
++{
++	int enabled = 1;
++
++	if (!super::start(provider)) {
++		return false;
++	}
++	if (PE_parse_boot_argn("sweetgt", &enabled, sizeof(enabled)) &&
++	    enabled == 0) {
++		IOLog("SWEET GT: disabled (sweetgt=0)\n");
++		return false;
++	}
++	sweet_goodix_spi_init();
++	fWorkLoop = getWorkLoop();
++	if (!fWorkLoop) {
++		return false;
++	}
++	fWorkLoop->retain();
++	fGate = IOCommandGate::commandGate(this,
++	    &SweetGoodixTouch::gateAction);
++	if (!fGate ||
++	    fWorkLoop->addEventSource(fGate) != kIOReturnSuccess) {
++		return false;
++	}
++	if (!publishInterruptSource()) {
++		return false;
++	}
++	fInitTimer = IOTimerEventSource::timerEventSource(this,
++	    &SweetGoodixTouch::initTimerAction);
++	if (!fInitTimer ||
++	    fWorkLoop->addEventSource(fInitTimer) != kIOReturnSuccess) {
++		return false;
++	}
++	gSweetGoodixTouch = this;
++	fReady = true;
++	IOLog("SWEET GT: touch service ready (kick pending)\n");
++	return true;
++}
++
++void
++SweetGoodixTouch::free(void)
++{
++	if (gSweetGoodixTouch == this) {
++		gSweetGoodixTouch = NULL;
++	}
++	if (fIRQ) {
++		fIRQ->disable();
++		if (fWorkLoop) {
++			fWorkLoop->removeEventSource(fIRQ);
++		}
++		OSSafeRelease(fIRQ);
++		fIRQ = NULL;
++	}
++	sweet_gt_stop_service();
++	if (fInitTimer) {
++		fInitTimer->cancelTimeout();
++		if (fWorkLoop) {
++			fWorkLoop->removeEventSource(fInitTimer);
++		}
++		OSSafeRelease(fInitTimer);
++		fInitTimer = NULL;
++	}
++	if (fGate) {
++		if (fWorkLoop) {
++			fWorkLoop->removeEventSource(fGate);
++		}
++		OSSafeRelease(fGate);
++		fGate = NULL;
++	}
++	if (fWorkLoop) {
++		fWorkLoop->release();
++		fWorkLoop = NULL;
++	}
++	super::free();
++}
++
++int
++SweetGoodixTouch::kickInit(void)
++{
++	if (!fInitTimer) {
++		return ENODEV;
++	}
++	fInitTimer->setTimeoutMS(1);
++	return 0;
++}
++
++int
++SweetGoodixTouch::runCommand(char *cmd)
++{
++	int ret = 1;
++	IOReturn status;
++
++	if (!fGate || !fReady) {
++		return 1;
++	}
++	status = fGate->runCommand((void *)(uintptr_t)SWEET_GT_GATE_COMMAND,
++	    cmd, &ret, NULL);
++	return status == kIOReturnSuccess ? ret : 1;
++}
++
++int
++SweetGoodixTouch::setIrqEnabledDirect(int on)
++{
++	if (!fIRQ) {
++		return ENODEV;
++	}
++	if (on) {
++		fIRQ->enable();
++		fIrqEnabled = true;
++	} else {
++		fIRQ->disable();
++		fIrqEnabled = false;
++	}
++	IOLog("SWEET GT: EINT14 irq %s\n", on ? "on" : "off");
++	return 0;
++}
++
++bool
++SweetGoodixTouch::createIrqSource(void)
++{
++	fIRQ = IOInterruptEventSource::interruptEventSource(this,
++	    &SweetGoodixTouch::irqAction, this, 0);
++	if (!fIRQ ||
++	    fWorkLoop->addEventSource(fIRQ) != kIOReturnSuccess) {
++		return false;
++	}
++	fIRQ->disable();
++	return true;
++}
++
++void
++SweetGoodixTouch::initAction(void)
++{
++	if (fInitDone) {
++		return;
++	}
++	if (!sweet_gt_hw_start()) {
++		IOLog("SWEET GT: hw start failed\n");
++		return;
++	}
++	if (!sweet_gt_eint_attach()) {
++		sweet_gt_stop_service();
++		return;
++	}
++	if (!createIrqSource()) {
++		sweet_gt_stop_service();
++		return;
++	}
++	/* Line handler is installed; unmask before opening DOM. */
++	fIRQ->enable();
++	fIrqEnabled = true;
++	if (!sweet_gt_eint_activate()) {
++		fIRQ->disable();
++		fIrqEnabled = false;
++		sweet_gt_stop_service();
++		return;
++	}
++	fInitDone = true;
++	IOLog("SWEET GT: EINT14 oneshot enabled\n");
++}
++
++void
++SweetGoodixTouch::initTimerAction(OSObject *owner,
++    IOTimerEventSource *sender)
++{
++	SweetGoodixTouch *self = (SweetGoodixTouch *)owner;
++
++	(void)sender;
++	self->initAction();
++}
++
++void
++SweetGoodixTouch::irqAction(OSObject *owner,
++    IOInterruptEventSource *sender, int count)
++{
++	SweetGoodixTouch *self = (SweetGoodixTouch *)owner;
++	int ok;
++
++	(void)sender;
++	(void)count;
++	if (!self->fInitDone) {
++		return;
++	}
++	ok = sweet_gt_service_frame();
++	sweet_gt_service_done(ok);
++}
++
++IOReturn
++SweetGoodixTouch::gateAction(OSObject *owner, void *arg0, void *arg1,
++    void *arg2, void *arg3)
++{
++	SweetGoodixTouch *self = (SweetGoodixTouch *)owner;
++	uintptr_t op = (uintptr_t)arg0;
++
++	(void)self;
++	(void)arg3;
++	if (op == SWEET_GT_GATE_COMMAND) {
++		if (arg2) {
++			*(int *)arg2 = sweet_goodix_cmd_internal((char *)arg1);
++		}
++		return kIOReturnSuccess;
++	}
++	return kIOReturnUnsupported;
++}
++
++extern "C" int
++sweet_goodix_service_cmd(char *cmd)
++{
++	return gSweetGoodixTouch ? gSweetGoodixTouch->runCommand(cmd) : 1;
++}
++
++extern "C" int
++sweet_goodix_service_kick(void)
++{
++	return gSweetGoodixTouch ? gSweetGoodixTouch->kickInit() : 1;
++}
++
++extern "C" int
++sweet_goodix_irq_set_direct(int on)
++{
++	return gSweetGoodixTouch ?
++	    gSweetGoodixTouch->setIrqEnabledDirect(on) : 1;
++}
++
++#endif /* SWEET */
+diff --git a/iokit/Kernel/arm/SweetGoodixTouch.h b/iokit/Kernel/arm/SweetGoodixTouch.h
+new file mode 100644
+index 0000000..8a02667
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetGoodixTouch.h
+@@ -0,0 +1,47 @@
++#ifndef _IOKIT_SWEET_GOODIX_TOUCH_H
++#define _IOKIT_SWEET_GOODIX_TOUCH_H
++
++#include <IOKit/IOService.h>
++#include <mach/vm_types.h>
++#include <stdint.h>
++
++class OSDictionary;
++class IOWorkLoop;
++class IOCommandGate;
++class IOInterruptEventSource;
++class IOTimerEventSource;
++
++class SweetGoodixTouch : public IOService
++{
++	OSDeclareDefaultStructors(SweetGoodixTouch);
++
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++
++	int runCommand(char *cmd);
++	int kickInit(void);
++	int setIrqEnabledDirect(int on);
++
++private:
++	IOWorkLoop *fWorkLoop;
++	IOCommandGate *fGate;
++	IOInterruptEventSource *fIRQ;
++	IOTimerEventSource *fInitTimer;
++	bool fInitDone;
++	bool fIrqEnabled;
++	bool fReady;
++
++	bool publishInterruptSource(void);
++	bool createIrqSource(void);
++	void initAction(void);
++	static void initTimerAction(OSObject *owner,
++	    IOTimerEventSource *sender);
++	static void irqAction(OSObject *owner,
++	    IOInterruptEventSource *sender, int count);
++	static IOReturn gateAction(OSObject *owner, void *arg0, void *arg1,
++	    void *arg2, void *arg3);
++};
++
++#endif /* _IOKIT_SWEET_GOODIX_TOUCH_H */
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index af20222..6abab56 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -13,10 +13,12 @@
+ 
+ #include "RubyEINTParent.h"
+ #include "RubyGICInterruptController.h"
++#include "SweetGoodixTouch.h"
+ #include "SweetKPD.h"
+ 
+ static RubyEINTParent *gRubyEINTParent;
+ static RubyGICInterruptController *gRubyGIC;
++static SweetGoodixTouch *gSweetGoodixTouch;
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+@@ -83,6 +85,23 @@ SweetPlatformExpert::start(IOService *provider)
+ 		}
+ 	}
+ 
++	if (gRubyEINTParent) {
++		int gt = 0;
++
++		if (!PE_parse_boot_argn("sweetgt", &gt, sizeof(gt)) ||
++		    gt != 0) {
++			SweetGoodixTouch *touch = new SweetGoodixTouch;
++			if (touch && touch->init() && touch->attach(this) &&
++			    touch->start(this)) {
++				touch->registerService();
++				gSweetGoodixTouch = touch;
++			} else {
++				IOLog("SWEET: SweetGoodixTouch start failed\n");
++				OSSafeRelease(touch);
++			}
++		}
++	}
++
+ 	gate = 0;
+ 	if (gRubyGIC &&
+ 	    PE_parse_boot_argn("rubykpdirq", &gate, sizeof(gate)) &&
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index de65f1a..a716da8 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -10,6 +10,8 @@ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
+ iokit/Kernel/arm/RubyGICInterruptController.cpp                  optional iokitcpp
+ iokit/Kernel/arm/RubyEINTParent.cpp                              optional iokitcpp
++iokit/Kernel/arm/RubyEINTInterruptController.cpp                 optional iokitcpp
++iokit/Kernel/arm/SweetGoodixTouch.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetKPD.cpp                                    optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
