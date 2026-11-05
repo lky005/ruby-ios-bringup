@@ -1,0 +1,153 @@
+diff --git a/bsd/dev/ruby_eint.c b/bsd/dev/ruby_eint.c
+index ca55d29..6e2f08c 100644
+--- a/bsd/dev/ruby_eint.c
++++ b/bsd/dev/ruby_eint.c
+@@ -864,20 +864,21 @@ ruby_eint_wait(struct ruby_eint *e, unsigned ms)
+ 	}
+ }
+ 
+-void
++int
+ ruby_eint_service_done(struct ruby_eint *e, int ok, int source_clear)
+ {
+ 	uint32_t bit, doff, dval, moff;
++	int recover = 0;
+ 
+ 	if (!e || e->line >= RUBY_EINT_LINES)
+-		return;
++		return 0;
+ 	bit = ruby_eint_bit(e->line);
+ 	doff = ruby_eint_off(RUBY_EINT_DOM_EN, e->line);
+ 	moff = ruby_eint_off(RUBY_EINT_MASK, e->line);
+ 	RUBY_EINT_LOCK();
+ 	if (!e->used || e->state != RUBY_EINT_DEFERRED) {
+ 		RUBY_EINT_UNLOCK();
+-		return;
++		return 0;
+ 	}
+ 	if (ok && source_clear) {
+ 		/* No bottom-half ACK: an edge latched during service must
+@@ -889,20 +890,27 @@ ruby_eint_service_done(struct ruby_eint *e, int ok, int source_clear)
+ 		e->service_ok++;
+ 		e->fail_streak = 0;
+ 	} else {
+-		/* Keep the parent gated but let polling observe new edges. */
++		/*
++		 * Drop the dirty frame but keep the pin armed.  The DOM is
++		 * never closed and the line never goes STUCK/POLL_ONLY on a
++		 * read failure; the pending STA/next edge retries.
++		 */
+ 		dval = ruby_rd32(g_eint_base, doff);
+-		ruby_wr32(g_eint_base, doff, dval & ~bit);
++		ruby_wr32(g_eint_base, doff, dval | bit);
+ 		ruby_wr32(g_eint_base,
+ 		    ruby_eint_off(RUBY_EINT_MASK_CLR, e->line), bit);
+ 		(void)ruby_rd32(g_eint_base, moff);
++		e->state = RUBY_EINT_ACTIVE;
++		e->poll_only = 0;
+ 		e->service_fail++;
+ 		e->fail_streak++;
+-		e->state = (e->fail_streak >= 8) ?
+-		    RUBY_EINT_POLL_ONLY : RUBY_EINT_STUCK;
+-		if (e->state == RUBY_EINT_POLL_ONLY)
+-			e->poll_only = 1;
++		if (e->fail_streak >= 8) {
++			e->fail_streak = 0;
++			recover = 1;
++		}
+ 	}
+ 	RUBY_EINT_UNLOCK();
++	return recover;
+ }
+ 
+ int
+@@ -1025,23 +1033,6 @@ ruby_eint_demux_isr(void)
+ 				e->win_service_base = e->service_ok;
+ 			}
+ 			e->win_hits++;
+-			if (e->win_hits > 64 &&
+-			    e->service_ok == e->win_service_base &&
+-			    !e->poll_only) {
+-				uint32_t doff = ruby_eint_off(
+-				    RUBY_EINT_DOM_EN, line);
+-				uint32_t dval = ruby_rd32(g_eint_base, doff);
+-				ruby_wr32(g_eint_base, doff,
+-				    dval & ~(1u << bit));
+-				ruby_wr32(g_eint_base,
+-				    RUBY_EINT_MASK_CLR + port * 4u,
+-				    1u << bit);
+-				(void)ruby_rd32(g_eint_base,
+-				    RUBY_EINT_MASK + port * 4u);
+-				e->state = RUBY_EINT_POLL_ONLY;
+-				e->poll_only = 1;
+-				e->service_fail++;
+-			}
+ 		}
+ 	}
+ 	lck_spin_unlock(&g_eint_lock);
+diff --git a/bsd/dev/ruby_eint.h b/bsd/dev/ruby_eint.h
+index 86ec082..b6c0959 100644
+--- a/bsd/dev/ruby_eint.h
++++ b/bsd/dev/ruby_eint.h
+@@ -58,7 +58,7 @@ int ruby_eint_activate(struct ruby_eint *e);
+ void ruby_eint_deactivate(struct ruby_eint *e);
+ void ruby_eint_detach(struct ruby_eint *e);
+ int ruby_eint_wait(struct ruby_eint *e, unsigned ms);
+-void ruby_eint_service_done(struct ruby_eint *e, int ok, int source_clear);
++int ruby_eint_service_done(struct ruby_eint *e, int ok, int source_clear);
+ int ruby_eint_active(struct ruby_eint *e);
+ int ruby_eint_deferred(struct ruby_eint *e);
+ int ruby_eint_poll_only(struct ruby_eint *e);
+diff --git a/bsd/dev/sweet_goodix_spi.c b/bsd/dev/sweet_goodix_spi.c
+index 2eca36b..75dbaf8 100644
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -1338,13 +1338,6 @@ gt_service_frame(void)
+ 		}
+ 	}
+ 
+-	if (++gt.fail_streak >= 10) {
+-		uint32_t n = gt.fail_streak;
+-
+-		gt.fail_streak = 0;
+-		GT_LOG("SWEET GT: %u frame errors; recover\n", n);
+-		gt_recover();
+-	}
+ 	return 0;
+ }
+ 
+@@ -1458,11 +1451,32 @@ sweet_gt_service_frame(void)
+ 	return ok;
+ }
+ 
++static void
++gt_soft_reset(void)
++{
++	int ok;
++
++	/*
++	 * Drop stale SPI controller/FIFO state, then re-handshake the chip.
++	 * No reset pin, no rail change, no backoff.
++	 */
++	(void)ruby_spi3_set_speed(gt.hw_speed_khz);
++	ok = gt_dev_confirm() && gt_version_ok();
++	gt.fail_streak = 0;
++	if (ok) {
++		gt.hw_fail = 0;
++	}
++	GT_LOG("SWEET GT: soft reset %s\n", ok ? "ok" : "no-ack");
++}
++
+ void
+ sweet_gt_service_done(int ok)
+ {
+-	if (gt.eint) {
+-		ruby_eint_service_done(gt.eint, ok, ok);
++	if (!gt.eint) {
++		return;
++	}
++	if (ruby_eint_service_done(gt.eint, ok, ok)) {
++		gt_soft_reset();
+ 	}
+ }
+ 
