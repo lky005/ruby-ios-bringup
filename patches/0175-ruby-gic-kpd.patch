@@ -1,0 +1,1260 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -53,6 +53,7 @@
+ #include <machine/limits.h>
+ 
+ #include <pexpert/arm/protos.h>
++#include <pexpert/arm/pe_irq.h>
+ #include <pexpert/arm64/apple_arm64_regs.h>
+ #include <pexpert/arm64/board_config.h>
+ 
+@@ -1882,11 +1883,13 @@
+ 		cpu_signal_handler();
+ 	} else {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+-		if (cdp->interrupt_handler) {
+-			cdp->interrupt_handler(cdp->interrupt_target,
+-			    cdp->interrupt_refCon,
+-			    cdp->interrupt_nub,
+-			    intid);
++		if (!sweet_irq_dispatch(intid)) {
++			if (cdp->interrupt_handler) {
++				cdp->interrupt_handler(cdp->interrupt_target,
++				    cdp->interrupt_refCon,
++				    cdp->interrupt_nub,
++				    intid);
++			}
+ 		}
+ 		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+ 	}
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -9,6 +9,12 @@
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++
++#include "RubyGICInterruptController.h"
++#include "SweetKPD.h"
++
++static RubyGICInterruptController *gRubyGIC;
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+@@ -25,12 +31,44 @@
+ bool
+ SweetPlatformExpert::start(IOService *provider)
+ {
++	int gate = 1;
++
+ 	IOLog("SWEET: starting device-tree platform expert\n");
+ 	if (!IODTPlatformExpert::start(provider)) {
+ 		return false;
+ 	}
+ 	registerService();
+ 	IOLog("SWEET: platform expert registered\n");
++
++	if (!PE_parse_boot_argn("rubygic", &gate, sizeof(gate))) {
++		gate = 1;
++	}
++	if (gate) {
++		RubyGICInterruptController *gic =
++		    new RubyGICInterruptController;
++		if (gic && gic->init() && gic->attach(this) &&
++		    gic->start(this)) {
++			gic->registerService();
++			gRubyGIC = gic;
++		} else {
++			IOLog("SWEET: RubyGIC start failed\n");
++			OSSafeRelease(gic);
++		}
++	}
++
++	gate = 0;
++	if (gRubyGIC &&
++	    PE_parse_boot_argn("rubykpdirq", &gate, sizeof(gate)) &&
++	    gate == 1) {
++		SweetKPD *kpd = new SweetKPD;
++		if (kpd && kpd->init() && kpd->attach(this) &&
++		    kpd->start(this)) {
++			kpd->registerService();
++		} else {
++			IOLog("SWEET: SweetKPD start failed\n");
++			OSSafeRelease(kpd);
++		}
++	}
+ 	return true;
+ }
+ 
+--- a/bsd/dev/ruby_keys.c
++++ b/bsd/dev/ruby_keys.c
+@@ -26,6 +26,7 @@
+ #include <pexpert/pexpert.h>
+ 
+ #include "ruby_hal.h"
++#include "ruby_gic.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
+@@ -85,6 +86,7 @@
+ static bool rk_started;
+ static bool rk_kpd_irq_ready;
+ static volatile int rk_kpd_irq_masked;
++static volatile int rk_kpd_native;
+ static unsigned rk_kpd_irq_hits;
+ static int rk_sleep_chan;
+ static unsigned rk_errors;
+@@ -129,12 +131,7 @@
+ static uint64_t
+ rk_gic_route(uint64_t mpidr)
+ {
+-	uint64_t aff0 = mpidr & 0xffu;
+-	uint64_t aff1 = (mpidr >> 8) & 0xffu;
+-	uint64_t aff2 = (mpidr >> 16) & 0xffu;
+-	uint64_t aff3 = (mpidr >> 32) & 0xffu;
+-
+-	return (aff3 << 32) | (aff2 << 24) | (aff1 << 16) | aff0;
++	return ruby_gic_mpidr_to_irouter(mpidr);
+ }
+ 
+ static long
+@@ -172,6 +169,26 @@
+ 	(void)rk_gic_rwp();
+ }
+ 
++void
++ruby_keys_release_legacy_kpd_irq(void)
++{
++	if (!rk_gicd) {
++		return;
++	}
++	rk_kpd_irq_mask();
++	__atomic_store_n(&rk_kpd_irq_masked, 1, __ATOMIC_RELEASE);
++	rk_kpd_irq_ready = false;
++}
++
++void
++ruby_keys_set_native_kpd(int on)
++{
++	__atomic_store_n(&rk_kpd_native, on ? 1 : 0, __ATOMIC_RELEASE);
++	if (on) {
++		ruby_keys_release_legacy_kpd_irq();
++	}
++}
++
+ static void
+ rk_kpd_isr(void *target, void *refCon, void *nub, int source)
+ {
+@@ -275,7 +292,9 @@
+ 			mem1 = ruby_rd16(rk_kpd, RK_KPD_MEM1);
+ 		now[0] = pmic_ok ? !(top & RK_TOP_PWRKEY_DEB) : rk_keys[0].down;
+ 		now[1] = pmic_ok ? !(top & RK_TOP_HOMEKEY_DEB) : rk_keys[1].down;
+-		now[2] = rk_kpd && !(mem1 & 1u);
++		now[2] = rk_kpd &&
++		    !__atomic_load_n(&rk_kpd_native, __ATOMIC_ACQUIRE) ?
++		    !(mem1 & 1u) : rk_keys[2].down;
+ 		if (pmic_ok) {
+ 			rk_errors = 0;
+ 		} else if ((rk_errors++ % 250u) == 0) {
+@@ -287,7 +306,8 @@
+ 				rk_report(&rk_keys[i], now[i], mem1, top);
+ 			rk_keys[i].seen = now[i];
+ 		}
+-		if (rk_kpd_irq_ready &&
++		if (!__atomic_load_n(&rk_kpd_native, __ATOMIC_ACQUIRE) &&
++		    rk_kpd_irq_ready &&
+ 		    __atomic_load_n(&rk_kpd_irq_masked, __ATOMIC_ACQUIRE) &&
+ 		    !now[2]) {
+ 			__atomic_store_n(&rk_kpd_irq_masked, 0,
+@@ -326,7 +346,9 @@
+ 	printf("RUBY KEYS: start kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x\n",
+ 	    rk_kpd != 0, rk_pwrap != 0, pmic_ok, top,
+ 	    rk_kpd ? ruby_rd16(rk_kpd, RK_KPD_MEM1) : 0xffffu);
+-	rk_kpd_irq_init();
++	if (!__atomic_load_n(&rk_kpd_native, __ATOMIC_ACQUIRE)) {
++		rk_kpd_irq_init();
++	}
+ 	if (kernel_thread_start(rk_thread, NULL, &thread) == KERN_SUCCESS)
+ 		thread_deallocate(thread);
+ 	else
+--- a/bsd/dev/ruby_irq.c
++++ b/bsd/dev/ruby_irq.c
+@@ -30,6 +30,7 @@
+ #include "ruby_eint.h"
+ #include "ruby_irq.h"
+ #include "ruby_hal.h"
++#include "ruby_gic.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+@@ -132,12 +133,7 @@
+ static uint64_t
+ ruby_irq_route(uint64_t mpidr)
+ {
+-	uint64_t aff0 = mpidr & 0xffu;
+-	uint64_t aff1 = (mpidr >> 8) & 0xffu;
+-	uint64_t aff2 = (mpidr >> 16) & 0xffu;
+-	uint64_t aff3 = (mpidr >> 32) & 0xffu;
+-
+-	return (aff3 << 32) | (aff2 << 24) | (aff1 << 16) | aff0;
++	return ruby_gic_mpidr_to_irouter(mpidr);
+ }
+ 
+ /*
+--- a/pexpert/conf/files.arm64
++++ b/pexpert/conf/files.arm64
+@@ -1,6 +1,7 @@
+ pexpert/arm/pe_bootargs.c              standard
+ pexpert/arm/pe_consistent_debug.c      standard
+ pexpert/arm/pe_fiq.c                   standard
++pexpert/arm/pe_irq.c                   standard
+ pexpert/arm/pe_identify_machine.c      standard
+ pexpert/arm/pe_init.c                  standard
+ pexpert/arm/pe_kprintf.c               standard
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -8,6 +8,8 @@
+ 
+ # SWEET device-tree platform (empty translation unit on other boards)
+ iokit/Kernel/arm/SweetPlatformExpert.cpp                         optional iokitcpp
++iokit/Kernel/arm/RubyGICInterruptController.cpp                  optional iokitcpp
++iokit/Kernel/arm/SweetKPD.cpp                                    optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp
+--- /dev/null
++++ b/pexpert/arm/pe_irq.h
+@@ -0,0 +1,17 @@
++#ifndef _PEXPERT_ARM_PE_IRQ_H_
++#define _PEXPERT_ARM_PE_IRQ_H_
++
++#include <mach/boolean.h>
++#include <stdint.h>
++
++typedef boolean_t (*sweet_irq_dispatch_fn)(uint32_t intid, void *ctx);
++
++/*
++ * Device IRQ dispatch hook.  sleh_irq() calls sweet_irq_dispatch() before
++ * the legacy per-CPU ml_install_interrupt_handler() slot.  A false return
++ * means no native controller owns the INTID.
++ */
++extern boolean_t sweet_irq_dispatch(uint32_t intid);
++extern void sweet_irq_set_handler(sweet_irq_dispatch_fn fn, void *ctx);
++
++#endif /* _PEXPERT_ARM_PE_IRQ_H_ */
+--- /dev/null
++++ b/pexpert/arm/pe_irq.c
+@@ -0,0 +1,31 @@
++/*
++ * SWEET: native device IRQ dispatch hook.
++ *
++ * The GIC entry in sleh_irq() already has the real INTID and performs the
++ * EOI.  This hook lets a board interrupt controller claim that INTID
++ * without replacing the per-CPU ml_install_interrupt_handler() slot.
++ */
++#include <pexpert/pexpert.h>
++#include <pexpert/arm/pe_irq.h>
++
++static sweet_irq_dispatch_fn g_sweet_irq_fn;
++static void *g_sweet_irq_ctx;
++
++boolean_t
++sweet_irq_dispatch(uint32_t intid)
++{
++	sweet_irq_dispatch_fn fn = __atomic_load_n(&g_sweet_irq_fn,
++	    __ATOMIC_ACQUIRE);
++
++	if (fn == NULL) {
++		return FALSE;
++	}
++	return fn(intid, __atomic_load_n(&g_sweet_irq_ctx, __ATOMIC_RELAXED));
++}
++
++void
++sweet_irq_set_handler(sweet_irq_dispatch_fn fn, void *ctx)
++{
++	__atomic_store_n(&g_sweet_irq_ctx, ctx, __ATOMIC_RELAXED);
++	__atomic_store_n(&g_sweet_irq_fn, fn, __ATOMIC_RELEASE);
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGICInterruptController.h
+@@ -0,0 +1,67 @@
++#ifndef _IOKIT_RUBY_GIC_INTERRUPT_CONTROLLER_H
++#define _IOKIT_RUBY_GIC_INTERRUPT_CONTROLLER_H
++
++#include <IOKit/IOInterruptController.h>
++#include <IOKit/IOService.h>
++#include <mach/vm_types.h>
++#include <stdint.h>
++
++class OSDictionary;
++
++class RubyGICInterruptController : public IOInterruptController
++{
++	OSDeclareDefaultStructors(RubyGICInterruptController);
++
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++
++	IOReturn registerInterrupt(IOService *nub, int source, void *target,
++	    IOInterruptHandler handler, void *refCon) APPLE_KEXT_OVERRIDE;
++	IOReturn unregisterInterrupt(IOService *nub,
++	    int source) APPLE_KEXT_OVERRIDE;
++	IOReturn getInterruptType(IOService *nub, int source,
++	    int *interruptType) APPLE_KEXT_OVERRIDE;
++	IOReturn enableInterrupt(IOService *nub,
++	    int source) APPLE_KEXT_OVERRIDE;
++	IOReturn disableInterrupt(IOService *nub,
++	    int source) APPLE_KEXT_OVERRIDE;
++	IOReturn handleInterrupt(void *refCon, IOService *nub,
++	    int source) APPLE_KEXT_OVERRIDE;
++
++	bool vectorCanBeShared(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	void initVector(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	int getVectorType(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	void disableVectorHard(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	void enableVector(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++	void causeVector(IOInterruptVectorNumber vectorNumber,
++	    IOInterruptVector *vector) APPLE_KEXT_OVERRIDE;
++
++private:
++	vm_offset_t fGICD;
++	uint64_t fTargetMpidr;
++	uint32_t fNumVectors;
++	uint32_t fSpurious;
++	uint32_t fUnhandled;
++	uint8_t fTrigger[1024];
++	uint8_t fRegistered[1024];
++
++	bool gicPreflight(void);
++	bool gicValidate(uint32_t intid);
++	void gicProgram(uint32_t intid, uint32_t flags);
++	void gicMask(uint32_t intid);
++	void gicUnmask(uint32_t intid);
++	bool gicRwpWait(void);
++	void releaseVectors(void);
++	bool specForSource(IOService *nub, int source, uint32_t *intid,
++	    uint32_t *flags);
++	IOInterruptVector *vectorForSource(IOService *nub, int source);
++};
++
++#endif /* _IOKIT_RUBY_GIC_INTERRUPT_CONTROLLER_H */
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGICInterruptController.cpp
+@@ -0,0 +1,545 @@
++#if defined(SWEET)
++/*
++ * SWEET: board-level GICv3 SPI controller.
++ *
++ * The SWEET GIC entry (sleh_irq) already reads ICC_IAR1_EL1, handles the
++ * timer/IPI paths and writes ICC_EOIR1_EL1.  This controller only owns the
++ * INTID -> vector mapping and the per-line GIC programming; it never reads
++ * IAR or writes EOI.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOInterruptController.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <IOKit/IOService.h>
++#include <libkern/c++/OSSymbol.h>
++#include <string.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/arm/pe_irq.h>
++
++#include "../../../bsd/dev/ruby_gic.h"
++#include "RubyGICInterruptController.h"
++
++#define super IOInterruptController
++OSDefineMetaClassAndStructors(RubyGICInterruptController, IOInterruptController);
++
++#define RUBY_GICD_PA            0x0c000000u
++#define RUBY_GICD_SIZE          0x10000u
++#define RUBY_GIC_NUM_VECTORS    1024u
++#define RUBY_GICD_CTLR          0x0000u
++#define RUBY_GICD_CTLR_RWP      0x80000000u
++#define RUBY_GICD_CTLR_ARE_NS   0x10u
++#define RUBY_GICD_CTLR_GRP1NS   0x2u
++#define RUBY_GIC_SMC_GIC_DUMP   0xc2000201u
++
++extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern "C" void delay(int);
++
++static inline uint32_t
++gic_rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++gic_wr32(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static inline uint64_t
++gic_rd64(vm_offset_t base, uint32_t off)
++{
++	uint64_t v = *(volatile uint64_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++gic_wr64(vm_offset_t base, uint32_t off, uint64_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint64_t *)(base + off) = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static long
++ruby_gic_smc_dump(uint32_t intid, uint64_t *raw)
++{
++	register uint64_t x0 __asm__("x0") = RUBY_GIC_SMC_GIC_DUMP;
++	register uint64_t x1 __asm__("x1") = intid;
++
++	__asm__ volatile(
++	    "mov x2, xzr\n\t"
++	    "mov x3, xzr\n\t"
++	    "mov x4, xzr\n\t"
++	    "mov x5, xzr\n\t"
++	    "mov x6, xzr\n\t"
++	    "mov x7, xzr\n\t"
++	    "smc #0\n\t"
++	    : "+r"(x0), "+r"(x1)
++	    :
++	    : "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
++	      "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++	*raw = x0;
++	return (long)x0;
++}
++
++extern "C" boolean_t
++ruby_gic_dispatch(uint32_t intid, void *ctx)
++{
++	RubyGICInterruptController *gic = (RubyGICInterruptController *)ctx;
++
++	return gic->handleInterrupt(NULL, NULL, (int)intid) == kIOReturnSuccess;
++}
++
++bool
++RubyGICInterruptController::init(OSDictionary *dictionary)
++{
++	vectors = NULL;
++	fGICD = 0;
++	fTargetMpidr = 0;
++	fNumVectors = 0;
++	fSpurious = 0;
++	fUnhandled = 0;
++	memset(fTrigger, 0, sizeof(fTrigger));
++	memset(fRegistered, 0, sizeof(fRegistered));
++	return super::init(dictionary);
++}
++
++bool
++RubyGICInterruptController::start(IOService *provider)
++{
++	OSSymbol *name;
++
++	if (!super::start(provider)) {
++		return false;
++	}
++	fGICD = ml_io_map(RUBY_GICD_PA, RUBY_GICD_SIZE);
++	if (!fGICD) {
++		IOLog("RUBY GIC: no gicd\n");
++		return false;
++	}
++	if (!gicPreflight()) {
++		IOLog("RUBY GIC: preflight failed\n");
++		return false;
++	}
++	fNumVectors = RUBY_GIC_NUM_VECTORS;
++	vectors = IONewZero(IOInterruptVector, fNumVectors);
++	if (!vectors) {
++		return false;
++	}
++	for (uint32_t i = 0; i < fNumVectors; i++) {
++		vectors[i].interruptLock = IOLockAlloc();
++		if (!vectors[i].interruptLock) {
++			releaseVectors();
++			return false;
++		}
++	}
++	fTargetMpidr = __builtin_arm_rsr64("MPIDR_EL1") &
++	    RUBY_GIC_MPIDR_AFF_MASK;
++	name = (OSSymbol *)OSSymbol::withCStringNoCopy("RubyGIC");
++	if (!name || !getPlatform() ||
++	    getPlatform()->registerInterruptController(name, this) !=
++	    kIOReturnSuccess) {
++		releaseVectors();
++		return false;
++	}
++	sweet_irq_set_handler(ruby_gic_dispatch, this);
++	IOLog("RUBY GIC: ready gicd=%d target=%016llx vectors=%u\n",
++	    fGICD != 0, (unsigned long long)fTargetMpidr, fNumVectors);
++	return true;
++}
++
++void
++RubyGICInterruptController::releaseVectors(void)
++{
++	if (!vectors) {
++		return;
++	}
++	for (uint32_t i = 0; i < fNumVectors; i++) {
++		if (vectors[i].interruptLock) {
++			IOLockFree(vectors[i].interruptLock);
++			vectors[i].interruptLock = NULL;
++		}
++	}
++	IODelete(vectors, IOInterruptVector, fNumVectors);
++	vectors = NULL;
++}
++
++void
++RubyGICInterruptController::free(void)
++{
++	sweet_irq_set_handler(NULL, NULL);
++	if (vectors) {
++		if (fGICD) {
++			for (uint32_t i = 0; i < fNumVectors; i++) {
++				if (vectors[i].interruptRegistered) {
++					disableVectorHard(
++					    (IOInterruptVectorNumber)i,
++					    &vectors[i]);
++					vectors[i].interruptRegistered = 0;
++				}
++			}
++		}
++		releaseVectors();
++	}
++	super::free();
++}
++
++bool
++RubyGICInterruptController::gicPreflight(void)
++{
++	uint32_t ctlr = gic_rd32(fGICD, RUBY_GICD_CTLR);
++
++	if ((ctlr & (RUBY_GICD_CTLR_ARE_NS | RUBY_GICD_CTLR_GRP1NS)) !=
++	    (RUBY_GICD_CTLR_ARE_NS | RUBY_GICD_CTLR_GRP1NS)) {
++		IOLog("RUBY GIC: ctlr=%08x\n", ctlr);
++		return false;
++	}
++	return gicRwpWait();
++}
++
++bool
++RubyGICInterruptController::gicRwpWait(void)
++{
++	for (uint32_t i = 0; i < 1000; i++) {
++		if (!(gic_rd32(fGICD, RUBY_GICD_CTLR) &
++		    RUBY_GICD_CTLR_RWP)) {
++			return true;
++		}
++		delay(1);
++	}
++	return false;
++}
++
++bool
++RubyGICInterruptController::gicValidate(uint32_t intid)
++{
++	uint64_t smc = 0;
++	long rc;
++
++	if (intid < RUBY_GIC_INTID_MIN || intid > RUBY_GIC_INTID_MAX) {
++		return false;
++	}
++	rc = ruby_gic_smc_dump(intid, &smc);
++	if (rc < 0 || ((smc >> 1) & 1u) != 1u) {
++		return false;
++	}
++	return true;
++}
++
++void
++RubyGICInterruptController::gicProgram(uint32_t intid, uint32_t flags)
++{
++	uint32_t bit = ruby_gic_bit(intid);
++	uint32_t off;
++	uint32_t v;
++
++	off = ruby_gic_group_off(intid);
++	v = gic_rd32(fGICD, off);
++	gic_wr32(fGICD, off, v | bit);
++
++	off = ruby_gic_priority_off(intid);
++	v = gic_rd32(fGICD, off);
++	v &= ~(0xffu << ruby_gic_priority_shift(intid));
++	v |= RUBY_GIC_PRIO_DEFAULT << ruby_gic_priority_shift(intid);
++	gic_wr32(fGICD, off, v);
++
++	off = ruby_gic_icfgr_off(intid);
++	v = gic_rd32(fGICD, off);
++	v &= ~(3u << ruby_gic_icfgr_shift(intid));
++	if (flags & RUBY_GIC_LEVEL) {
++		v |= 2u << ruby_gic_icfgr_shift(intid);
++	}
++	gic_wr32(fGICD, off, v);
++
++	gic_wr64(fGICD, ruby_gic_irouter_off(intid),
++	    ruby_gic_mpidr_to_irouter(fTargetMpidr));
++	gic_wr32(fGICD, ruby_gic_pending_off(intid), bit);
++	(void)gicRwpWait();
++}
++
++void
++RubyGICInterruptController::gicMask(uint32_t intid)
++{
++	gic_wr32(fGICD, ruby_gic_icenabler_off(intid), ruby_gic_bit(intid));
++	if (!getPlatform()->atInterruptLevel()) {
++		(void)gicRwpWait();
++	}
++}
++
++void
++RubyGICInterruptController::gicUnmask(uint32_t intid)
++{
++	OSSynchronizeIO();
++	gic_wr32(fGICD, ruby_gic_isenabler_off(intid), ruby_gic_bit(intid));
++	if (!getPlatform()->atInterruptLevel()) {
++		(void)gicRwpWait();
++	}
++}
++
++bool
++RubyGICInterruptController::specForSource(IOService *nub, int source,
++    uint32_t *intid, uint32_t *flags)
++{
++	IOInterruptSource *src;
++	OSData *data;
++	const struct ruby_gic_spec *spec;
++
++	if (!nub || !nub->_interruptSources || source < 0 ||
++	    source >= nub->_numInterruptSources) {
++		return false;
++	}
++	src = &nub->_interruptSources[source];
++	data = src->vectorData;
++	if (!data || data->getLength() < sizeof(struct ruby_gic_spec)) {
++		return false;
++	}
++	spec = (const struct ruby_gic_spec *)data->getBytesNoCopy();
++	*intid = spec->intid;
++	*flags = spec->flags;
++	return true;
++}
++
++IOInterruptVector *
++RubyGICInterruptController::vectorForSource(IOService *nub, int source)
++{
++	uint32_t intid;
++	uint32_t flags;
++
++	if (!specForSource(nub, source, &intid, &flags) ||
++	    intid >= fNumVectors) {
++		return NULL;
++	}
++	return &vectors[intid];
++}
++
++IOReturn
++RubyGICInterruptController::registerInterrupt(IOService *nub, int source,
++    void *target, IOInterruptHandler handler, void *refCon)
++{
++	uint32_t intid;
++	uint32_t flags;
++	IOReturn ret;
++
++	if (!vectors) {
++		return kIOReturnNotReady;
++	}
++	if (!specForSource(nub, source, &intid, &flags)) {
++		return kIOReturnBadArgument;
++	}
++	if (intid < RUBY_GIC_INTID_MIN || intid >= fNumVectors) {
++		return kIOReturnBadArgument;
++	}
++	if (fRegistered[intid]) {
++		return kIOReturnNoResources;
++	}
++	if (!gicValidate(intid)) {
++		return kIOReturnUnsupported;
++	}
++	gicProgram(intid, flags);
++	fTrigger[intid] = (flags & RUBY_GIC_LEVEL) ?
++	    kIOInterruptTypeLevel : kIOInterruptTypeEdge;
++	fRegistered[intid] = 1;
++	ret = super::registerInterrupt(nub, source, target, handler, refCon);
++	if (ret != kIOReturnSuccess) {
++		fRegistered[intid] = 0;
++	}
++	return ret;
++}
++
++IOReturn
++RubyGICInterruptController::unregisterInterrupt(IOService *nub, int source)
++{
++	uint32_t intid;
++	uint32_t flags;
++	IOReturn ret;
++
++	if (!vectors) {
++		return kIOReturnNotReady;
++	}
++	if (!specForSource(nub, source, &intid, &flags)) {
++		return kIOReturnBadArgument;
++	}
++	ret = super::unregisterInterrupt(nub, source);
++	if (ret == kIOReturnSuccess && intid < fNumVectors) {
++		fRegistered[intid] = 0;
++	}
++	return ret;
++}
++
++IOReturn
++RubyGICInterruptController::getInterruptType(IOService *nub, int source,
++    int *interruptType)
++{
++	uint32_t intid;
++	uint32_t flags;
++
++	if (!vectors || !interruptType ||
++	    !specForSource(nub, source, &intid, &flags)) {
++		return kIOReturnBadArgument;
++	}
++	*interruptType = (flags & RUBY_GIC_LEVEL) ?
++	    kIOInterruptTypeLevel : kIOInterruptTypeEdge;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyGICInterruptController::enableInterrupt(IOService *nub, int source)
++{
++	uint32_t intid;
++	uint32_t flags;
++	IOInterruptVector *vec;
++
++	if (!vectors) {
++		return kIOReturnNotReady;
++	}
++	if (!specForSource(nub, source, &intid, &flags) ||
++	    intid >= fNumVectors) {
++		return kIOReturnBadArgument;
++	}
++	vec = &vectors[intid];
++	vec->interruptDisabledSoft = 0;
++	OSMemoryBarrier();
++	if (!getPlatform()->atInterruptLevel()) {
++		while (vec->interruptActive) {
++		}
++	}
++	if (vec->interruptDisabledHard) {
++		vec->interruptDisabledHard = 0;
++		gicUnmask(intid);
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyGICInterruptController::disableInterrupt(IOService *nub, int source)
++{
++	uint32_t intid;
++	uint32_t flags;
++	IOInterruptVector *vec;
++
++	if (!vectors) {
++		return kIOReturnNotReady;
++	}
++	if (!specForSource(nub, source, &intid, &flags) ||
++	    intid >= fNumVectors) {
++		return kIOReturnBadArgument;
++	}
++	vec = &vectors[intid];
++	vec->interruptDisabledSoft = 1;
++	OSMemoryBarrier();
++	if (!getPlatform()->atInterruptLevel()) {
++		while (vec->interruptActive) {
++		}
++	}
++	if (!vec->interruptDisabledHard) {
++		vec->interruptDisabledHard = 1;
++		gicMask(intid);
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyGICInterruptController::handleInterrupt(void *refCon, IOService *nub,
++    int source)
++{
++	IOInterruptVector *vec;
++
++	(void)refCon;
++	(void)nub;
++
++	if (source < (int)RUBY_GIC_INTID_MIN ||
++	    source > (int)RUBY_GIC_INTID_MAX || !vectors) {
++		return kIOReturnInvalid;
++	}
++	vec = &vectors[source];
++	if (!vec->interruptRegistered) {
++		return kIOReturnInvalid;
++	}
++	if (vec->interruptDisabledSoft || vec->interruptDisabledHard ||
++	    !vec->handler) {
++		__atomic_add_fetch(&fUnhandled, 1, __ATOMIC_RELAXED);
++		return kIOReturnSuccess;
++	}
++	vec->interruptActive = 1;
++	OSMemoryBarrier();
++	vec->handler(vec->target, vec->refCon, vec->nub, vec->source);
++	OSMemoryBarrier();
++	vec->interruptActive = 0;
++	return kIOReturnSuccess;
++}
++
++bool
++RubyGICInterruptController::vectorCanBeShared(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vectorNumber;
++	(void)vector;
++	return false;
++}
++
++void
++RubyGICInterruptController::initVector(IOInterruptVectorNumber vectorNumber,
++    IOInterruptVector *vector)
++{
++	(void)vectorNumber;
++	(void)vector;
++}
++
++int
++RubyGICInterruptController::getVectorType(IOInterruptVectorNumber vectorNumber,
++    IOInterruptVector *vector)
++{
++	(void)vector;
++
++	if (vectorNumber < 0 || (uint32_t)vectorNumber >= fNumVectors) {
++		return kIOInterruptTypeEdge;
++	}
++	return fTrigger[vectorNumber] ?
++	    kIOInterruptTypeLevel : kIOInterruptTypeEdge;
++}
++
++void
++RubyGICInterruptController::disableVectorHard(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vector;
++
++	if (vectorNumber < 0 || (uint32_t)vectorNumber >= fNumVectors) {
++		return;
++	}
++	gicMask((uint32_t)vectorNumber);
++}
++
++void
++RubyGICInterruptController::enableVector(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vector;
++
++	if (vectorNumber < 0 || (uint32_t)vectorNumber >= fNumVectors) {
++		return;
++	}
++	gicUnmask((uint32_t)vectorNumber);
++}
++
++void
++RubyGICInterruptController::causeVector(
++    IOInterruptVectorNumber vectorNumber, IOInterruptVector *vector)
++{
++	(void)vector;
++
++	if (vectorNumber < 0 || (uint32_t)vectorNumber >= fNumVectors) {
++		return;
++	}
++	gic_wr32(fGICD, ruby_gic_pending_off((uint32_t)vectorNumber),
++	    ruby_gic_bit((uint32_t)vectorNumber));
++}
++
++#endif /* SWEET */
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetKPD.h
+@@ -0,0 +1,40 @@
++#ifndef _IOKIT_SWEET_KPD_H
++#define _IOKIT_SWEET_KPD_H
++
++#include <IOKit/IOService.h>
++#include <mach/vm_types.h>
++#include <stdint.h>
++
++class OSDictionary;
++
++class IOWorkLoop;
++class IOInterruptEventSource;
++class IOTimerEventSource;
++
++class SweetKPD : public IOService
++{
++	OSDeclareDefaultStructors(SweetKPD);
++
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++
++private:
++	IOWorkLoop *fWorkLoop;
++	IOInterruptEventSource *fIRQ;
++	IOTimerEventSource *fReleaseTimer;
++	vm_offset_t fKPD;
++	bool fKeyDown;
++	uint32_t fActionCount;
++	uint32_t fReleaseChecks;
++
++	bool publishInterruptSource(void);
++	bool keyDown(void);
++	void report(bool down);
++	static void irqAction(OSObject *owner, IOInterruptEventSource *sender,
++	    int count);
++	static void releaseTimer(OSObject *owner, IOTimerEventSource *sender);
++};
++
++#endif /* _IOKIT_SWEET_KPD_H */
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetKPD.cpp
+@@ -0,0 +1,217 @@
++#if defined(SWEET)
++/*
++ * SWEET: KPD volume-down button as an IOKit interrupt client.
++ *
++ * INTID138 is a level source.  The event source disables it in primary
++ * context; the workloop action reads KP_MEM1 and keeps the line masked
++ * while the key is held.  Because a masked level line cannot report the
++ * release, a timer samples the key until it goes up and then re-enables
++ * the IRQ.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOWorkLoop.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSSymbol.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++#include "../../../bsd/dev/ruby_gic.h"
++#include "hid/IOHIDUsageTables.h"
++#include "SweetKPD.h"
++
++#define SWEET_KPD_PA     0x10010000u
++#define SWEET_KPD_SIZE   0x1000u
++#define SWEET_KPD_MEM1   0x0004u
++#define SWEET_KPD_INTID  138u
++#define SWEET_KPD_POLL_MS 10u
++
++#define super IOService
++OSDefineMetaClassAndStructors(SweetKPD, IOService);
++
++extern "C" void sweet_hid_key(int key, int down);
++extern "C" void ruby_keys_set_native_kpd(int on);
++extern "C" void ruby_keys_release_legacy_kpd_irq(void);
++extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern "C" uint16_t ruby_rd16(uintptr_t base, uint32_t off);
++
++bool
++SweetKPD::publishInterruptSource(void)
++{
++	OSArray *controllers;
++	OSArray *specifiers;
++	OSSymbol *name;
++	OSData *data;
++	struct ruby_gic_spec spec = {
++		.intid = SWEET_KPD_INTID,
++		.flags = RUBY_GIC_LEVEL,
++	};
++	bool ok;
++
++	controllers = OSArray::withCapacity(1);
++	specifiers = OSArray::withCapacity(1);
++	name = (OSSymbol *)OSSymbol::withCStringNoCopy("RubyGIC");
++	data = OSData::withBytes(&spec, sizeof(spec));
++	if (!controllers || !specifiers || !name || !data) {
++		ok = false;
++		goto out;
++	}
++	if (!controllers->setObject(name) || !specifiers->setObject(data)) {
++		ok = false;
++		goto out;
++	}
++	ok = setProperty("IOInterruptControllers", controllers) &&
++	    setProperty("IOInterruptSpecifiers", specifiers);
++out:
++	OSSafeRelease(controllers);
++	OSSafeRelease(specifiers);
++	OSSafeRelease(name);
++	OSSafeRelease(data);
++	return ok;
++}
++
++bool
++SweetKPD::init(OSDictionary *dictionary)
++{
++	fWorkLoop = NULL;
++	fIRQ = NULL;
++	fReleaseTimer = NULL;
++	fKPD = 0;
++	fKeyDown = false;
++	fActionCount = 0;
++	fReleaseChecks = 0;
++	return super::init(dictionary);
++}
++
++bool
++SweetKPD::start(IOService *provider)
++{
++	int enabled = 0;
++	int native = 0;
++
++	if (!super::start(provider)) {
++		return false;
++	}
++	if (!PE_parse_boot_argn("rubkeys", &enabled, sizeof(enabled)) ||
++	    enabled != 1) {
++		return false;
++	}
++	if (!PE_parse_boot_argn("rubykpdirq", &native, sizeof(native)) ||
++	    native != 1) {
++		return false;
++	}
++	fKPD = ml_io_map(SWEET_KPD_PA, SWEET_KPD_SIZE);
++	if (!fKPD) {
++		return false;
++	}
++	fWorkLoop = getWorkLoop();
++	if (!fWorkLoop) {
++		return false;
++	}
++	fWorkLoop->retain();
++	if (!publishInterruptSource()) {
++		return false;
++	}
++	fIRQ = IOInterruptEventSource::interruptEventSource(this,
++	    &SweetKPD::irqAction, this, 0);
++	if (!fIRQ || fWorkLoop->addEventSource(fIRQ) != kIOReturnSuccess) {
++		return false;
++	}
++	fReleaseTimer = IOTimerEventSource::timerEventSource(this,
++	    &SweetKPD::releaseTimer);
++	if (!fReleaseTimer ||
++	    fWorkLoop->addEventSource(fReleaseTimer) != kIOReturnSuccess) {
++		return false;
++	}
++	ruby_keys_set_native_kpd(1);
++	ruby_keys_release_legacy_kpd_irq();
++	fIRQ->enable();
++	IOLog("SWEET KPD: irq index=0 intid=%u type=level\n",
++	    SWEET_KPD_INTID);
++	return true;
++}
++
++void
++SweetKPD::free(void)
++{
++	ruby_keys_set_native_kpd(0);
++	if (fReleaseTimer) {
++		fReleaseTimer->cancelTimeout();
++		if (fWorkLoop) {
++			fWorkLoop->removeEventSource(fReleaseTimer);
++		}
++		OSSafeRelease(fReleaseTimer);
++		fReleaseTimer = NULL;
++	}
++	if (fIRQ) {
++		fIRQ->disable();
++		if (fWorkLoop) {
++			fWorkLoop->removeEventSource(fIRQ);
++		}
++		OSSafeRelease(fIRQ);
++		fIRQ = NULL;
++	}
++	if (fWorkLoop) {
++		fWorkLoop->release();
++		fWorkLoop = NULL;
++	}
++	super::free();
++}
++
++bool
++SweetKPD::keyDown(void)
++{
++	return (ruby_rd16((uintptr_t)fKPD, SWEET_KPD_MEM1) & 1u) == 0;
++}
++
++void
++SweetKPD::report(bool down)
++{
++	IOLog("SWEET KPD: volume down %s\n", down ? "down" : "up");
++	sweet_hid_key(kHIDUsage_Csmr_VolumeDecrement, down ? 1 : 0);
++}
++
++void
++SweetKPD::irqAction(OSObject *owner, IOInterruptEventSource *sender,
++    int count)
++{
++	SweetKPD *self = (SweetKPD *)owner;
++
++	(void)sender;
++	(void)count;
++	self->fActionCount++;
++	if (self->keyDown()) {
++		if (!self->fKeyDown) {
++			self->fKeyDown = true;
++			self->report(true);
++		}
++		self->fIRQ->disable();
++		(void)self->fReleaseTimer->setTimeoutMS(SWEET_KPD_POLL_MS);
++	} else if (self->fKeyDown) {
++		self->fKeyDown = false;
++		self->report(false);
++	}
++}
++
++void
++SweetKPD::releaseTimer(OSObject *owner, IOTimerEventSource *sender)
++{
++	SweetKPD *self = (SweetKPD *)owner;
++
++	(void)sender;
++	self->fReleaseChecks++;
++	if (self->keyDown()) {
++		(void)self->fReleaseTimer->setTimeoutMS(SWEET_KPD_POLL_MS);
++		return;
++	}
++	if (self->fKeyDown) {
++		self->fKeyDown = false;
++		self->report(false);
++	}
++	self->fIRQ->enable();
++}
++
++#endif /* SWEET */
+--- /dev/null
++++ b/bsd/dev/ruby_gic.h
+@@ -0,0 +1,97 @@
++/*
++ * RUBY: shared GICv3 encoding helpers for the native interrupt controller
++ * and the legacy EINT/KPD code.
++ */
++#ifndef RUBY_GIC_H
++#define RUBY_GIC_H
++
++#include <stdint.h>
++
++#define RUBY_GIC_INTID_MIN      32u
++#define RUBY_GIC_INTID_MAX      1019u
++#define RUBY_GIC_PRIO_DEFAULT   0xa0u
++
++/* MPIDR Aff3[39:32], Aff2[23:16], Aff1[15:8], Aff0[7:0]. */
++#define RUBY_GIC_MPIDR_AFF_MASK 0x000000FF00FFFFFFULL
++
++#define RUBY_GIC_EDGE           0x0u
++#define RUBY_GIC_LEVEL          0x1u
++#define RUBY_GIC_ACTIVE_LOW     0x2u
++
++struct ruby_gic_spec {
++	uint32_t intid;
++	uint32_t flags;
++};
++
++static inline uint64_t
++ruby_gic_mpidr_to_irouter(uint64_t mpidr)
++{
++	uint64_t aff0 = mpidr & 0xffu;
++	uint64_t aff1 = (mpidr >> 8) & 0xffu;
++	uint64_t aff2 = (mpidr >> 16) & 0xffu;
++	uint64_t aff3 = (mpidr >> 32) & 0xffu;
++
++	return (aff3 << 32) | (aff2 << 16) | (aff1 << 8) | aff0;
++}
++
++static inline uint32_t
++ruby_gic_bit(uint32_t intid)
++{
++	return 1u << (intid % 32u);
++}
++
++static inline uint32_t
++ruby_gic_group_off(uint32_t intid)
++{
++	return 0x080u + (intid / 32u) * 4u;
++}
++
++static inline uint32_t
++ruby_gic_isenabler_off(uint32_t intid)
++{
++	return 0x100u + (intid / 32u) * 4u;
++}
++
++static inline uint32_t
++ruby_gic_icenabler_off(uint32_t intid)
++{
++	return 0x180u + (intid / 32u) * 4u;
++}
++
++static inline uint32_t
++ruby_gic_pending_off(uint32_t intid)
++{
++	return 0x200u + (intid / 32u) * 4u;
++}
++
++static inline uint32_t
++ruby_gic_priority_off(uint32_t intid)
++{
++	return 0x400u + (intid & ~3u);
++}
++
++static inline uint32_t
++ruby_gic_priority_shift(uint32_t intid)
++{
++	return (intid & 3u) * 8u;
++}
++
++static inline uint32_t
++ruby_gic_icfgr_off(uint32_t intid)
++{
++	return 0xc00u + (intid / 16u) * 4u;
++}
++
++static inline uint32_t
++ruby_gic_icfgr_shift(uint32_t intid)
++{
++	return (intid % 16u) * 2u;
++}
++
++static inline uint32_t
++ruby_gic_irouter_off(uint32_t intid)
++{
++	return 0x6000u + intid * 8u;
++}
++
++#endif /* RUBY_GIC_H */
