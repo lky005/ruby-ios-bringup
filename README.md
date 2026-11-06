@@ -2,28 +2,30 @@
 
 **English** · [中文](README.zh.md)
 
-[![xnu-0179](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![xnu-0195](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
-[![tag v0.5.0](https://img.shields.io/badge/tag-v0.5.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.5.0)
+[![tag v0.6.0](https://img.shields.io/badge/tag-v0.6.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.6.0)
 
 **XNU 8796 + iPhone X iOS 16.7.16 userland on a MediaTek MT6877 phone.**
 A research bring-up, packaged as an independent, sanitized delta.
 
 > [!IMPORTANT]
-> **Status 2026-11-06 — 0179 line.** `main 22cdb29`, `v0.5.0`; patchset
-> `10b1e2e8…` (175 files), exec-data `a4fb021e…`, image
-> `d438ba47…`; `boot_a` 0179. Works: UFS root, display, native EINT14 touch
-> (child controller + oneshot WorkLoop), volume/power keys, battery read-only,
-> USB probe/hotplug. Limits: G7/G8 and the full 10 min repeat were not run by
-> decision; no ESD timer; Type-C read-only; no USB host/audio/Wi-Fi/BT/camera/
-> GPU/RTC/sleep; software fastboot/combo parked.
+> **Status 2026-11-07 — 0195 line.** `main 1e45453`, `v0.6.0`; patchset
+> `a9cc0050…` (187 files), exec-data `6b22fc25…`; 0195 ack image
+> `fe009b89…` (comment-only; golden boot verified on 0194 `1808e440…`).
+> Works: UFS root, display, native EINT14 touch, keys, battery read-only,
+> USB EP2 state machine + golden SRCTRL=5, bilingual MTU3 acknowledgements.
+> Limits: XactErr `0xC0000011` not root-caused; 511 B framing prevents
+> big-read aggregation; sustained clear storms can drop the host port;
+> G7/G8 and ESD/P2.4 unchanged; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/
+> sleep; research bring-up.
 > See [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [docs](docs/README.md).
 
 ## Start here
 
 | 5 min | 30 min | Deep |
 |---|---|---|
-| [README](README.md) + [STATUS](docs/records/STATUS.md) | [08-recovery](docs/en/08-recovery.md), [09-reproduce](docs/en/09-reproduce.md), [10-scripts](docs/en/10-scripts.md) | [01–07](docs/en/README.md), [11](docs/en/11-ci-baseline.md), [12](docs/en/12-usb-host.md) |
+| [README](README.md) + [STATUS](docs/records/STATUS.md) | [08-recovery](docs/en/08-recovery.md), [09-reproduce](docs/en/09-reproduce.md), [10-scripts](docs/en/10-scripts.md) | [01–07](docs/en/README.md), [11](docs/en/11-ci-baseline.md), [12](docs/en/12-usb-host.md), [13](docs/en/13-usb-ep2-golden.md) |
 
 ## Demo
 
@@ -140,14 +142,14 @@ a deterministic image and checks the layout.
 
 | Pin | Value |
 |---|---|
-| Patchset | `10b1e2e8…` (175 files) |
-| Kernel | full `2b008e52…`, exec-data `a4fb021e…` |
-| Image | `d438ba47…` (`x16-0179-touch-retry.img`, payload `72fc737c…`) |
-| CI | `xnu-0179` `42225956551` (prep) / `42227326083` (main); host-checks `42225964202` / `42227326160` |
-| Tags | `v0.5.0` → `22cdb29`; `p2b-native-touch-2026-11-06` → `f6c5795`; historical `v0.4.0` → `e81510f` |
-| `boot_a` | 0179 |
-| Device evidence | G1–G6; first 10 min + ~5 min stress; 8-failure soft reset (`no-ack` boundary); no panic |
-| Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) |
+| Patchset | `a9cc0050…` (187 files) |
+| Kernel | full `45ea1bc3…`, exec-data `6b22fc25…` (0195 ack; 0194 exec same) |
+| Image | `fe009b89…` (`x16-0195-ack.img`, payload `3a97d52b…`, comment-only; 0194 golden `1808e440…` booted) |
+| CI | `xnu-0195` `42301546006` / `42302694315` (exec pin); host-checks `42302515812`; main `42304310915` / host-checks `42304311052` |
+| Tags | `v0.6.0` → `1e45453`; `usb-ep2-0194-2026-11-07` → `a9e24e2`; historical `v0.5.0` → `22cdb29` |
+| `boot_a` | 0194 (active `_b`); 0195 ack image built, not flashed |
+| Device evidence | 0194 golden boot (`golden acr5=0x40805000`, 14.1 s); 62-frame peak; EP2 state machine; XactErr `0xC0000011` |
+| Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) · [13](docs/en/13-usb-ep2-golden.md) |
 
 ## Device situation
 
@@ -156,7 +158,7 @@ a deterministic image and checks the layout.
 | Device | Redmi Note 12 Pro 5G, `ruby` / MT6877, 8 GB + 256 GB |
 | System | Android 12 / MIUI 13.0.4, unlocked, Magisk, slot `_a` |
 | Layout | `userdata` 208.4 GiB + `iosroot` 17 GiB; `boot_a` 128 MiB; `super` ~9.1 GB |
-| Current state | 0179 image/kernel; 0155 and 0085/0084 history; root A/A' snapshots, ICL blocks, boot cmdline; the device is not part of this repository |
+| Current state | 0194 image/kernel (active slot `_b`); 0195 ack image built, not flashed; 0189C/TWRP archived; 0155 and 0085/0084 history; root A/A' snapshots, ICL blocks, boot cmdline; the device is not part of this repository |
 | Success artifacts | 0179 image, kernel, root A/A' snapshots, ICL blocks, boot cmdline |
 | Must match | firmware/GPT, root hash, boot image, boot args, panel/display |
 | Not needed | touch firmware, Wi-Fi/BT, audio, camera/GPU, RTC |

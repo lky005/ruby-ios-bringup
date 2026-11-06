@@ -2,28 +2,29 @@
 
 [English](README.md) · **中文**
 
-[![xnu-0179](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![xnu-0195](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
-[![tag v0.5.0](https://img.shields.io/badge/tag-v0.5.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.5.0)
+[![tag v0.6.0](https://img.shields.io/badge/tag-v0.6.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.6.0)
 
 **在 MediaTek MT6877 手机上运行 XNU 8796 + iPhone X iOS 16.7.16 用户态。**
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
 > [!IMPORTANT]
-> **状态 2026-11-06 — 0179 线。** `main 22cdb29`、`v0.5.0`；patchset
-> `10b1e2e8…`（175 文件）、exec-data `a4fb021e…`、镜像
-> `d438ba47…`；`boot_a` 0179。已通：UFS root、显示、原生 EINT14 触摸
-> （子 controller + oneshot WorkLoop）、音量/电源键、电池只读、USB 探针/
-> 热插拔。限制：G7/G8 与完整 10 min 复跑按决定未跑；无 ESD timer；
-> Type-C 只读；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep；
-> 软件 fastboot/组合键 parked。
+> **状态 2026-11-07 — 0195 线。** `main 1e45453`、`v0.6.0`；patchset
+> `a9cc0050…`（187 文件）、exec-data `6b22fc25…`；0195 致谢镜像
+> `fe009b89…`（仅注释；黄金 boot 在 0194 `1808e440…` 验证）。已通：
+> UFS root、显示、原生 EINT14 触摸、音量/电源键、电池只读、USB EP2
+> 状态机 + 黄金 SRCTRL=5、双语 MTU3 致谢。限制：XactErr `0xC0000011`
+> 未定性；511 B 帧封装无法大块聚合；连续 clear 风暴可能停主机端口；
+> G7/G8 与 ESD/P2.4 未变；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/
+> sleep；研究性 bring-up。
 > 见 [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [docs](docs/README.md)。
 
 ## 从这里开始
 
 | 5 分钟 | 30 分钟 | 深入 |
 |---|---|---|
-| [README](README.zh.md) + [STATUS](docs/records/STATUS.md) | [08-recovery](docs/zh/08-recovery.md)、[09-reproduce](docs/zh/09-reproduce.md)、[10-scripts](docs/zh/10-scripts.md) | [01–07](docs/zh/README.md)、[11](docs/zh/11-ci-baseline.md)、[12](docs/zh/12-usb-host.md) |
+| [README](README.zh.md) + [STATUS](docs/records/STATUS.md) | [08-recovery](docs/zh/08-recovery.md)、[09-reproduce](docs/zh/09-reproduce.md)、[10-scripts](docs/zh/10-scripts.md) | [01–07](docs/zh/README.md)、[11](docs/zh/11-ci-baseline.md)、[12](docs/zh/12-usb-host.md)、[13](docs/zh/13-usb-ep2-golden.md) |
 
 ## 演示
 
@@ -133,14 +134,14 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0179 �
 
 | Pin | 值 |
 |---|---|
-| Patchset | `10b1e2e8…`（175 文件） |
-| 内核 | full `2b008e52…`，exec-data `a4fb021e…` |
-| 镜像 | `d438ba47…`（`x16-0179-touch-retry.img`，payload `72fc737c…`） |
-| CI | `xnu-0179` `42225956551`（prep）/ `42227326083`（main）；host-checks `42225964202` / `42227326160` |
-| Tags | `v0.5.0` → `22cdb29`；`p2b-native-touch-2026-11-06` → `f6c5795`；历史 `v0.4.0` → `e81510f` |
-| `boot_a` | 0179 |
-| 设备证据 | G1–G6；首次 10 min + 约 5 min 压测；8 连败软重置（`no-ack` 边界）；0 panic |
-| 证据 | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE.zh.md](docs/records/GUARANTEE.zh.md) |
+| Patchset | `a9cc0050…`（187 文件） |
+| 内核 | full `45ea1bc3…`，exec-data `6b22fc25…`（0195 致谢；0194 exec 相同） |
+| 镜像 | `fe009b89…`（`x16-0195-ack.img`，payload `3a97d52b…`，仅注释；0194 黄金 `1808e440…` 已 boot） |
+| CI | `xnu-0195` `42301546006` / `42302694315`（exec pin）；host-checks `42302515812`；main `42304310915` / host-checks `42304311052` |
+| Tags | `v0.6.0` → `1e45453`；`usb-ep2-0194-2026-11-07` → `a9e24e2`；历史 `v0.5.0` → `22cdb29` |
+| `boot_a` | 0194（active `_b`）；0195 致谢镜像已构建未刷 |
+| 设备证据 | 0194 黄金 boot（`golden acr5=0x40805000`，14.1 s）；62 帧峰值；EP2 状态机；XactErr `0xC0000011` |
+| 证据 | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE.zh.md](docs/records/GUARANTEE.zh.md) · [13](docs/zh/13-usb-ep2-golden.md) |
 
 ## 设备情况
 
@@ -149,7 +150,7 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0179 �
 | 设备 | Redmi Note 12 Pro 5G，`ruby` / MT6877，8 GB + 256 GB |
 | 系统 | Android 12 / MIUI 13.0.4，已解锁，Magisk，slot `_a` |
 | 布局 | `userdata` 208.4 GiB + `iosroot` 17 GiB；`boot_a` 128 MiB；`super` 约 9.1 GB |
-| 当前状态 | 0179 镜像/内核；0155 与 0085/0084 为历史；root A/A' 快照、ICL 块、boot cmdline；设备不在本仓库内 |
+| 当前状态 | 0194 镜像/内核（active slot `_b`）；0195 致谢镜像已构建未刷；0189C/TWRP 已归档；0155 与 0085/0084 为历史；root A/A' 快照、ICL 块、boot cmdline；设备不在本仓库内 |
 | 成功工件 | 0179 镜像、内核、root A/A' 快照、ICL 块、boot cmdline |
 | 需匹配 | 固件/GPT、root hash、boot 镜像、启动参数、面板/显示 |
 | 不需要 | 触摸固件、Wi-Fi/BT、音频、相机/GPU、RTC |

@@ -38,6 +38,19 @@ must not appear in the public tree:
 | Config-mode layout | pass without golden; 11 pinned checks |
 | Linux host CI | pass before the final docs/template-only amendment; see Actions |
 
+## CI-verified (2026-11-07)
+
+| Check | Result |
+|---|---|
+| Baseline manifest | 82 files, root `829d7598...`, manifest matches |
+| Patchset (0195) | `a9cc0050...` (187 files); 0194 `70597a6c...` (186) |
+| Kernel (0195) | full `45ea1bc3...`, exec-data `6b22fc25...`; xnu `42301546006`; rerun `42302694315` (full `cbaba5d7...`, exec same); host-checks `42302515812` |
+| Image (0195) | `fe009b89...`; payload `3a97d52b...`; built, not flashed |
+| Golden boot (0194) | `1808e440...`; `golden acr5=0x40805000`; 14.1 s |
+| Main CI | xnu `42304310915`; host-checks `42304311052`; after the M2 merge |
+| Toolchain | `macos-15` arm64, Xcode 16.0, SDK 15.0, clang 16.0.0; workflow `xnu-0195` |
+| Device | 0194 active slot `_b`; ACR1/5/6 verified |
+
 ## CI-verified (2026-11-06)
 
 | Check | Result |
