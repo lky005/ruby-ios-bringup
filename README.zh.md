@@ -4,14 +4,14 @@
 
 [![xnu-0179](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
-[![tag v0.4.0](https://img.shields.io/badge/tag-v0.4.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.4.0)
+[![tag v0.5.0](https://img.shields.io/badge/tag-v0.5.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.5.0)
 
 **在 MediaTek MT6877 手机上运行 XNU 8796 + iPhone X iOS 16.7.16 用户态。**
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
 > [!IMPORTANT]
-> **状态 2026-11-06 — 0179 线。** `main` 合并待执行（M2），计划 `v0.5.0`；
-> patchset `10b1e2e8…`（175 文件）、exec-data `a4fb021e…`、镜像
+> **状态 2026-11-06 — 0179 线。** `main 22cdb29`、`v0.5.0`；patchset
+> `10b1e2e8…`（175 文件）、exec-data `a4fb021e…`、镜像
 > `d438ba47…`；`boot_a` 0179。已通：UFS root、显示、原生 EINT14 触摸
 > （子 controller + oneshot WorkLoop）、音量/电源键、电池只读、USB 探针/
 > 热插拔。限制：G7/G8 与完整 10 min 复跑按决定未跑；无 ESD timer；
@@ -136,8 +136,8 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0179 �
 | Patchset | `10b1e2e8…`（175 文件） |
 | 内核 | full `2b008e52…`，exec-data `a4fb021e…` |
 | 镜像 | `d438ba47…`（`x16-0179-touch-retry.img`，payload `72fc737c…`） |
-| CI | `xnu-0179` `42114854911`；gate rerun `42115985782`；host-checks `42115991259` |
-| Tags | `v0.5.0` → M2（待建）；`p2b-native-touch-2026-11-06` → `f6c5795`；历史 `v0.4.0` → `e81510f` |
+| CI | `xnu-0179` `42225956551`（prep）/ `42227326083`（main）；host-checks `42225964202` / `42227326160` |
+| Tags | `v0.5.0` → `22cdb29`；`p2b-native-touch-2026-11-06` → `f6c5795`；历史 `v0.4.0` → `e81510f` |
 | `boot_a` | 0179 |
 | 设备证据 | G1–G6；首次 10 min + 约 5 min 压测；8 连败软重置（`no-ack` 边界）；0 panic |
 | 证据 | [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [GUARANTEE.zh.md](GUARANTEE.zh.md) |

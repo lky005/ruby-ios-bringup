@@ -34,6 +34,7 @@ volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 | Item | Result | Evidence |
 |---|---|---|
 | Current line | 0156-0179: P2 keys/USB hotplug/battery (0156-0174), P2 IRQ (0175), native EINT parent/child oneshot (0176-0179) | patchset `10b1e2e8...` (175 files); `config/0179.env` |
+| Main/tag | `22cdb29` / `v0.5.0`; line tag `p2b-native-touch-2026-11-06` → `f6c5795` | 2026-11-06 |
 | Kernel | full `2b008e52...`, exec-data `a4fb021e...`; CI `42114854911`; gate rerun `42115985782`; host-checks `42115991259` success | `config/0179.env`; workflow `xnu-0179` |
 | Image | `x16-0179-touch-retry.img` `d438ba47...`; payload `72fc737c...`; `boot_a` 0179 | device run 2026-11-06 |
 | Touch IRQ | EINT14 edge → EINT child controller → dedicated IOWorkLoop oneshot → SPI3/HID → `service_done` re-arm; `gt_thread` removed; commands on `IOCommandGate` | G1–G6; 0179 device run |

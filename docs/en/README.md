@@ -11,7 +11,7 @@ personal paths, device identifiers or Apple binaries here.
 | Item | Value |
 |---|---|
 | Line | 0179 |
-| `main` / tag | merge pending (M2) / `v0.5.0` planned |
+| `main` / tag | `22cdb29` / `v0.5.0` |
 | Patchset | `10b1e2e8…` (175 files) |
 | Kernel | full `2b008e52…`, exec-data `a4fb021e…` |
 | Image | `d438ba47…` (`x16-0179-touch-retry.img`) |
