@@ -24,7 +24,7 @@ project's delta.
 
 | Line | Patchset | Files | Config | Kernel reference |
 |---|---|---|---|---|
-| main (2026-11-06 line, merge prep) | `10b1e2e8...` | 175 | `config/0179.env` | full `2b008e52...`, exec `a4fb021e...` (CI `42114854911`; gate `42115985782`; host `42115991259`) |
+| main (2026-11-06 integration) | `10b1e2e8...` | 175 | `config/0179.env` | full `2b008e52...`, exec `a4fb021e...` (main CI `42227326083`; prep `42225956551`) |
 | main (2026-11-02 integration) | `da13b6df...` | 151 | `config/0155.env` | full `491f2373...`, exec `2e98fd85...` (CI `41354317810`; gate `41355922057`) |
 | main (2026-11-01 integration) | `9f7b41cf...` | 141 | `config/0144.env` | full `9c82ea75...`, exec `62a17d48...` (CI `41222632828`) |
 | main (2026-10-30 integration) | `f47f4c19...` | 139 | `config/0143.env` | full `d2eae74d...`, exec `6fa65088...` (CI `41022192026`) |

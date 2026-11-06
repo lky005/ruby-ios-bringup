@@ -50,7 +50,7 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 
 ## Branches
 
-- `main` (2026-11-06 line, merge prep): patchset `10b1e2e8...` (175 files),
+- `main` (2026-11-06 integration, `22cdb29`): patchset `10b1e2e8...` (175 files),
   config `config/0179.env`, workflow `xnu-0179`. It combines the 0156-0174
   HAL/keys/USB/battery work with the 0175-0179 native IRQ and touch line
   (RubyGIC/KPD, EINT parent/child, oneshot WorkLoop, retry/soft reset).

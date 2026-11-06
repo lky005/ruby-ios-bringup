@@ -10,7 +10,7 @@
 | 项 | 值 |
 |---|---|
 | 线 | 0179 |
-| `main` / tag | 合并待执行（M2）/ 计划 `v0.5.0` |
+| `main` / tag | `22cdb29` / `v0.5.0` |
 | Patchset | `10b1e2e8…`（175 文件） |
 | 内核 | full `2b008e52…`，exec-data `a4fb021e…` |
 | 镜像 | `d438ba47…`（`x16-0179-touch-retry.img`） |

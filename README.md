@@ -4,14 +4,14 @@
 
 [![xnu-0179](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
-[![tag v0.4.0](https://img.shields.io/badge/tag-v0.4.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.4.0)
+[![tag v0.5.0](https://img.shields.io/badge/tag-v0.5.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.5.0)
 
 **XNU 8796 + iPhone X iOS 16.7.16 userland on a MediaTek MT6877 phone.**
 A research bring-up, packaged as an independent, sanitized delta.
 
 > [!IMPORTANT]
-> **Status 2026-11-06 — 0179 line.** `main` merge pending (M2), `v0.5.0`
-> planned; patchset `10b1e2e8…` (175 files), exec-data `a4fb021e…`, image
+> **Status 2026-11-06 — 0179 line.** `main 22cdb29`, `v0.5.0`; patchset
+> `10b1e2e8…` (175 files), exec-data `a4fb021e…`, image
 > `d438ba47…`; `boot_a` 0179. Works: UFS root, display, native EINT14 touch
 > (child controller + oneshot WorkLoop), volume/power keys, battery read-only,
 > USB probe/hotplug. Limits: G7/G8 and the full 10 min repeat were not run by
@@ -143,8 +143,8 @@ a deterministic image and checks the layout.
 | Patchset | `10b1e2e8…` (175 files) |
 | Kernel | full `2b008e52…`, exec-data `a4fb021e…` |
 | Image | `d438ba47…` (`x16-0179-touch-retry.img`, payload `72fc737c…`) |
-| CI | `xnu-0179` `42114854911`; gate rerun `42115985782`; host-checks `42115991259` |
-| Tags | `v0.5.0` → M2 (pending); `p2b-native-touch-2026-11-06` → `f6c5795`; historical `v0.4.0` → `e81510f` |
+| CI | `xnu-0179` `42225956551` (prep) / `42227326083` (main); host-checks `42225964202` / `42227326160` |
+| Tags | `v0.5.0` → `22cdb29`; `p2b-native-touch-2026-11-06` → `f6c5795`; historical `v0.4.0` → `e81510f` |
 | `boot_a` | 0179 |
 | Device evidence | G1–G6; first 10 min + ~5 min stress; 8-failure soft reset (`no-ack` boundary); no panic |
 | Evidence | [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [GUARANTEE](GUARANTEE.md) |
