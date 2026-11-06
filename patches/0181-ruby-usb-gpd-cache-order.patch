@@ -1,0 +1,18 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2028,11 +2028,12 @@
+         *(volatile uint32_t *)(g + 8) = (uint32_t)log_pa;
+         *(volatile uint16_t *)(g + 12) = (uint16_t)(RUBY_HDR_LEN + n);
+         g[1] = ruby_gpd_chksum(g);
+-        ruby_dma_wmb();             /* fields before HWO */
+-        g[0] = (1u << 0) | (1u << 7);
+-
++        /* Make the payload and all descriptor fields visible before HWO. */
+         ruby_dc_civac(buf, RUBY_LOG_CHUNK);
+         ruby_dc_civac(g, RUBY_GPD_DESC);
++        ruby_dma_wmb();             /* fields before HWO */
++        g[0] = (1u << 0) | (1u << 7);
++        ruby_dc_civac(g, RUBY_GPD_DESC); /* publish HWO */
+         ruby_log_pos = pos;
+         ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+         ruby_inflight++;
