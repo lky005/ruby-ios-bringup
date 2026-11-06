@@ -1,0 +1,69 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -68,6 +68,8 @@
+ #define MISC_CTRL    (MTU3_PA + 0x0c84)
+ #define PM_CTRL      (MTU3_PA + 0x2404)
+ #define USB20_OP     (MTU3_PA + 0x2460)
++#define BUS_PERFORMANCE (MTU3_PA + 0x2420)
++#define BUS_PERF_NOISE_STILL_TR (1u << 21)
+ #define LV1IECR      (MTU3_PA + 0x000c)
+ 
+ /* PHY banks relative to PHY_PA (U2 COM +0x300; U3 +0x700..) */
+@@ -120,6 +122,17 @@
+ #define ACR3_PUPD_BIST_EN   (1u << 12)
+ #define ACR3_EN_PU_DP       (1u << 9)
+ 
++/* 0185: ruby u2port0 HS eye tuning (mt6877.dts device values). */
++#define PHY_U2_ACR1     0x0304
++#define ACR1_VRT_SEL    (0x7u << 12)    /* PA1_RG_VRT_SEL  [14:12] */
++#define ACR1_TERM_SEL   (0x7u << 8)     /* PA1_RG_TERM_SEL [10:8] */
++#define ACR6_REV6_SEL   (0x3u << 30)    /* PA6_RG_U2_PHY_REV6  [31:30] */
++#define ACR6_DISCTH_SEL (0xfu << 4)     /* PA6_RG_U2_DISCTH    [7:4] */
++#define RUBY_U2_EYE_VRT  6u
++#define RUBY_U2_EYE_TERM 6u
++#define RUBY_U2_EYE_REV6 1u
++#define RUBY_U2_EYE_DISC 7u
++
+ /* PS5169 enable: GPIO121, bank 3 */
+ #define GPIO_PINMUX_121 0x03f0
+ #define GPIO_DIR3       0x0030
+@@ -448,6 +461,24 @@
+     v |= 2u;                                     /* SQTH = 2 */
+     ruby_wr32(phy, PHY_U2_ACR6, v);
+ 
++    /*
++     * 0185: board eye tuning from u2port0 in mt6877.dts (device side):
++     * VRT 4->6, TERM 4->6, REV6 0->1, DISCTH 4->7.  Vendor order is
++     * instance_init -> props_set -> power_on, so this sits before the
++     * SUSPENDM sequence below.
++     */
++    v = ruby_rd32(phy, PHY_U2_ACR1);
++    v &= ~(ACR1_VRT_SEL | ACR1_TERM_SEL);
++    v |= (RUBY_U2_EYE_VRT << 12) | (RUBY_U2_EYE_TERM << 8);
++    ruby_wr32(phy, PHY_U2_ACR1, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);
++    v &= ~(ACR6_REV6_SEL | ACR6_DISCTH_SEL);
++    v |= (RUBY_U2_EYE_REV6 << 30) | (RUBY_U2_EYE_DISC << 4);
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++    printf("RUBY USB: PHY eye acr1=0x%08x acr6=0x%08x\n",
++        ruby_rd32(phy, PHY_U2_ACR1), ruby_rd32(phy, PHY_U2_ACR6));
++
+     /* u2_phy_instance_power_on. */
+     v = ruby_rd32(phy, PHY_U2_DTM0);
+     v |= DTM0_FORCE_SUSPENDM;
+@@ -3798,6 +3829,14 @@
+     ruby_wr32(mac, PM_CTRL - MTU3_PA,
+         (v | (1u << 5)) & ~((1u << 6) | (1u << 0)));
+     ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 0);
++
++    /* 0185: vendor ruby quirk: keep transfers going under line noise. */
++    v = ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA);
++    ruby_wr32(mac, BUS_PERFORMANCE - MTU3_PA,
++        v | BUS_PERF_NOISE_STILL_TR);
++    printf("RUBY USB: bus perf 0x%08x\n",
++        ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA));
++
+     v = ruby_rd32(ippc, 0x50);
+     ruby_wr32(ippc, 0x50, v & ~U2_OTG_SEL);
+ 
