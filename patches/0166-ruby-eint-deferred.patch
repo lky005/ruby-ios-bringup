@@ -1,0 +1,76 @@
+--- a/bsd/dev/ruby_eint.c
++++ b/bsd/dev/ruby_eint.c
+@@ -821,6 +821,10 @@
+ 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+ 
+ 	RUBY_EINT_LOCK();
++	if (e->used && e->state == RUBY_EINT_DEFERRED) {
++		RUBY_EINT_UNLOCK();
++		return 1;	/* unserviced event already queued */
++	}
+ 	seen = e->seq;
+ 	RUBY_EINT_UNLOCK();
+ 
+@@ -832,7 +836,7 @@
+ 			ml_set_interrupts_enabled(intr);
+ 			return 0;
+ 		}
+-		if (e->seq != seen) {
++		if (e->state == RUBY_EINT_DEFERRED || e->seq != seen) {
+ 			lck_spin_unlock(&g_eint_lock);
+ 			ml_set_interrupts_enabled(intr);
+ 			return 1;
+@@ -903,6 +907,19 @@
+ 	RUBY_EINT_UNLOCK();
+ 	return r;
+ }
++
++int
++ruby_eint_deferred(struct ruby_eint *e)
++{
++	int r;
++
++	if (!e || e->line >= RUBY_EINT_LINES)
++		return 0;
++	RUBY_EINT_LOCK();
++	r = e->used && e->state == RUBY_EINT_DEFERRED;
++	RUBY_EINT_UNLOCK();
++	return r;
++}
+ 
+ int
+ ruby_eint_poll_only(struct ruby_eint *e)
+--- a/bsd/dev/ruby_eint.h
++++ b/bsd/dev/ruby_eint.h
+@@ -47,6 +47,7 @@
+ int ruby_eint_wait(struct ruby_eint *e, unsigned ms);
+ void ruby_eint_service_done(struct ruby_eint *e, int ok, int source_clear);
+ int ruby_eint_active(struct ruby_eint *e);
++int ruby_eint_deferred(struct ruby_eint *e);
+ int ruby_eint_poll_only(struct ruby_eint *e);
+ void ruby_eint_force_poll(struct ruby_eint *e);
+ int ruby_eint_demux_isr(void);
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -719,7 +719,8 @@
+ 	for (;;) {
+ 		bool ev;
+ 
+-		if (gt.eint && ruby_eint_active(gt.eint)) {
++		if (gt.eint && (ruby_eint_active(gt.eint) ||
++		    ruby_eint_deferred(gt.eint))) {
+ 			if (ruby_eint_wait(gt.eint, 8)) {
+ 				int ok = (gt_frame() == 0);
+ 
+@@ -735,6 +736,11 @@
+ 				miss = 0;
+ 				continue;
+ 			}
++			if (ruby_eint_deferred(gt.eint)) {
++				/* Wait should have returned the event. */
++				ruby_eint_service_done(gt.eint, 0, 0);
++				continue;
++			}
+ 			/* IRQ quiet but EINT shows an edge the parent
+ 			 * missed: fall back after three periods. */
+ 			if (ruby_eint_pending(gt.eint)) {

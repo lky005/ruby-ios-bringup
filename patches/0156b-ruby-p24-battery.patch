@@ -1,0 +1,93 @@
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -1,7 +1,8 @@
+ /*
+  * Built-in iOS battery bring-up service. Default: 100%, AC, not charging.
+- * rubybatt=1: read-only MT6360 I2C5 polling every 30 seconds (VBAT/CHG_STAT/
+- * FOD_STAT; no PMIC/charger/rail writes).  sweetbattery=1 (PM6150 SPMI) is
++ * rubybatt=1: read-only MT6360 I2C5 polling every 5 seconds (2 s after a
++ * charger/full state change; VBAT/CHG_STAT/FOD_STAT; no PMIC/charger/rail
++ * writes).  sweetbattery=1 (PM6150 SPMI) is
+  * intercepted on MT6877 so the Qualcomm arbiter is never touched.  SOC is an
+  * UNCALIBRATED voltage estimate; a failed read keeps the last valid sample.
+  */
+@@ -34,6 +35,8 @@
+ 	bool fLastExternal, fLastCharging, fLastFull;
+ 	unsigned fRubyFails;
+ 	int fLastMode;
++	uint32_t fNextPollMs;
++	bool fFullLatch;
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+ 	void publish(unsigned percent, unsigned mv, int ma, bool external,
+@@ -82,6 +85,8 @@
+ 		}
+ 	}
+ 	fLastMode = -1;
++	fNextPollMs = 5000;
++	fFullLatch = false;
+ 	return true;
+ }
+ 
+@@ -226,17 +231,27 @@
+ 			bool external = (s.fod_stat & 0x10u) != 0;
+ 			bool charging = chg == 1u;
+ 			bool full = chg == 2u;
++			bool changed = (external != fLastExternal) ||
++			    (charging != fLastCharging) || (full != fLastFull);
++			unsigned percent;
+ 
+ 			mv = (unsigned)(((uint64_t)s.ocv_code * 1250u) / 1000u);
+ 			if (mv >= 2800 && mv <= 4600) {
++				if (full)
++					fFullLatch = true;
++				else if (fFullLatch && mv < 4300)
++					fFullLatch = false;
++				percent = (full || (fFullLatch && mv >= 4300)) ?
++				    100 : estimatePercent(mv);
++				fNextPollMs = changed ? 2000 : 5000;
+ 				fLastOcv = s.ocv_code;
+ 				fLastExternal = external;
+ 				fLastCharging = charging;
+ 				fLastFull = full;
+ 				fHaveSample = true;
+ 				fRubyFails = 0;
+-				publish(full ? 100 : estimatePercent(mv), mv, 0,
+-				    external, external, charging, full, true, false);
++				publish(percent, mv, 0, external, external, charging,
++				    full, true, false);
+ 				return;
+ 			}
+ 		}
+@@ -245,9 +260,10 @@
+ 			if ((fRubyFails++ % 4u) == 0) {
+ 				IOLog("SWEET BATTERY: MT6360 read failed; holding last %umV\n", mv);
+ 			}
+-			publish(fLastFull ? 100 : estimatePercent(mv), mv, 0,
+-			    fLastExternal, fLastExternal, fLastCharging,
+-			    fLastFull, true, false);
++			fNextPollMs = 5000;
++			publish((fLastFull || (fFullLatch && mv >= 4300)) ?
++			    100 : estimatePercent(mv), mv, 0, fLastExternal,
++			    fLastExternal, fLastCharging, fLastFull, true, false);
+ 			return;
+ 		}
+ 		/* No valid MT6360 sample yet: never publish 0 V or a critical level. */
+@@ -300,7 +316,7 @@
+ 	SweetBattery *self = OSDynamicCast(SweetBattery, owner);
+ 	if (self && self->fRunning) {
+ 		self->poll();
+-		sender->setTimeoutMS(30000);
++		sender->setTimeoutMS(self->fRuby ? self->fNextPollMs : 30000);
+ 	}
+ }
+ 
+@@ -327,7 +343,7 @@
+ 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
+ 			fTimerAdded = true;
+ 			fRunning = true;
+-			fTimer->setTimeoutMS(30000);
++			fTimer->setTimeoutMS(fRuby ? 5000 : 30000);
+ 		} else {
+ 			fReal = false;
+ 			fRuby = false;

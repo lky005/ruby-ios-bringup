@@ -1,0 +1,883 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -110,6 +110,7 @@
+ bsd/dev/ruby_keys.c			standard
+ bsd/dev/ruby_hal.c			standard
+ bsd/dev/ruby_eint.c			standard
++bsd/dev/ruby_irq.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
+ bsd/dev/ruby_usb.c			standard
+--- a/bsd/dev/ruby_eint.c
++++ b/bsd/dev/ruby_eint.c
+@@ -63,6 +63,16 @@
+ static lck_spin_t g_eint_lock;
+ static volatile int g_eint_state; /* 0 uninit, 1 init, 2 ready, 3 failed */
+ static bool g_eint_enabled;
++static volatile uint32_t g_parent_owned;
++
++#define RUBY_EINT_LOCK() \
++	boolean_t _eint_irq = ml_set_interrupts_enabled(FALSE); \
++	lck_spin_lock(&g_eint_lock)
++#define RUBY_EINT_UNLOCK() \
++	do { \
++		lck_spin_unlock(&g_eint_lock); \
++		ml_set_interrupts_enabled(_eint_irq); \
++	} while (0)
+ 
+ static void
+ ruby_eint_gic_read(uint32_t *ctl, uint32_t *isen, uint32_t *pnd)
+@@ -154,16 +164,17 @@
+ 	bit = 1u << line;
+ 	ruby_eint_gic_read(&ctl, &isen, &pnd);
+ 	if (ctl == 0 || ctl == 0xffffffffu || isen == 0xffffffffu ||
+-	    (isen & RUBY_EINT_GIC_SPI256_BIT)) {
++	    ((isen & RUBY_EINT_GIC_SPI256_BIT) &&
++	    !__atomic_load_n(&g_parent_owned, __ATOMIC_ACQUIRE))) {
+ 		printf("RUBY EINT: line=%u refused gic ctlr=%08x isen=%08x pnd=%08x\n",
+ 		    line, ctl, isen, pnd);
+ 		return NULL;
+ 	}
+ 
+-	lck_spin_lock(&g_eint_lock);
++	RUBY_EINT_LOCK();
+ 	e = &g_eint_slots[line];
+ 	if (e->used) {
+-		lck_spin_unlock(&g_eint_lock);
++		RUBY_EINT_UNLOCK();
+ 		return NULL;
+ 	}
+ 	e->line = line;
+@@ -182,7 +193,7 @@
+ 	ruby_wr32(g_eint_base, RUBY_EINT_MASK_CLR, bit);
+ 	e->used = true;
+ 	mask = ruby_rd32(g_eint_base, RUBY_EINT_MASK);
+-	lck_spin_unlock(&g_eint_lock);
++	RUBY_EINT_UNLOCK();
+ 
+ 	printf("RUBY EINT: line=%u armed trigger=%u saved=%u/%u/%u mask=%08x\n",
+ 	    line, (unsigned)trig, saved_mask, saved_sens, saved_pol, mask);
+@@ -202,9 +213,9 @@
+ 		return;
+ 	bit = 1u << e->line;
+ 
+-	lck_spin_lock(&g_eint_lock);
++	RUBY_EINT_LOCK();
+ 	if (!e->used) {
+-		lck_spin_unlock(&g_eint_lock);
++		RUBY_EINT_UNLOCK();
+ 		return;
+ 	}
+ 	if (e->saved_mask & 1u)
+@@ -221,7 +232,7 @@
+ 		ruby_wr32(g_eint_base, RUBY_EINT_POL_CLR, bit);
+ 	ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
+ 	e->used = false;
+-	lck_spin_unlock(&g_eint_lock);
++	RUBY_EINT_UNLOCK();
+ 	printf("RUBY EINT: line=%u released\n", e->line);
+ }
+ 
+@@ -234,7 +245,7 @@
+ 	if (!e || e->line >= RUBY_EINT_LINES)
+ 		return 0;
+ 	bit = 1u << e->line;
+-	lck_spin_lock(&g_eint_lock);
++	RUBY_EINT_LOCK();
+ 	if (e->used) {
+ 		sta = ruby_rd32(g_eint_base, RUBY_EINT_STA);
+ 		if (sta & bit) {
+@@ -242,7 +253,7 @@
+ 			hit = 1;
+ 		}
+ 	}
+-	lck_spin_unlock(&g_eint_lock);
++	RUBY_EINT_UNLOCK();
+ 	return hit;
+ }
+ 
+@@ -254,12 +265,12 @@
+ 	if (!e || e->line >= RUBY_EINT_LINES)
+ 		return;
+ 	bit = 1u << e->line;
+-	lck_spin_lock(&g_eint_lock);
++	RUBY_EINT_LOCK();
+ 	if (e->used) {
+ 		ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
+ 		e->ack_count++;
+ 	}
+-	lck_spin_unlock(&g_eint_lock);
++	RUBY_EINT_UNLOCK();
+ }
+ 
+ int
+@@ -274,7 +285,8 @@
+ 	ruby_eint_gic_read(&ctl, &isen, &pnd);
+ 	if (ctl == 0 || ctl == 0xffffffffu || isen == 0xffffffffu)
+ 		return 0;
+-	return (isen & RUBY_EINT_GIC_SPI256_BIT) == 0;
++	return (isen & RUBY_EINT_GIC_SPI256_BIT) == 0 ||
++	    __atomic_load_n(&g_parent_owned, __ATOMIC_ACQUIRE) != 0;
+ }
+ 
+ int
+@@ -286,12 +298,12 @@
+ 	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
+ 	    !g_eint_base)
+ 		return ENODEV;
+-	lck_spin_lock(&g_eint_lock);
++	RUBY_EINT_LOCK();
+ 	out->sta = ruby_rd32(g_eint_base, RUBY_EINT_STA + port * 4u);
+ 	out->mask = ruby_rd32(g_eint_base, RUBY_EINT_MASK + port * 4u);
+ 	out->sens = ruby_rd32(g_eint_base, RUBY_EINT_SENS + port * 4u);
+ 	out->pol = ruby_rd32(g_eint_base, RUBY_EINT_POL + port * 4u);
+-	lck_spin_unlock(&g_eint_lock);
++	RUBY_EINT_UNLOCK();
+ 	return 0;
+ }
+ 
+@@ -311,7 +323,7 @@
+ 		printf("RUBY EINT: unavailable\n");
+ 		return;
+ 	}
+-	lck_spin_lock(&g_eint_lock);
++	RUBY_EINT_LOCK();
+ 	sta = ruby_rd32(g_eint_base, RUBY_EINT_STA);
+ 	mask = ruby_rd32(g_eint_base, RUBY_EINT_MASK);
+ 	sens = ruby_rd32(g_eint_base, RUBY_EINT_SENS);
+@@ -325,7 +337,7 @@
+ 		snap[n].ack = g_eint_slots[i].ack_count;
+ 		n++;
+ 	}
+-	lck_spin_unlock(&g_eint_lock);
++	RUBY_EINT_UNLOCK();
+ 	ruby_eint_gic_read(&ctl, &isen, &pnd);
+ 
+ 	printf("RUBY EINT: enabled=%d safe=%d raw sta=%08x mask=%08x sens=%08x pol=%08x\n",
+@@ -373,4 +385,93 @@
+ 	printf("RUBY EINT: selftest line=%u events=%u\n", line, events);
+ 	return 1;
+ }
++
++int
++ruby_eint_line_used(uint32_t line)
++{
++	int used;
++
++	if (line >= RUBY_EINT_LINES)
++		return 0;
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return 0;
++	RUBY_EINT_LOCK();
++	used = g_eint_slots[line].used;
++	RUBY_EINT_UNLOCK();
++	return used;
++}
++
++void
++ruby_eint_mask(uint32_t line)
++{
++	uint32_t bit;
++
++	if (line >= RUBY_EINT_LINES)
++		return;
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return;
++	bit = 1u << line;
++	RUBY_EINT_LOCK();
++	if (g_eint_slots[line].used)
++		ruby_wr32(g_eint_base, RUBY_EINT_MASK_SET, bit);
++	RUBY_EINT_UNLOCK();
++}
++
++void
++ruby_eint_unmask(uint32_t line)
++{
++	uint32_t bit;
++
++	if (line >= RUBY_EINT_LINES)
++		return;
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return;
++	bit = 1u << line;
++	RUBY_EINT_LOCK();
++	if (g_eint_slots[line].used)
++		ruby_wr32(g_eint_base, RUBY_EINT_MASK_CLR, bit);
++	RUBY_EINT_UNLOCK();
++}
++
++int
++ruby_eint_isr_handle(uint32_t line)
++{
++	uint32_t bit, sta;
++	int hit = 0;
++
++	if (line >= RUBY_EINT_LINES)
++		return 0;
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return 0;
++	bit = 1u << line;
++	/* Interrupt context: interrupts are already masked. */
++	lck_spin_lock(&g_eint_lock);
++	if (g_eint_slots[line].used) {
++		sta = ruby_rd32(g_eint_base, RUBY_EINT_STA);
++		if (sta & bit) {
++			ruby_wr32(g_eint_base, RUBY_EINT_MASK_SET, bit);
++			ruby_wr32(g_eint_base, RUBY_EINT_ACK, bit);
++			g_eint_slots[line].pending_count++;
++			g_eint_slots[line].ack_count++;
++			hit = 1;
++		}
++	}
++	lck_spin_unlock(&g_eint_lock);
++	return hit;
++}
++
++void
++ruby_eint_set_parent_owned(int owned)
++{
++	__atomic_store_n(&g_parent_owned, owned != 0 ? 1u : 0u,
++	    __ATOMIC_RELEASE);
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/ruby_eint.h
++++ b/bsd/dev/ruby_eint.h
+@@ -25,6 +25,11 @@
+ void ruby_eint_release(struct ruby_eint *e);
+ int ruby_eint_pending(struct ruby_eint *e);
+ void ruby_eint_ack(struct ruby_eint *e);
++void ruby_eint_mask(uint32_t line);
++void ruby_eint_unmask(uint32_t line);
++int ruby_eint_line_used(uint32_t line);
++int ruby_eint_isr_handle(uint32_t line);
++void ruby_eint_set_parent_owned(int owned);
+ int ruby_eint_safe(void);
+ int ruby_eint_read_port(uint32_t port, struct ruby_eint_port *out);
+ void ruby_eint_status(void);
+--- /dev/null
++++ b/bsd/dev/ruby_irq.c
+@@ -0,0 +1,443 @@
++/*
++ * Ruby (MT6877) GIC SPI288 / EINT threaded-interrupt glue.
++ *
++ * The kernel's GICv3 init and the generic SPI dispatch already exist in
++ * pexpert/arm/pe_fiq.c and osfmk/arm64/sleh.c.  This module only configures
++ * the EINT parent SPI and installs a handler for it.
++ *
++ * ruby_irq_status() is read-only.  ruby_irq_arm() is gated by rubyirq=1 and
++ * refuses to write anything unless the preflight proves the SPI is Group1NS,
++ * level, idle and owned by the touch EINT line.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/cpu_data.h>
++#include <kern/locks.h>
++#include <kern/sched_prim.h>
++#include <kern/thread.h>
++#include <IOKit/IOInterrupts.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <libkern/libkern.h>
++
++#include "ruby_eint.h"
++#include "ruby_irq.h"
++#include "ruby_hal.h"
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++
++#define RUBY_IRQ_GICD_PA      0x0c000000u
++#define RUBY_IRQ_GICD_SIZE    0x10000u
++#define RUBY_IRQ_TOUCH_LINE   14u
++#define RUBY_IRQ_PRIO         0xa0u
++#define RUBY_IRQ_WAIT_MS      100u
++
++#define GICD_CTLR             0x0000u
++#define GICD_TYPER            0x0004u
++#define GICD_IIDR             0x0008u
++#define GICD_IGROUPR9         0x00a4u
++#define GICD_ISENABLER9       0x0124u
++#define GICD_ICENABLER9       0x01a4u
++#define GICD_ISPENDR9         0x0224u
++#define GICD_ISACTIVER9       0x0324u
++#define GICD_IPRIORITY_288    0x0520u
++#define GICD_ICFGR_288        0x0c48u
++#define GICD_IROUTER_288      0x6900u
++
++#define GICD_CTLR_RWP         0x80000000u
++#define GICD_CTLR_ARE_NS      0x10u
++#define GICD_CTLR_GRP1NS      0x2u
++
++#define RUBY_IRQ_PF_NODEV     (1u << 0)
++#define RUBY_IRQ_PF_GROUP     (1u << 1)
++#define RUBY_IRQ_PF_CTLR      (1u << 2)
++#define RUBY_IRQ_PF_SRE       (1u << 3)
++#define RUBY_IRQ_PF_GRPEN     (1u << 4)
++#define RUBY_IRQ_PF_PMR       (1u << 5)
++#define RUBY_IRQ_PF_ENABLED   (1u << 6)
++#define RUBY_IRQ_PF_PENDING   (1u << 7)
++#define RUBY_IRQ_PF_ACTIVE    (1u << 8)
++#define RUBY_IRQ_PF_CFG       (1u << 9)
++#define RUBY_IRQ_PF_RWP       (1u << 10)
++#define RUBY_IRQ_PF_NOOWNER   (1u << 11)
++
++static vm_offset_t g_gicd;
++static lck_grp_t g_irq_lck_grp;
++static lck_spin_t g_irq_lock;
++static volatile int g_irq_state; /* 0 uninit, 1 init, 2 ready, 3 failed */
++static int g_irq_gate;
++
++static volatile uint32_t g_armed;
++static volatile uint32_t g_fatal;
++static volatile uint32_t g_event;
++static volatile uint32_t g_isr_count;
++static volatile uint32_t g_spurious_count;
++static volatile uint32_t g_event_count;
++static volatile uint32_t g_configured;
++
++static uint32_t g_saved_prio;
++static uint32_t g_saved_icfgr;
++static uint32_t g_saved_enable9;
++static uint64_t g_saved_router;
++
++static int g_irq_chan;
++
++static void
++ruby_irq_lock_raw(void)
++{
++	lck_spin_lock(&g_irq_lock);
++}
++
++static void
++ruby_irq_unlock_raw(void)
++{
++	lck_spin_unlock(&g_irq_lock);
++}
++
++static uint64_t
++ruby_rd64(uintptr_t base, uint32_t off)
++{
++	uint64_t v = *(volatile uint64_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++ruby_wr64(uintptr_t base, uint32_t off, uint64_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint64_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++ruby_irq_init(void)
++{
++	int expected = 0;
++	int v = 0;
++
++	if (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) == 2)
++		return;
++	if (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) == 3)
++		return;
++	if (!__atomic_compare_exchange_n(&g_irq_state, &expected, 1, false,
++	    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++		while (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) == 1)
++			delay(100);
++		return;
++	}
++
++	lck_grp_init(&g_irq_lck_grp, "ruby_irq", LCK_GRP_ATTR_NULL);
++	lck_spin_init(&g_irq_lock, &g_irq_lck_grp, LCK_ATTR_NULL);
++	g_gicd = ml_io_map(RUBY_IRQ_GICD_PA, RUBY_IRQ_GICD_SIZE);
++	if (PE_parse_boot_argn("rubyirq", &v, sizeof(v)))
++		g_irq_gate = v;
++
++	printf("RUBY IRQ: init gicd=%d gate=%d\n", g_gicd != 0, g_irq_gate);
++	__atomic_store_n(&g_irq_state, g_gicd ? 2 : 3, __ATOMIC_RELEASE);
++}
++
++int
++ruby_irq_armed(void)
++{
++	return __atomic_load_n(&g_armed, __ATOMIC_ACQUIRE) != 0;
++}
++
++static uint64_t
++ruby_irq_route(uint64_t mpidr)
++{
++	uint64_t aff0 = mpidr & 0xffu;
++	uint64_t aff1 = (mpidr >> 8) & 0xffu;
++	uint64_t aff2 = (mpidr >> 16) & 0xffu;
++	uint64_t aff3 = (mpidr >> 32) & 0xffu;
++
++	return (aff3 << 32) | (aff2 << 24) | (aff1 << 16) | aff0;
++}
++
++static int
++ruby_irq_rwp(void)
++{
++	int i;
++
++	for (i = 0; i < 1000; i++) {
++		if ((ruby_rd32(g_gicd, GICD_CTLR) & GICD_CTLR_RWP) == 0)
++			return 0;
++		delay(1);
++	}
++	return 1;
++}
++
++int
++ruby_irq_status(struct ruby_irq_status *out)
++{
++	if (!out)
++		return EINVAL;
++	memset(out, 0, sizeof(*out));
++	ruby_irq_init();
++	if (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) != 2 || !g_gicd)
++		return ENODEV;
++
++	out->gicd_ctlr = ruby_rd32(g_gicd, GICD_CTLR);
++	out->gicd_typer = ruby_rd32(g_gicd, GICD_TYPER);
++	out->gicd_iidr = ruby_rd32(g_gicd, GICD_IIDR);
++	out->group9 = ruby_rd32(g_gicd, GICD_IGROUPR9);
++	out->enable9 = ruby_rd32(g_gicd, GICD_ISENABLER9);
++	out->pending9 = ruby_rd32(g_gicd, GICD_ISPENDR9);
++	out->active9 = ruby_rd32(g_gicd, GICD_ISACTIVER9);
++	out->priority288 = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
++	out->icfgr = ruby_rd32(g_gicd, GICD_ICFGR_288);
++	out->router288 = ruby_rd64(g_gicd, GICD_IROUTER_288);
++	out->mpidr = __builtin_arm_rsr64("MPIDR_EL1");
++	out->icc_sre = __builtin_arm_rsr64("ICC_SRE_EL1");
++	if (out->icc_sre & 1u) {
++		out->icc_ctlr = __builtin_arm_rsr64("ICC_CTLR_EL1");
++		out->icc_pmr = __builtin_arm_rsr64("ICC_PMR_EL1");
++		out->icc_bpr1 = __builtin_arm_rsr64("ICC_BPR1_EL1");
++		out->icc_igrpen1 = __builtin_arm_rsr64("ICC_IGRPEN1_EL1");
++		out->icc_hppir1 = __builtin_arm_rsr64("ICC_HPPIR1_EL1");
++	}
++	out->armed = __atomic_load_n(&g_armed, __ATOMIC_ACQUIRE);
++	out->fatal = __atomic_load_n(&g_fatal, __ATOMIC_ACQUIRE);
++	out->isr_count = __atomic_load_n(&g_isr_count, __ATOMIC_ACQUIRE);
++	out->spurious_count = __atomic_load_n(&g_spurious_count, __ATOMIC_ACQUIRE);
++	out->event_count = __atomic_load_n(&g_event_count, __ATOMIC_ACQUIRE);
++	return 0;
++}
++
++static uint32_t
++ruby_irq_preflight(struct ruby_irq_status *st)
++{
++	uint32_t pf = 0;
++
++	if (ruby_irq_status(st) != 0)
++		return RUBY_IRQ_PF_NODEV;
++
++	if ((st->group9 & 1u) == 0)
++		pf |= RUBY_IRQ_PF_GROUP;
++	if ((st->gicd_ctlr & (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS)) !=
++	    (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS))
++		pf |= RUBY_IRQ_PF_CTLR;
++	if ((st->icc_sre & 1u) == 0)
++		pf |= RUBY_IRQ_PF_SRE;
++	if ((st->icc_igrpen1 & 1u) == 0)
++		pf |= RUBY_IRQ_PF_GRPEN;
++	if ((st->icc_pmr & 0xffu) <= RUBY_IRQ_PRIO)
++		pf |= RUBY_IRQ_PF_PMR;
++	if (st->enable9 & 1u)
++		pf |= RUBY_IRQ_PF_ENABLED;
++	if (st->pending9 & 1u)
++		pf |= RUBY_IRQ_PF_PENDING;
++	if (st->active9 & 1u)
++		pf |= RUBY_IRQ_PF_ACTIVE;
++	if (st->icfgr & 3u)
++		pf |= RUBY_IRQ_PF_CFG;
++	if (st->gicd_ctlr & GICD_CTLR_RWP)
++		pf |= RUBY_IRQ_PF_RWP;
++	if (!ruby_eint_line_used(RUBY_IRQ_TOUCH_LINE))
++		pf |= RUBY_IRQ_PF_NOOWNER;
++
++	printf("RUBY IRQ: preflight pf=%08x ctlr=%08x group9=%08x en9=%08x pnd9=%08x act9=%08x cfg=%08x pmr=%llx\n",
++	    pf, st->gicd_ctlr, st->group9, st->enable9, st->pending9,
++	    st->active9, st->icfgr & 3u,
++	    (unsigned long long)(st->icc_pmr & 0xffu));
++	if (pf & RUBY_IRQ_PF_GROUP)
++		printf("RUBY IRQ: INTID%u is Group0/secure; refusing\n",
++		    RUBY_IRQ_INTID);
++	if (pf & RUBY_IRQ_PF_ENABLED)
++		printf("RUBY IRQ: INTID%u already enabled; refusing\n",
++		    RUBY_IRQ_INTID);
++	if (pf & RUBY_IRQ_PF_PENDING)
++		printf("RUBY IRQ: INTID%u pending; refusing\n", RUBY_IRQ_INTID);
++	if (pf & RUBY_IRQ_PF_ACTIVE)
++		printf("RUBY IRQ: INTID%u active; refusing\n", RUBY_IRQ_INTID);
++	if (pf & RUBY_IRQ_PF_CFG)
++		printf("RUBY IRQ: INTID%u is not level; refusing\n",
++		    RUBY_IRQ_INTID);
++	if (pf & RUBY_IRQ_PF_NOOWNER)
++		printf("RUBY IRQ: touch does not own EINT%u; refusing\n",
++		    RUBY_IRQ_TOUCH_LINE);
++	return pf;
++}
++
++int
++ruby_irq_arm(void)
++{
++	struct ruby_irq_status st;
++	uint32_t pf, prio, cfg;
++	uint64_t mpidr, route;
++
++	ruby_irq_init();
++	if (g_irq_gate != 1) {
++		printf("RUBY IRQ: locked (rubyirq=1)\n");
++		return EPERM;
++	}
++	if (ruby_irq_armed()) {
++		printf("RUBY IRQ: already armed\n");
++		return EBUSY;
++	}
++	if (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) != 2)
++		return ENODEV;
++
++	pf = ruby_irq_preflight(&st);
++	if (pf != 0)
++		return EINVAL;
++
++	g_saved_enable9 = ruby_rd32(g_gicd, GICD_ISENABLER9);
++	g_saved_prio = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
++	g_saved_icfgr = ruby_rd32(g_gicd, GICD_ICFGR_288);
++	g_saved_router = ruby_rd64(g_gicd, GICD_IROUTER_288);
++	__atomic_store_n(&g_configured, 1, __ATOMIC_RELEASE);
++
++	disable_preemption();
++	ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL,
++	    ruby_irq_isr, NULL);
++	mpidr = __builtin_arm_rsr64("MPIDR_EL1");
++	enable_preemption();
++	route = ruby_irq_route(mpidr);
++
++	__atomic_store_n(&g_fatal, 0, __ATOMIC_RELEASE);
++	__atomic_store_n(&g_event, 0, __ATOMIC_RELEASE);
++	__atomic_store_n(&g_isr_count, 0, __ATOMIC_RELEASE);
++	__atomic_store_n(&g_spurious_count, 0, __ATOMIC_RELEASE);
++	__atomic_store_n(&g_event_count, 0, __ATOMIC_RELEASE);
++	/* The touch thread switches to the wait path before the SPI is on. */
++	__atomic_store_n(&g_armed, 1, __ATOMIC_RELEASE);
++
++	prio = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
++	ruby_wr32(g_gicd, GICD_IPRIORITY_288,
++	    (prio & ~0xffu) | RUBY_IRQ_PRIO);
++	cfg = ruby_rd32(g_gicd, GICD_ICFGR_288);
++	ruby_wr32(g_gicd, GICD_ICFGR_288, cfg & ~3u);
++	ruby_wr64(g_gicd, GICD_IROUTER_288, route);
++	ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
++
++	if (ruby_irq_rwp() != 0) {
++		printf("RUBY IRQ: RWP timeout after enable\n");
++		ruby_irq_disarm();
++		return ETIMEDOUT;
++	}
++	if ((ruby_rd32(g_gicd, GICD_ISENABLER9) & 1u) == 0) {
++		printf("RUBY IRQ: enable readback failed\n");
++		ruby_irq_disarm();
++		return EIO;
++	}
++
++	ruby_eint_set_parent_owned(1);
++	printf("RUBY IRQ: armed intid=%u mpidr=%016llx route=%016llx en9=%08x prio=%08x cfg=%08x\n",
++	    RUBY_IRQ_INTID, (unsigned long long)mpidr,
++	    (unsigned long long)route, ruby_rd32(g_gicd, GICD_ISENABLER9),
++	    ruby_rd32(g_gicd, GICD_IPRIORITY_288),
++	    ruby_rd32(g_gicd, GICD_ICFGR_288) & 3u);
++	return 0;
++}
++
++void
++ruby_irq_disarm(void)
++{
++	uint32_t was = __atomic_exchange_n(&g_armed, 0, __ATOMIC_ACQ_REL);
++	uint32_t configured = __atomic_exchange_n(&g_configured, 0,
++	    __ATOMIC_ACQ_REL);
++
++	if (configured && __atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) == 2 &&
++	    g_gicd) {
++		ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
++		(void)ruby_irq_rwp();
++		ruby_wr32(g_gicd, GICD_IPRIORITY_288, g_saved_prio);
++		ruby_wr32(g_gicd, GICD_ICFGR_288, g_saved_icfgr);
++		ruby_wr64(g_gicd, GICD_IROUTER_288, g_saved_router);
++		if (g_saved_enable9 & 1u)
++			ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
++		else
++			ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
++		(void)ruby_irq_rwp();
++		/*
++		 * ml_install_interrupt_handler() is per-CPU and arm/disarm
++		 * usually run from the same probe thread.  A stale handler on
++		 * another CPU is inert: it checks g_armed and the INTID before
++		 * touching anything.
++		 */
++		ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL, NULL, NULL);
++		ruby_eint_set_parent_owned(0);
++	}
++	ruby_eint_unmask(RUBY_IRQ_TOUCH_LINE);
++	wakeup(&g_irq_chan);
++	printf("RUBY IRQ: disarmed (was=%u)\n", was);
++}
++
++int
++ruby_irq_wait(unsigned ms)
++{
++	boolean_t intr;
++	uint64_t deadline = 0;
++	int ev;
++
++	if (__atomic_load_n(&g_irq_state, __ATOMIC_ACQUIRE) != 2)
++		return 0;
++	if (!ruby_irq_armed())
++		return 0;
++	if (ms == 0)
++		ms = RUBY_IRQ_WAIT_MS;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++
++	intr = ml_set_interrupts_enabled(FALSE);
++	lck_spin_lock(&g_irq_lock);
++	if (g_event) {
++		g_event = 0;
++		lck_spin_unlock(&g_irq_lock);
++		ml_set_interrupts_enabled(intr);
++		return 1;
++	}
++	assert_wait_deadline(&g_irq_chan, THREAD_UNINT, deadline);
++	lck_spin_unlock(&g_irq_lock);
++	ml_set_interrupts_enabled(intr);
++	thread_block(THREAD_CONTINUE_NULL);
++
++	lck_spin_lock(&g_irq_lock);
++	ev = g_event;
++	g_event = 0;
++	lck_spin_unlock(&g_irq_lock);
++	return ev;
++}
++
++void
++ruby_irq_isr(void *target, void *refCon, void *nub, int source)
++{
++	(void)target;
++	(void)refCon;
++	(void)nub;
++
++	if (source != (int)RUBY_IRQ_INTID) {
++		__atomic_add_fetch(&g_spurious_count, 1, __ATOMIC_RELAXED);
++		return;
++	}
++	if (!ruby_irq_armed())
++		return;
++
++	if (ruby_eint_isr_handle(RUBY_IRQ_TOUCH_LINE)) {
++		ruby_irq_lock_raw();
++		g_event = 1;
++		g_event_count++;
++		g_isr_count++;
++		ruby_irq_unlock_raw();
++		wakeup(&g_irq_chan);
++		return;
++	}
++
++	/*
++	 * The parent asserted but our line has no pending bit.  Fail closed:
++	 * disable the SPI and let the polling path recover.
++	 */
++	ruby_irq_lock_raw();
++	g_spurious_count++;
++	g_fatal = 1;
++	ruby_irq_unlock_raw();
++	ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
++	__atomic_store_n(&g_armed, 0, __ATOMIC_RELEASE);
++	wakeup(&g_irq_chan);
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- /dev/null
++++ b/bsd/dev/ruby_irq.h
+@@ -0,0 +1,41 @@
++#ifndef RUBY_IRQ_H
++#define RUBY_IRQ_H
++
++#include <stdint.h>
++
++/* GIC_SPI 256 -> INTID 288 (SPI numbers are INTIDs minus 32). */
++#define RUBY_IRQ_INTID 288u
++
++struct ruby_irq_status {
++	uint32_t gicd_ctlr;
++	uint32_t gicd_typer;
++	uint32_t gicd_iidr;
++	uint32_t group9;
++	uint32_t enable9;
++	uint32_t pending9;
++	uint32_t active9;
++	uint32_t priority288;
++	uint32_t icfgr;
++	uint64_t router288;
++	uint64_t mpidr;
++	uint64_t icc_sre;
++	uint64_t icc_ctlr;
++	uint64_t icc_pmr;
++	uint64_t icc_bpr1;
++	uint64_t icc_igrpen1;
++	uint64_t icc_hppir1;
++	uint32_t armed;
++	uint32_t fatal;
++	uint32_t isr_count;
++	uint32_t spurious_count;
++	uint32_t event_count;
++};
++
++int ruby_irq_status(struct ruby_irq_status *out);
++int ruby_irq_armed(void);
++int ruby_irq_arm(void);
++void ruby_irq_disarm(void);
++int ruby_irq_wait(unsigned ms);
++void ruby_irq_isr(void *target, void *refCon, void *nub, int source);
++
++#endif /* RUBY_IRQ_H */
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -26,6 +26,7 @@
+ #include "ruby_battery.h"
+ #include "ruby_hal.h"
+ #include "ruby_eint.h"
++#include "ruby_irq.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+@@ -1371,6 +1372,59 @@
+ 	printf("RUBY CMD: reboot bootloader (rubyreboot)\n");
+ 	printf("RUBY CMD: battery status\n");
+ 	printf("RUBY CMD: eint status | eint selftest <line> [ms] (rubyeint)\n");
++	printf("RUBY CMD: irq status|arm|disarm (rubyirq)\n");
++}
++
++static void
++pr_irq_print(const struct ruby_irq_status *st)
++{
++	printf("RUBY IRQ: armed=%u fatal=%u isr=%u spurious=%u events=%u\n",
++	    st->armed, st->fatal, st->isr_count, st->spurious_count,
++	    st->event_count);
++	printf("RUBY IRQ: gicd ctlr=%08x typer=%08x iidr=%08x\n",
++	    st->gicd_ctlr, st->gicd_typer, st->gicd_iidr);
++	printf("RUBY IRQ: intid%u group9=%08x en9=%08x pnd9=%08x act9=%08x\n",
++	    RUBY_IRQ_INTID, st->group9, st->enable9, st->pending9,
++	    st->active9);
++	printf("RUBY IRQ: prio288=%08x icfgr=%08x router288=%016llx mpidr=%016llx\n",
++	    st->priority288, st->icfgr, (unsigned long long)st->router288,
++	    (unsigned long long)st->mpidr);
++	printf("RUBY IRQ: icc sre=%llx ctlr=%llx pmr=%llx bpr1=%llx grpen1=%llx hppir1=%llx\n",
++	    (unsigned long long)st->icc_sre, (unsigned long long)st->icc_ctlr,
++	    (unsigned long long)st->icc_pmr, (unsigned long long)st->icc_bpr1,
++	    (unsigned long long)st->icc_igrpen1,
++	    (unsigned long long)st->icc_hppir1);
++}
++
++static int
++pr_cmd_irq(const char *p)
++{
++	struct ruby_irq_status st;
++
++	if (!strcmp(p, "status")) {
++		if (ruby_irq_status(&st) != 0) {
++			printf("RUBY IRQ: unavailable\n");
++			return 1;
++		}
++		pr_irq_print(&st);
++		return 1;
++	}
++	if (!strcmp(p, "arm")) {
++		int rc = ruby_irq_arm();
++
++		if (ruby_irq_status(&st) == 0)
++			pr_irq_print(&st);
++		printf("RUBY IRQ: arm rc=%d\n", rc);
++		return 1;
++	}
++	if (!strcmp(p, "disarm")) {
++		ruby_irq_disarm();
++		if (ruby_irq_status(&st) == 0)
++			pr_irq_print(&st);
++		return 1;
++	}
++	printf("RUBY CMD: err: irq status|arm|disarm\n");
++	return 1;
+ }
+ 
+ static int
+@@ -1664,6 +1718,10 @@
+ 		pr_cmd_battery();
+ 		return 1;
+ 	}
++	if (!strncmp(p, "irq ", 4))
++		return pr_cmd_irq(pr_skip(p + 4));
++	if (!strcmp(p, "irq"))
++		return pr_cmd_irq("");
+ 	if (!strncmp(p, "eint ", 5)) {
+ 		const char *q = pr_skip(p + 5);
+ 		uint32_t line = 14, ms = 3000;
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -22,6 +22,7 @@
+ #include <pexpert/pexpert.h>
+ #include "ruby_battery.h"
+ #include "ruby_eint.h"
++#include "ruby_irq.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t thread_terminate(thread_t);
+@@ -700,7 +701,27 @@
+ 	printf("SWEET GT: EINT14 %s\n",
+ 	    gt.eint ? "armed" : "unavailable; 8 ms polling");
+ 	for (;;) {
+-		bool ev = gt.eint && ruby_eint_pending(gt.eint);
++		bool ev;
++
++		if (ruby_irq_armed()) {
++			int irq_ev = ruby_irq_wait(100);
++
++			if (gt_frame() != 0) {
++				if (++bad >= 50) {
++					gt_release_all();
++					bad = 0;
++					ruby_eint_unmask(14);
++				}
++				if (irq_ev)
++					gt_wait(1);
++			} else {
++				bad = 0;
++				ruby_eint_unmask(14);
++			}
++			continue;
++		}
++
++		ev = gt.eint && ruby_eint_pending(gt.eint);
+ 
+ 		if (ev || idle >= 8) {
+ 			if (gt_frame() != 0) {
+@@ -726,6 +747,8 @@
+ 	}
+ 
+ out:
++	if (ruby_irq_armed())
++		ruby_irq_disarm();
+ 	ruby_eint_release(gt.eint);
+ 	gt.eint = NULL;
+ 	printf("SWEET GT: stopped\n");

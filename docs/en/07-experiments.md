@@ -28,6 +28,8 @@ wrong turns.
 | 11-01 | Enumeration | 0145 widens the attach window from 4 s to 12 s and raises the attempt budget | the host configures the device on the first try |
 | 11-01 | Board probe | 0144 read-only probe commands over the USB console | 17 of 19 commands returned board data; the two pwrap reads stay empty |
 | 11-02 | P1/P2/P3 line | 0146a-0155: probe/pwrap, keys/reboot, battery, touch re-enable; 0155 shares the I2C5 lock | 0155 device PASS: touch, keys, battery `external=1`; 19/19; 8/8 I2C5 |
+| 11-03/11-04 | IRQ demux / SPI3 | 0159-0168: EINT demux, deferred service, SPI3 touch; IRQ/waitq heavy-UI panics -> polling default | polling stable; IRQ root cause open |
+| 11-05/11-06 | Native IRQ line | 0175-0179: RubyGIC + KPD, EINT B1, parent, child oneshot, retry/soft reset | 0179 G1–G6; 10 min + ~5 min stress; no panic/stuck/re-activation; G7/G8 cancelled |
 
 ## Failure catalogue
 

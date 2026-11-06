@@ -1,0 +1,263 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 31dfebc..b9158cf 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/ruby_keys.c			standard
++bsd/dev/ruby_hal.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
+ bsd/dev/ruby_usb.c			standard
+diff --git a/bsd/dev/ruby_hal.c b/bsd/dev/ruby_hal.c
+new file mode 100644
+index 0000000..1c6a3af
+--- /dev/null
++++ b/bsd/dev/ruby_hal.c
+@@ -0,0 +1,102 @@
++/*
++ * Shared Ruby HAL primitives: MMIO access and the PMIF read path.
++ *
++ * Read-only users (keys, probe snapshots) get the same order/barrier
++ * semantics as the drivers they replace.  This file does not touch rails,
++ * PMIC regulators, clock gates or the WDT.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++
++#include "ruby_hal.h"
++
++#define RUBY_PWRAP_ACC     0x0880u
++#define RUBY_PWRAP_RDATA   0x0894u
++#define RUBY_PWRAP_VLDCLR  0x08a4u
++#define RUBY_PWRAP_STA     0x08a8u
++
++#define RUBY_SWINF_FSM(v)  (((v) >> 1) & 7u)
++#define RUBY_SWINF_IDLE    0u
++#define RUBY_SWINF_VLDCLR  6u
++#define RUBY_SWINF_INIT    (1u << 15)
++
++uint32_t
++ruby_rd32(uintptr_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++void
++ruby_wr32(uintptr_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++uint16_t
++ruby_rd16(uintptr_t base, uint32_t off)
++{
++	uint16_t v = *(volatile uint16_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++uint32_t
++ruby_mask(uint32_t width)
++{
++	return (1u << width) - 1u;
++}
++
++uint32_t
++ruby_field_get(uintptr_t base, uint32_t off, uint32_t shift, uint32_t width)
++{
++	return (ruby_rd32(base, off) >> shift) & ruby_mask(width);
++}
++
++void
++ruby_field_set(uintptr_t base, uint32_t off, uint32_t shift, uint32_t width,
++    uint32_t val)
++{
++	uint32_t mask = ruby_mask(width) << shift;
++	uint32_t v = ruby_rd32(base, off);
++
++	v = (v & ~mask) | ((val & ruby_mask(width)) << shift);
++	ruby_wr32(base, off, v);
++}
++
++int
++ruby_pwrap_read(uintptr_t pwrap, uint16_t reg, uint16_t *val)
++{
++	uint32_t sta, rd, i;
++
++	if (pwrap == 0 || val == NULL)
++		return EINVAL;
++	sta = ruby_rd32(pwrap, RUBY_PWRAP_STA);
++	if (!(sta & RUBY_SWINF_INIT))
++		return ENODEV;
++	for (i = 0; i < 10000; i++) {
++		if (RUBY_SWINF_FSM(ruby_rd32(pwrap, RUBY_PWRAP_STA)) ==
++		    RUBY_SWINF_IDLE)
++			break;
++	}
++	if (i == 10000)
++		return ETIMEDOUT;
++	ruby_wr32(pwrap, RUBY_PWRAP_ACC, reg);
++	for (i = 0; i < 10000; i++) {
++		if (RUBY_SWINF_FSM(ruby_rd32(pwrap, RUBY_PWRAP_STA)) ==
++		    RUBY_SWINF_VLDCLR)
++			break;
++	}
++	if (i == 10000)
++		return ETIMEDOUT;
++	rd = ruby_rd32(pwrap, RUBY_PWRAP_RDATA);
++	*val = (uint16_t)(rd & 0xffffu);
++	ruby_wr32(pwrap, RUBY_PWRAP_VLDCLR, 1);
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ruby_hal.h b/bsd/dev/ruby_hal.h
+new file mode 100644
+index 0000000..4eb8c0a
+--- /dev/null
++++ b/bsd/dev/ruby_hal.h
+@@ -0,0 +1,16 @@
++#ifndef RUBY_HAL_H
++#define RUBY_HAL_H
++
++#include <stdint.h>
++
++uint32_t ruby_rd32(uintptr_t base, uint32_t off);
++void ruby_wr32(uintptr_t base, uint32_t off, uint32_t val);
++uint16_t ruby_rd16(uintptr_t base, uint32_t off);
++uint32_t ruby_mask(uint32_t width);
++uint32_t ruby_field_get(uintptr_t base, uint32_t off, uint32_t shift,
++    uint32_t width);
++void ruby_field_set(uintptr_t base, uint32_t off, uint32_t shift,
++    uint32_t width, uint32_t val);
++int ruby_pwrap_read(uintptr_t pwrap, uint16_t reg, uint16_t *val);
++
++#endif /* RUBY_HAL_H */
+diff --git a/bsd/dev/ruby_keys.c b/bsd/dev/ruby_keys.c
+index 05af506..fe9f7aa 100644
+--- a/bsd/dev/ruby_keys.c
++++ b/bsd/dev/ruby_keys.c
+@@ -23,6 +23,8 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ 
++#include "ruby_hal.h"
++
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
+ extern void thread_deallocate(thread_t);
+@@ -34,15 +36,6 @@ void ruby_keys_init(void);
+ 
+ #define RK_PWRAP_PA      0x10026000u
+ #define RK_PWRAP_SIZE    0x1000u
+-#define RK_PWRAP_ACC     0x0880u
+-#define RK_PWRAP_RDATA   0x0894u
+-#define RK_PWRAP_VLDCLR  0x08a4u
+-#define RK_PWRAP_STA     0x08a8u
+-
+-#define RK_SWINF_FSM(v)  (((v) >> 1) & 7u)
+-#define RK_SWINF_IDLE    0u
+-#define RK_SWINF_VLDCLR  6u
+-#define RK_SWINF_INIT    (1u << 15)
+ 
+ #define RK_MT6359_TOPSTATUS  0x002au
+ #define RK_TOP_PWRKEY_DEB    (1u << 1)
+@@ -71,63 +64,6 @@ static bool rk_started;
+ static int rk_sleep_chan;
+ static unsigned rk_errors;
+ 
+-static inline uint32_t
+-rk_rd32(vm_offset_t base, uint32_t off)
+-{
+-	uint32_t v = *(volatile uint32_t *)(base + off);
+-	__asm__ volatile("dmb oshld" ::: "memory");
+-	return v;
+-}
+-
+-static inline uint16_t
+-rk_rd16(vm_offset_t base, uint32_t off)
+-{
+-	uint16_t v = *(volatile uint16_t *)(base + off);
+-	__asm__ volatile("dmb oshld" ::: "memory");
+-	return v;
+-}
+-
+-static inline void
+-rk_wr32(vm_offset_t base, uint32_t off, uint32_t v)
+-{
+-	__asm__ volatile("dmb oshst" ::: "memory");
+-	*(volatile uint32_t *)(base + off) = v;
+-	__asm__ volatile("dsb osh" ::: "memory");
+-}
+-
+-static bool
+-rk_pwrap_wait(uint32_t fsm)
+-{
+-	uint32_t i;
+-
+-	for (i = 0; i < 10000; i++) {
+-		if (RK_SWINF_FSM(rk_rd32(rk_pwrap, RK_PWRAP_STA)) == fsm)
+-			return true;
+-	}
+-	return false;
+-}
+-
+-static bool
+-rk_pmic_read(uint16_t reg, uint16_t *val)
+-{
+-	uint32_t sta, rd;
+-
+-	if (!rk_pwrap)
+-		return false;
+-	sta = rk_rd32(rk_pwrap, RK_PWRAP_STA);
+-	if (!(sta & RK_SWINF_INIT))
+-		return false;
+-	if (!rk_pwrap_wait(RK_SWINF_IDLE))
+-		return false;
+-	rk_wr32(rk_pwrap, RK_PWRAP_ACC, reg);
+-	if (!rk_pwrap_wait(RK_SWINF_VLDCLR))
+-		return false;
+-	rd = rk_rd32(rk_pwrap, RK_PWRAP_RDATA);
+-	*val = (uint16_t)(rd & 0xffffu);
+-	rk_wr32(rk_pwrap, RK_PWRAP_VLDCLR, 1);
+-	return true;
+-}
+-
+ static void
+ rk_report(struct rk_key *key, bool down, uint16_t mem1, uint16_t top)
+ {
+@@ -146,11 +82,12 @@ rk_thread(void *arg, wait_result_t result)
+ 
+ 	for (;;) {
+ 		uint16_t mem1 = 0xffffu, top = 0xffffu;
+-		bool pmic_ok = rk_pmic_read(RK_MT6359_TOPSTATUS, &top);
++		bool pmic_ok =
++		    ruby_pwrap_read(rk_pwrap, RK_MT6359_TOPSTATUS, &top) == 0;
+ 		bool now[3];
+ 
+ 		if (rk_kpd)
+-			mem1 = rk_rd16(rk_kpd, RK_KPD_MEM1);
++			mem1 = ruby_rd16(rk_kpd, RK_KPD_MEM1);
+ 		now[0] = pmic_ok ? !(top & RK_TOP_PWRKEY_DEB) : rk_keys[0].down;
+ 		now[1] = pmic_ok ? !(top & RK_TOP_HOMEKEY_DEB) : rk_keys[1].down;
+ 		now[2] = rk_kpd && !(mem1 & 1u);
+@@ -193,10 +130,10 @@ ruby_keys_init(void)
+ 		printf("RUBY KEYS: MMIO mapping failed\n");
+ 		return;
+ 	}
+-	pmic_ok = rk_pmic_read(RK_MT6359_TOPSTATUS, &top);
++	pmic_ok = ruby_pwrap_read(rk_pwrap, RK_MT6359_TOPSTATUS, &top) == 0;
+ 	printf("RUBY KEYS: start kpd=%d pwrap=%d top-ok=%d top=%04x mem1=%04x\n",
+ 	    rk_kpd != 0, rk_pwrap != 0, pmic_ok, top,
+-	    rk_kpd ? rk_rd16(rk_kpd, RK_KPD_MEM1) : 0xffffu);
++	    rk_kpd ? ruby_rd16(rk_kpd, RK_KPD_MEM1) : 0xffffu);
+ 	if (kernel_thread_start(rk_thread, NULL, &thread) == KERN_SUCCESS)
+ 		thread_deallocate(thread);
+ 	else

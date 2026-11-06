@@ -2,7 +2,7 @@
 
 **English** · [中文](README.zh.md)
 
-[![xnu-0155](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![xnu-0179](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
 [![tag v0.4.0](https://img.shields.io/badge/tag-v0.4.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.4.0)
 
@@ -10,12 +10,13 @@
 A research bring-up, packaged as an independent, sanitized delta.
 
 > [!IMPORTANT]
-> **Status 2026-11-02 — 0155 line.** `main e81510f`, `v0.4.0`; patchset
-> `da13b6df…` (151 files), exec-data `2e98fd85…`, image `3b44c0e2…`;
-> `boot_a` 0155. Works: UFS root, display, real GT9916R touch, volume/power
-> keys, battery read-only (4311 mV, external=1/full=1), USB probe.
-> Limits: P2.4 battery UI 30 s lag (100→98), Type-C read-only, no USB host/
-> audio/Wi-Fi/BT/camera/GPU/RTC/sleep; software fastboot/combo parked.
+> **Status 2026-11-06 — 0179 line.** `main` merge pending (M2), `v0.5.0`
+> planned; patchset `10b1e2e8…` (175 files), exec-data `a4fb021e…`, image
+> `d438ba47…`; `boot_a` 0179. Works: UFS root, display, native EINT14 touch
+> (child controller + oneshot WorkLoop), volume/power keys, battery read-only,
+> USB probe/hotplug. Limits: G7/G8 and the full 10 min repeat were not run by
+> decision; no ESD timer; Type-C read-only; no USB host/audio/Wi-Fi/BT/camera/
+> GPU/RTC/sleep; software fastboot/combo parked.
 > See [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [docs](docs/README.md).
 
 ## Start here
@@ -46,11 +47,11 @@ before building.
 | CPU | 6× Cortex-A55, 16K pages, GICv3, timers |
 | Display | IOSurface/IOMFB → LK framebuffer, 1080×2400 |
 | Userland | launchd → lsd → backboardd → SpringBoard |
-| Input | **real Goodix GT9916R** over bit-bang SPI3; unlock, two-contact HID dispatch, edge; volume/power keys via HID; 0084 synthetic swipe still available |
+| Input | **real Goodix GT9916R** over SPI3; 0179 drives it from EINT14 through a child EINT controller and a dedicated IOWorkLoop oneshot (command/diagnostic path on `IOCommandGate`); unlock, multi-contact HID dispatch, edge; volume/power keys via HID; 0084 synthetic swipe still available |
 | Power | MT6360 battery/charger read-only: 4311 mV, `external=1/full=1`; Type-C read-only; no charger control/OTG |
 | Storage | UFS LUN 2, read/write HFS+ on `iosroot`; 4 MB HFS rescue root via the LK ramdisk slot |
-| Latest runs (separate) | 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot (harness and main-CI rebuild); 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
-| Open | P2.4 battery UI latency (30 s poll; 100→98 on unplug); P3 target (USB host, audio, sensors); second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
+| Latest runs (separate) | 2026-11-06 0179 (P2b native EINT touch; G1–G6; 10 min + 5 min stress; no panic); 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot; 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
+| Open | P2b G7/G8 and a full 10 min repeat were not run; no ESD health timer; P2.4 battery UI latency (30 s poll; 100→98 on unplug); P3 target (USB host, audio, sensors); second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
 | Not yet | Wi-Fi, Bluetooth, cellular, audio, camera, GPU, RTC; USB host/OTG; sleep/wake; charger control; Type-C role |
 | Safety | AMFI/sandbox/code signing off; data may be lost |
 
@@ -70,10 +71,10 @@ evidence and the wrong turns.
 | `ACKNOWLEDGEMENTS.md`, `LEGAL.md` | credits and legal risk notice |
 | `docs/en/`, `docs/zh/` | English and Chinese chapters |
 | `touch/` | probe ladder, hardware contract and sanitized lab notes |
-| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0155 USB/probe/keys/battery/touch, 0140/0141 ramdisk; historical 0081-0084 |
+| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0179 USB/probe/keys/battery/touch/native IRQ, 0140/0141 ramdisk; historical 0081-0084 |
 | `ci/` | baseline manifest/recipe, canonical patchset hash, kernel segment hash and provenance |
-| `config/` | 0155 current line (0143/0144 history); 0085 real-touch and 0084 as history |
-| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash; workflow name `xnu-0155` |
+| `config/` | 0179 current line (0156-0179); 0155 and earlier as history |
+| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash; workflow name `xnu-0179` |
 | `src/bringup/` | early boot payloads, shim, image packers |
 | `src/ufs-probe/` | read-only MT6877 UFS probe |
 | `tools/image/` | ICL patch, dyld scanner, boot verifier |
@@ -119,7 +120,7 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: da13b6df... (main, 151 files; historical 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
+patchset: 10b1e2e8... (current line, 175 files; historical da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -131,20 +132,21 @@ the canonical patchset hash matches. See `docs/en/11-ci-baseline.md`. The boot i
 
 Host pipeline (no device, no root): `scripts/test-pipeline.sh` with a base boot
 image, kernel, ADT, shim and the golden 0084 image (the 0084/0085 historical
-harness; the current 0155 path uses the three commands in
-`docs/en/09-reproduce.md` with `config/0155.env`). It builds the payload, packs
+harness; the current 0179 path uses the three commands in
+`docs/en/09-reproduce.md` with `config/0179.env`). It builds the payload, packs
 a deterministic image and checks the layout.
 
 ## Current line & verification
 
 | Pin | Value |
 |---|---|
-| Patchset | `da13b6df…` (151 files) |
-| Kernel | full `491f2373…`, exec-data `2e98fd85…` |
-| Image | `3b44c0e2…` (`x16-0155-a00dd751.img`, payload `a00dd751…`) |
-| CI | `xnu-0155` `41362698995`; host-checks `41362698921` |
-| Tags | `v0.4.0` → `e81510f`; `p3-touch-0155-final` → `44824e2` |
-| `boot_a` | 0155 |
+| Patchset | `10b1e2e8…` (175 files) |
+| Kernel | full `2b008e52…`, exec-data `a4fb021e…` |
+| Image | `d438ba47…` (`x16-0179-touch-retry.img`, payload `72fc737c…`) |
+| CI | `xnu-0179` `42114854911`; gate rerun `42115985782`; host-checks `42115991259` |
+| Tags | `v0.5.0` → M2 (pending); `p2b-native-touch-2026-11-06` → `f6c5795`; historical `v0.4.0` → `e81510f` |
+| `boot_a` | 0179 |
+| Device evidence | G1–G6; first 10 min + ~5 min stress; 8-failure soft reset (`no-ack` boundary); no panic |
 | Evidence | [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [GUARANTEE](GUARANTEE.md) |
 
 ## Device situation
@@ -154,8 +156,8 @@ a deterministic image and checks the layout.
 | Device | Redmi Note 12 Pro 5G, `ruby` / MT6877, 8 GB + 256 GB |
 | System | Android 12 / MIUI 13.0.4, unlocked, Magisk, slot `_a` |
 | Layout | `userdata` 208.4 GiB + `iosroot` 17 GiB; `boot_a` 128 MiB; `super` ~9.1 GB |
-| Current state | 0155 image/kernel; 0085/0084 history; root A/A' snapshots, ICL blocks, boot cmdline; the device is not part of this repository |
-| Success artifacts | 0155 image, kernel, root A/A' snapshots, ICL blocks, boot cmdline |
+| Current state | 0179 image/kernel; 0155 and 0085/0084 history; root A/A' snapshots, ICL blocks, boot cmdline; the device is not part of this repository |
+| Success artifacts | 0179 image, kernel, root A/A' snapshots, ICL blocks, boot cmdline |
 | Must match | firmware/GPT, root hash, boot image, boot args, panel/display |
 | Not needed | touch firmware, Wi-Fi/BT, audio, camera/GPU, RTC |
 
@@ -185,13 +187,14 @@ they can fingerprint the unit. Artifact hashes are in `config/0085.env`. See
 
 ## Guarantee
 
-The success path — boot to the lock screen, real GT9916R touch, keys and
-battery read-back (0155) — has **one-unit device evidence** (B+NOP first boot
--> A', the CI kernel boot and the 0155 device run) plus the documented recipe.
-It is not a second-unit or clean-room guarantee. Pre-boot artifact hashes are
-fixed for the named files; post-boot live-root/ring/log hashes are volatile.
-The from-IPSW root/shim/ADT builders and the strict pinned payload rebuild are
-still open. See [`GUARANTEE.md`](GUARANTEE.md).
+The success path — boot to the lock screen, native EINT14 touch, keys and
+battery read-back (0179) — has **one-unit device evidence** (B+NOP first boot
+-> A', the CI kernel boot, the 0155 run and the 0179 P2b line) plus the
+documented recipe. It is not a second-unit or clean-room guarantee; G7/G8 and
+a full 10 min repeat were not run. Pre-boot artifact hashes are fixed for the
+named files; post-boot live-root/ring/log hashes are volatile. The from-IPSW
+root/shim/ADT builders and the strict pinned payload rebuild are still open.
+See [`GUARANTEE.md`](GUARANTEE.md).
 
 ## Docs
 

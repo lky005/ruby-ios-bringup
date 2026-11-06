@@ -1,0 +1,122 @@
+--- a/bsd/dev/ruby_eint.c
++++ b/bsd/dev/ruby_eint.c
+@@ -37,6 +37,9 @@
+ #define RUBY_EINT_POL        0x300u
+ #define RUBY_EINT_POL_SET    0x340u
+ #define RUBY_EINT_POL_CLR    0x380u
++/* Per-32-line IRQ output gate to the chained GIC parent (vendor init
++ * writes all ones). */
++#define RUBY_EINT_DOM_EN     0x400u
+ 
+ #define RUBY_EINT_GICD_CTLR  0x000u
+ /* GIC_SPI 256 is SPI 256 -> INTID 288 -> ISENABLER[9] bit 0. */
+@@ -273,6 +276,35 @@
+ 	RUBY_EINT_UNLOCK();
+ }
+ 
++uint32_t
++ruby_eint_dom_read(uint32_t port)
++{
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base || port >= RUBY_EINT_PORTS)
++		return 0;
++	return ruby_rd32(g_eint_base, RUBY_EINT_DOM_EN + port * 4u);
++}
++
++void
++ruby_eint_dom_set(uint32_t line, int enable)
++{
++	uint32_t bit, off, val;
++
++	if (line >= RUBY_EINT_LINES)
++		return;
++	ruby_eint_init();
++	if (__atomic_load_n(&g_eint_state, __ATOMIC_ACQUIRE) != 2 ||
++	    !g_eint_base)
++		return;
++	bit = 1u << (line & 31u);
++	off = RUBY_EINT_DOM_EN + (line >> 5) * 4u;
++	RUBY_EINT_LOCK();
++	val = ruby_rd32(g_eint_base, off);
++	val = enable ? (val | bit) : (val & ~bit);
++	ruby_wr32(g_eint_base, off, val);
++	RUBY_EINT_UNLOCK();
++}
++
+ int
+ ruby_eint_safe(void)
+ {
+@@ -315,6 +347,7 @@
+ 	} snap[RUBY_EINT_LINES];
+ 	uint32_t ctl, isen, pnd;
+ 	uint32_t sta, mask, sens, pol;
++	uint32_t dom;
+ 	uint32_t i, n = 0;
+ 
+ 	ruby_eint_init();
+@@ -338,10 +371,12 @@
+ 		n++;
+ 	}
+ 	RUBY_EINT_UNLOCK();
++	dom = ruby_eint_dom_read(0);
+ 	ruby_eint_gic_read(&ctl, &isen, &pnd);
+ 
+ 	printf("RUBY EINT: enabled=%d safe=%d raw sta=%08x mask=%08x sens=%08x pol=%08x\n",
+ 	    g_eint_enabled, ruby_eint_safe(), sta, mask, sens, pol);
++	printf("RUBY EINT: dom0=%08x\n", dom);
+ 	printf("RUBY EINT: gic ctlr=%08x isen=%08x pnd=%08x spi256=%u\n",
+ 	    ctl, isen, pnd,
+ 	    (isen & RUBY_EINT_GIC_SPI256_BIT) != 0);
+--- a/bsd/dev/ruby_eint.h
++++ b/bsd/dev/ruby_eint.h
+@@ -32,6 +32,8 @@
+ void ruby_eint_set_parent_owned(int owned);
+ int ruby_eint_safe(void);
+ int ruby_eint_read_port(uint32_t port, struct ruby_eint_port *out);
++uint32_t ruby_eint_dom_read(uint32_t port);
++void ruby_eint_dom_set(uint32_t line, int enable);
+ void ruby_eint_status(void);
+ int ruby_eint_selftest(uint32_t line, uint32_t ms);
+ 
+--- a/bsd/dev/ruby_irq.c
++++ b/bsd/dev/ruby_irq.c
+@@ -228,6 +228,7 @@
+ 	smc_rc = ruby_irq_smc_dump(RUBY_IRQ_INTID, &smc);
+ 	if (smc_rc >= 0) {
+ 		out->smc_valid = 1;
++		out->smc_raw = smc;
+ 		out->smc_enable = (uint32_t)(smc & 1u);
+ 		out->smc_group = (uint32_t)((smc >> 1) & 1u);
+ 		out->smc_prio = (uint32_t)((smc >> 2) & 0xffu);
+@@ -386,6 +387,10 @@
+ 		return EIO;
+ 	}
+ 
++	printf("RUBY IRQ: eint dom0=%08x line%u\n",
++	    ruby_eint_dom_read(0), RUBY_IRQ_TOUCH_LINE);
++	ruby_eint_dom_set(RUBY_IRQ_TOUCH_LINE, 1);
++	printf("RUBY IRQ: eint dom0 armed=%08x\n", ruby_eint_dom_read(0));
+ 	ruby_eint_set_parent_owned(1);
+ 	printf("RUBY IRQ: armed intid=%u mpidr=%016llx route=%016llx en9=%08x smc_group=%d prio=%08x cfg=%08x\n",
+ 	    RUBY_IRQ_INTID, (unsigned long long)mpidr,
+@@ -423,6 +428,9 @@
+ 		 */
+ 		ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL, NULL, NULL);
+ 		ruby_eint_set_parent_owned(0);
++		ruby_eint_dom_set(RUBY_IRQ_TOUCH_LINE, 0);
++		printf("RUBY IRQ: eint dom0 disarmed=%08x\n",
++		    ruby_eint_dom_read(0));
+ 	}
+ 	ruby_eint_unmask(RUBY_IRQ_TOUCH_LINE);
+ 	wakeup(&g_irq_chan);
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -716,6 +716,8 @@
+ 					gt_wait(1);
+ 			} else {
+ 				bad = 0;
++				if (!irq_ev && gt.eint)
++					ruby_eint_ack(gt.eint);
+ 				ruby_eint_unmask(14);
+ 			}
+ 			continue;

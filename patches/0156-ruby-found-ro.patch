@@ -1,0 +1,227 @@
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -35,6 +35,10 @@
+ #define PR_IFRAO_PA      0x10001000u
+ #define PR_IMP_S_PA      0x11d04000u
+ #define PR_IMP_N_PA      0x11f01000u
++#define PR_I2C5_PA       0x11d00000u
++#define PR_I2C6_PA       0x11f00000u
++#define PR_SPI3_PA       0x11013000u
++#define PR_SCP_PA        0x10006000u
+ 
+ #define PR_GPIO_SIZE     0x1000u
+ #define PR_REG_SIZE      0x1000u
+@@ -94,6 +98,32 @@
+ 
+ #define PR_I2C_BUDGET    4000u   /* 5 us phases: about 20 ms per transaction */
+ 
++/*
++ * R0 read-only map.  These offsets are taken from the vendor drivers:
++ * i2c-mtk.h (CONTROL/TIMING/HS/CLOCK_DIV only; never DATA_PORT or FIFO),
++ * spi-mt65xx.c (CFG/STATUS only; never TX/RX DATA), mtk-eint.h (STAT read;
++ * ACK is a write to +0x040), and clk-mt6877-pg.c (MT6877 SPM status words).
++ * The WDT count/feed registers are deliberately absent.
++ */
++#define PR_I2C_CTRL      0x10u
++#define PR_I2C_TIMING    0x20u
++#define PR_I2C_HS        0x48u
++#define PR_I2C_CLKDIV    0x70u
++#define PR_SPI_CFG0      0x00u
++#define PR_SPI_CFG1      0x04u
++#define PR_SPI_CFG2      0x28u
++#define PR_SPI_STA0      0x1cu
++#define PR_SPI_STA1      0x20u
++#define PR_EINT_STA      0x000u
++#define PR_EINT_MASK     0x080u
++#define PR_EINT_SENS     0x140u
++#define PR_EINT_POL      0x300u
++#define PR_SPM_PWR_STA   0x0ef0u
++#define PR_SPM_PWR_STA2  0x0ef4u
++#define PR_SPM_XPU_STA   0x0ef8u
++#define PR_SPM_XPU_STA2  0x0efcu
++#define PR_SPM_OTHER_STA 0x0178u
++
+ struct pr_i2c_bus {
+ 	uint8_t  bus;
+ 	uint32_t dir_off, do_off, di_off;
+@@ -126,6 +156,7 @@
+ struct pr_state {
+ 	vm_offset_t gpio, pwrap, kpd, eint, wdt;
+ 	vm_offset_t ifrao, imp_s, imp_n;
++	vm_offset_t i2c5, i2c6, spi3, scpsys;
+ 	vm_offset_t iocfg[8];
+ 	struct pr_i2c_bus i2c[2];
+ 	bool ready;
+@@ -158,7 +189,7 @@
+ static bool pr_snap_trunc;
+ 
+ #define PR_LINE(...) do { \
+-	if (pr_snap_lines < 80) { \
++	if (pr_snap_lines < 160) { \
+ 		printf(__VA_ARGS__); \
+ 		pr_snap_lines++; \
+ 	} else { \
+@@ -1400,6 +1431,110 @@
+ 	}
+ }
+ 
++/*
++ * R0 read-only foundation snapshot.  No writes: EINT ACK (+0x040) is never
++ * touched; I2C DATA_PORT/FIFO and SPI TX/RX DATA are never touched; pwrap
++ * uses only the known-safe PMIC read path; WDT is excluded.
++ */
++static void
++pr_snap_eint(void)
++{
++	uint32_t i;
++
++	if (!pr.eint) {
++		PR_LINE("RUBY SNAP: eint not mapped\n");
++		return;
++	}
++	for (i = 0; i < 7; i++)
++		PR_LINE("RUBY SNAP: eint%u sta=%08x mask=%08x sens=%08x pol=%08x\n",
++		    i, pr_rd32(pr.eint, PR_EINT_STA + i * 4),
++		    pr_rd32(pr.eint, PR_EINT_MASK + i * 4),
++		    pr_rd32(pr.eint, PR_EINT_SENS + i * 4),
++		    pr_rd32(pr.eint, PR_EINT_POL + i * 4));
++}
++
++static void
++pr_snap_i2c_ctrl(void)
++{
++	uint32_t i;
++	vm_offset_t base;
++
++	for (i = 0; i < 2; i++) {
++		base = i == 0 ? pr.i2c5 : pr.i2c6;
++		if (!base)
++			continue;
++		PR_LINE("RUBY SNAP: i2c%u ctrl=%04x timing=%04x hs=%04x clkdiv=%04x\n",
++		    5 + i, pr_rd16(base, PR_I2C_CTRL),
++		    pr_rd16(base, PR_I2C_TIMING), pr_rd16(base, PR_I2C_HS),
++		    pr_rd16(base, PR_I2C_CLKDIV));
++	}
++}
++
++static void
++pr_snap_spi_ctrl(void)
++{
++	if (!pr.spi3) {
++		PR_LINE("RUBY SNAP: spi3 not mapped\n");
++		return;
++	}
++	PR_LINE("RUBY SNAP: spi3 cfg0=%08x cfg1=%08x cfg2=%08x sta0=%08x sta1=%08x\n",
++	    pr_rd32(pr.spi3, PR_SPI_CFG0), pr_rd32(pr.spi3, PR_SPI_CFG1),
++	    pr_rd32(pr.spi3, PR_SPI_CFG2), pr_rd32(pr.spi3, PR_SPI_STA0),
++	    pr_rd32(pr.spi3, PR_SPI_STA1));
++}
++
++static void
++pr_snap_scpsys(void)
++{
++	if (!pr.scpsys) {
++		PR_LINE("RUBY SNAP: scpsys not mapped\n");
++		return;
++	}
++	PR_LINE("RUBY SNAP: scpsys pwr=%08x pwr2=%08x xpu=%08x xpu2=%08x other=%08x\n",
++	    pr_rd32(pr.scpsys, PR_SPM_PWR_STA),
++	    pr_rd32(pr.scpsys, PR_SPM_PWR_STA2),
++	    pr_rd32(pr.scpsys, PR_SPM_XPU_STA),
++	    pr_rd32(pr.scpsys, PR_SPM_XPU_STA2),
++	    pr_rd32(pr.scpsys, PR_SPM_OTHER_STA));
++}
++
++static void
++pr_snap_pmic_safe(void)
++{
++	uint16_t w;
++	int err;
++
++	if (pr_pwrap_check() != 0) {
++		PR_LINE("RUBY SNAP: pwrap not ready\n");
++		return;
++	}
++	if ((err = pr_pwrap_read(PR_PMIC_HWCID, &w)) == 0)
++		PR_LINE("RUBY SNAP: MT6359 HWCID=0x%04x\n", w);
++	if ((err = pr_pwrap_read(PR_PMIC_TOPSTATUS, &w)) == 0)
++		PR_LINE("RUBY SNAP: MT6359 TOPSTATUS=0x%04x\n", w);
++	if ((err = pr_pwrap_read(PR_PMIC_PWRKEY, &w)) == 0)
++		PR_LINE("RUBY SNAP: MT6359 PWRKEY=0x%04x\n", w);
++}
++
++static void
++pr_snap_found(void)
++{
++	PR_LINE("RUBY SNAP: -- clk --\n");
++	pr_snap_clk();
++	PR_LINE("RUBY SNAP: -- gpio --\n");
++	pr_snap_gpio();
++	PR_LINE("RUBY SNAP: -- eint --\n");
++	pr_snap_eint();
++	PR_LINE("RUBY SNAP: -- i2c ctrl --\n");
++	pr_snap_i2c_ctrl();
++	PR_LINE("RUBY SNAP: -- spi ctrl --\n");
++	pr_snap_spi_ctrl();
++	PR_LINE("RUBY SNAP: -- scpsys --\n");
++	pr_snap_scpsys();
++	PR_LINE("RUBY SNAP: -- pmic safe --\n");
++	pr_snap_pmic_safe();
++}
++
+ static void
+ pr_snap_iocfg(void)
+ {
+@@ -1454,6 +1589,8 @@
+ 		pr_snap_iocfg();
+ 	} else if (!strcmp(sec, "wdt")) {
+ 		pr_snap_wdt();
++	} else if (!strcmp(sec, "found")) {
++		pr_snap_found();
+ 	} else if (!strcmp(sec, "all")) {
+ 		PR_LINE("RUBY SNAP: -- pmic --\n");
+ 		pr_snap_pmic();
+@@ -1547,7 +1684,7 @@
+ 	printf("RUBY CMD: i2c <5|6> take|line|scan|recover|release|r <addr> <reg> <len>|smb <addr> <reg>\n");
+ 	printf("RUBY CMD: gpio <pin> | clk <gate> [bit] sta | kpd | keyscan\n");
+ 	printf("RUBY CMD: key watch [ms] (read-only transition log)\n");
+-	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|all]\n");
++	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|found|all]\n");
+ 	printf("RUBY CMD: reboot bootloader (rubyreboot)\n");
+ 	printf("RUBY CMD: battery status\n");
+ }
+@@ -1784,11 +1921,12 @@
+ 		sec[n++] = *q++;
+ 	sec[n] = '\0';
+ 	if (*pr_skip(q) != '\0') {
+-		printf("RUBY CMD: err: snap [pmic|gpio|clk|iocfg|wdt|all]\n");
++		printf("RUBY CMD: err: snap [pmic|gpio|clk|iocfg|wdt|found|all]\n");
+ 		return 1;
+ 	}
+ 	if (strcmp(sec, "pmic") && strcmp(sec, "gpio") && strcmp(sec, "clk") &&
+-	    strcmp(sec, "iocfg") && strcmp(sec, "wdt") && strcmp(sec, "all")) {
++	    strcmp(sec, "iocfg") && strcmp(sec, "wdt") && strcmp(sec, "found") &&
++	    strcmp(sec, "all")) {
+ 		printf("RUBY CMD: err: snap section %s\n", sec);
+ 		return 1;
+ 	}
+@@ -1959,6 +2097,10 @@
+ 	pr.ifrao = ml_io_map(PR_IFRAO_PA, PR_REG_SIZE);
+ 	pr.imp_s = ml_io_map(PR_IMP_S_PA, PR_REG_SIZE);
+ 	pr.imp_n = ml_io_map(PR_IMP_N_PA, PR_REG_SIZE);
++	pr.i2c5 = ml_io_map(PR_I2C5_PA, PR_REG_SIZE);
++	pr.i2c6 = ml_io_map(PR_I2C6_PA, PR_REG_SIZE);
++	pr.spi3 = ml_io_map(PR_SPI3_PA, PR_REG_SIZE);
++	pr.scpsys = ml_io_map(PR_SCP_PA, PR_REG_SIZE);
+ 	for (i = 0; i < 8; i++)
+ 		pr.iocfg[i] = ml_io_map(pr_iocfg_pa[i], PR_REG_SIZE);
+ 
+@@ -1970,6 +2112,8 @@
+ 	    pr.iocfg[4] != 0, pr.iocfg[7] != 0,
+ 	    pr.probe_writes, pr.pmic_writes, pr.wrap_init_allowed,
+ 	    pr.reboot_allowed);
++	printf("RUBY PROBE: R0 map i2c5=%d i2c6=%d spi3=%d scpsys=%d\n",
++	    pr.i2c5 != 0, pr.i2c6 != 0, pr.spi3 != 0, pr.scpsys != 0);
+ 	return pr.ready ? 0 : ENODEV;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

@@ -75,7 +75,15 @@ fi
 TOOL="$BASE_DIR/tools/mkpayload.py"
 [ -f "$TOOL" ] || { echo "missing upstream tool: $TOOL" >&2; exit 5; }
 
-"$PYTHON" "$TOOL" "$KERNEL" "$ADT" "$OUT" --cmdline "$(cat "$CMDLINE")"
+CMDLINE_TEXT=$(cat "$CMDLINE")
+# The SWEETXNU payload header stores 608 bytes including the NUL.
+CMDLINE_LEN=$(printf '%s' "$CMDLINE_TEXT" | wc -c | tr -d ' ')
+if [ "$CMDLINE_LEN" -gt 607 ]; then
+    echo "cmdline too long: $CMDLINE_LEN bytes (max 607)" >&2
+    exit 3
+fi
+
+"$PYTHON" "$TOOL" "$KERNEL" "$ADT" "$OUT" --cmdline "$CMDLINE_TEXT"
 
 HASH=$(hash_file "$OUT")
 echo "payload: $OUT"

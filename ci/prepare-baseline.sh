@@ -143,6 +143,30 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0152b-ruby-reboot-psci.patch" \
     "$ROOT/patches/0154-ruby-battery.patch" \
     "$ROOT/patches/0155-ruby-i2c5-share.patch" \
+    "$ROOT/patches/0156-ruby-found-ro.patch" \
+    "$ROOT/patches/0156b-ruby-p24-battery.patch" \
+    "$ROOT/patches/0157-ruby-hal.patch" \
+    "$ROOT/patches/0158-ruby-i2c-hal.patch" \
+    "$ROOT/patches/0159-ruby-eint-touch.patch" \
+    "$ROOT/patches/0160-ruby-eint.patch" \
+    "$ROOT/patches/0161-ruby-irq.patch" \
+    "$ROOT/patches/0162-ruby-irq-adjudicate.patch" \
+    "$ROOT/patches/0163-ruby-irq-enable.patch" \
+    "$ROOT/patches/0164-ruby-eint-dom.patch" \
+    "$ROOT/patches/0165-ruby-eint-demux.patch" \
+    "$ROOT/patches/0166-ruby-eint-deferred.patch" \
+    "$ROOT/patches/0167-ruby-gt-diag.patch" \
+    "$ROOT/patches/0168-ruby-spi3-touch.patch" \
+    "$ROOT/patches/0169-ruby-kpd-irq.patch" \
+    "$ROOT/patches/0171-ruby-usb-hotplug.patch" \
+    "$ROOT/patches/0172-ruby-usb-hotplug-diag.patch" \
+    "$ROOT/patches/0173-ruby-usb-hotplug-ext.patch" \
+    "$ROOT/patches/0174-ruby-usb-assist.patch" \
+    "$ROOT/patches/0175-ruby-gic-kpd.patch" \
+    "$ROOT/patches/0176-ruby-eint-b1.patch" \
+    "$ROOT/patches/0177-ruby-eint-native-parent.patch" \
+    "$ROOT/patches/0178-ruby-eint-child-oneshot.patch" \
+    "$ROOT/patches/0179-ruby-eint-retry.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
@@ -163,6 +187,16 @@ done
 git -C "$DEST" apply --whitespace=nowarn "$ROOT/ci/baseline-changes.patch"
 
 "$PYTHON" "$ROOT/ci/normalize_lf.py" "$DEST/xnu/patches"
+
+# Reject malformed diffs here.  The upstream build applies patches with GNU
+# patch and can otherwise skip a corrupt file without failing (0170 did).
+for p in "$DEST"/xnu/patches/*.patch; do
+    if ! git -C "$DEST" apply --stat "xnu/patches/$(basename "$p")" \
+        >/dev/null 2>&1; then
+        echo "prepare-baseline: malformed patch: $(basename "$p")" >&2
+        exit 6
+    fi
+done
 actual_hash=$("$PYTHON" "$ROOT/ci/patchset_hash.py" "$DEST/xnu/patches")
 echo "patchset: $actual_hash"
 

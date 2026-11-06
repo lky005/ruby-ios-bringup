@@ -51,16 +51,20 @@ order.
 | `0152-ruby-reboot.patch` | current (parked) | `bsd/dev/ruby_probe.c` | TOPRGU/NONRST2 + WDT SWRST reset trigger |
 | `0152b-ruby-reboot-psci.patch` | current (parked) | `bsd/dev/ruby_probe.c` | PSCI `SYSTEM_RESET` reset trigger |
 | `0154-ruby-battery.patch` | current | `bsd/dev/ruby_battery.c`, `ruby_battery.h`, `iokit/Kernel/arm/SweetBattery.cpp`, `bsd/dev/ruby_probe.c` | MT6360 read-only battery/charger backend, I2C5 IOLock, last-valid fallback |
-| `0155-ruby-i2c5-share.patch` | current | `bsd/dev/ruby_battery.c/h`, `bsd/dev/sweet_goodix_spi.c` | shared I2C5 arbiter; Goodix LDO section holds the lock; touch re-enabled |
+| `0155-ruby-i2c5-share.patch` | historical | `bsd/dev/ruby_battery.c/h`, `bsd/dev/sweet_goodix_spi.c` | shared I2C5 arbiter; Goodix LDO section holds the lock; touch re-enabled |
+| `0156-0179` (current line, 24 files) | current | `bsd/dev/`, `iokit/Kernel/arm/` | 0156/0156b foundation/battery; 0157/0158 HAL/I2C; 0159-0167 EINT/IRQ/demux/diagnostics; 0168 SPI3 touch; 0169 KPD IRQ; 0171-0174 USB hotplug; 0175 RubyGIC/KPD; 0176 EINT B1; 0177 native EINT parent; 0178 child oneshot; 0179 retry/soft reset |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
 topaz `sweet_usb.c` DWC3 driver. `0144` adds the read-only board probe behind
 the same USB command channel; `sweetgt=0` lets it own I2C5 for the run. `0145`
 only widens the attach window; it changes no command, write or clock path.
-`0146a`-`0155` form the 2026-11-02 line: EP0 command channel, pwrap init,
-keys, reboot triggers, MT6360 battery and the shared I2C5 lock that
-re-enables touch. `0084` is the previous synthetic-swipe milestone and is not
+`0146a`-`0155` formed the historical 2026-11-02 line: EP0 command channel,
+pwrap init, keys, reboot triggers, MT6360 battery and the shared I2C5 lock
+that re-enables touch. `0156`-`0179` form the current 2026-11-06 line: the
+shared HAL/I2C work, USB hotplug/assist, RubyGIC + KPD, the EINT parent/child
+controllers and the oneshot touch service (0178), then the retry/soft-reset
+fix (0179). `0084` is the previous synthetic-swipe milestone and is not
 required when real touch is enabled. `0081`-`0083` are kept as evidence of the
 path; `0082`/`0083` were superseded by the ICL NOP bypass. Applying a
 historical patch is not required for a new build.

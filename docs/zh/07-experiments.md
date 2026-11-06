@@ -23,11 +23,12 @@
 | 10-21 | ICL NOP | 4 字节 `bl`→`nop` | boot22 锁屏 58 秒 |
 | 10-21 | 合成上滑 | 0084 内核定时器 | boot23 热重启从 Apple logo 起 22 秒，桌面，动画 |
 | 10-22 | 真实触摸 | 0085 Goodix SPI bit-bang、LDO VOUT 1.8/3.3 V | 真实底边上滑解锁、双指 contact 分发、edge |
-
 | 11-01 | 工具链 | 构建迁到托管 `macos-15` 镜像 + Xcode 16.0；源码不变 | CI 绿；接口编译步骤仍正常生成 |
 | 11-01 | 枚举 | 0145 把 attach 窗口从 4 s 放宽到 12 s，并提高尝试预算 | 主机第一次尝试就完成配置 |
 | 11-01 | 板级探针 | 0144 的只读探针命令走 USB 控制台 | 19 条里 17 条返回板级数据；两条 pwrap 读数仍为空 |
 | 11-02 | P1/P2/P3 线 | 0146a-0155：探针/pwrap、按键/复位、电池、触摸接回；0155 共用 I2C5 锁 | 0155 真机 PASS：触摸、按键、电池 `external=1`；19/19；8/8 I2C5 |
+| 11-03/11-04 | IRQ demux / SPI3 | 0159-0168：EINT demux、deferred 服务、SPI3 触摸；IRQ/waitq 重度 UI panic -> 默认 polling | polling 稳定；IRQ 根因未闭环 |
+| 11-05/11-06 | 原生 IRQ 线 | 0175-0179：RubyGIC + KPD、EINT B1、parent、child oneshot、retry/soft reset | 0179 G1–G6；10 min + 约 5 min 压测；无 panic/STUCK/重激活；G7/G8 取消 |
 
 ## 失败目录
 

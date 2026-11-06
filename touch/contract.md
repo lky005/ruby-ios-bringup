@@ -202,8 +202,9 @@ P3 默认 `raw/10`。
   head/point checksum 通过后调用 `sweet_hid_touch(id, 1, raw/10, raw/10)`；
 - `bsd/conf/files` 一行；`bsd/dev/sweet_ufs.c` 增加 extern 和
   `sweet_goodix_spi_init()` 调用（`sweetgt=0` 可关闭）；
-- 第一版限制：≤2 指、无 IRQ/ESD/固件下载；PMIC 只写 LDO3/LDO2
-  EN+VOUT，不动 UFS/显示/其他 PMIC 位。
+- 第一版（0085）限制：≤2 指、无 IRQ/ESD/固件下载；PMIC 只写 LDO3/LDO2
+  EN+VOUT，不动 UFS/显示/其他 PMIC 位。0179 已改用 EINT14 oneshot
+  （1–5 指帧），ESD timer 与固件下载仍未实现。
 
 本地校验：`git apply --check` 通过；用桩内核头文件做
 `clang -fsyntax-only` 通过。CI 构建用固定 harness 仓库的 `ruby` 分支，

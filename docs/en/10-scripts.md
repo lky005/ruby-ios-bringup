@@ -34,7 +34,7 @@ because a simpler path silently failed.
 | `tools/image/boot_layout.py` | compare rebuilt vs golden layout | read-only | tested |
 | `scripts/test-pipeline.sh` | payload → pack → layout (0084 milestone) | temp writes | passes for 0084; 0085 uses the commands in `09-reproduce` |
 | `tools/host/ruby_usb_host.py` | USB host session manager (`status`/`cmd`/`watch`); EP0 read-only, one EP2 OUT command line, optional one-shot `pnputil` restart | host-only; a wedged device can drop | 0143/0150/0151 runs; see [`12-usb-host`](12-usb-host.md) |
-| `config/0140.env`, `config/0131b.env`, `config/0142.env`, `config/0143.env`, `config/0144.env`, `config/0155.env` | branch pins and boot cmdlines; 0086 files are historical | data | run/pin checked |
+| `config/0140.env`, `config/0131b.env`, `config/0142.env`, `config/0143.env`, `config/0144.env`, `config/0155.env`, `config/0179.env` | branch pins and boot cmdlines; 0086 files are historical | data | run/pin checked |
 | `config/0085.env`, `0085-boot.cmdline` | provenance (real touch) | data | run/pin checked |
 | `config/0084.env`, `0084-boot.cmdline` | previous milestone (synthetic swipe) | data | historical |
 

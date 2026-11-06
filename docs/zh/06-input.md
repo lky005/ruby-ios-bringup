@@ -2,11 +2,36 @@
 
 [English](../en/06-input.md) · **中文**
 
-0085 内核通过 GPIO bit-bang SPI3 驱动真实的 Goodix GT9916R；0084 的合成
-上滑保留为回退路径和 HID 链路证明。完整的硬件/协议手册见
-[touch-goodix-9916r.md](touch-goodix-9916r.md)。
+当前 0179 线由 EINT14 硬件边沿经子 EINT controller + 专用 IOWorkLoop
+oneshot 驱动真实的 Goodix GT9916R；0085 的 bit-bang/轮询路径保留在下方
+作为历史；0084 的合成上滑仍是回退路径和 HID 链路证明。完整的硬件/协议
+手册见 [touch-goodix-9916r.md](touch-goodix-9916r.md)。
 
-## 真实触摸（0085）
+## 原生 IRQ 触摸（0175–0179）
+
+```text
+EINT14（下降沿）
+  -> EINT 子 controller（vector = line）
+       -> 专用 IOWorkLoop 上的子 IOInterruptEventSource
+            -> gt_service_frame()：SPI3 读帧 + HID 提交
+            -> service_done()：MASK_CLR + ACTIVE，重开引脚
+```
+
+- SPI288 父线是 level，注册为 RubyGIC INTID 288；filter 只做 mask/ACK/
+  计数并 raise line 14，不睡眠、不做 SPI/HID。
+- 子 action 在 work loop 执行，不在 CPU 中断；命令/诊断在同一
+  `IOCommandGate` 串行；没有 `gt_thread`，也没有第二个 SPI3 消费者。
+- 脏帧/读帧失败只丢帧并无条件重开线，不会因一次错误进入 STUCK/
+  POLL_ONLY；连续 8 次失败做一次 SPI FIFO 复位 + 芯片软握手。注入下观察
+  到 `soft reset no-ack`（注入器在 8 连败边界残留 1–2 帧失败），`ok`
+  路径未证。
+- 无 ESD timer：静默卡低且无新边沿时只能重启。
+- 证据：G1–G6；首次 10 min `isr 2381→6004`、`ok=5997`、`fail=7`；约
+  5 min 压测 `isr 8672→13282`、`ok=12866`、`fail +9`；1–5 指帧；无
+  panic/STUCK/`line=14 active` 重激活。G7（0177 回退）和 G8（USB
+  re-plug）按决定取消。
+
+## 真实触摸（0085，历史）
 
 ```
 内核线程（100 Hz 轮询）
@@ -32,8 +57,9 @@
 实机证据：`SWEET GT: BERLIN/9916R ready, 1080x2400`；206 down / 206 up，
 40 条 finger-1、84 条 edge；真实底边上滑解锁成功。两指同时按下时
 `SweetHIDTouch::touch()` 会把两个 finger 都 append 到同一个 digitizer
-collection；用户态 pinch 未单独加日志验证。限制：轮询、无 IRQ/ESD、
-最多两指、不做固件/config 下载。
+collection；用户态 pinch 未单独加日志验证。0085 限制：轮询、无 IRQ/ESD、
+最多两指、不做固件/config 下载。0179 线把轮询换成 EINT14（见上）；当前
+runs 已记录 1–5 指帧并达到 1–5 指 HID。
 
 ## HID 链路
 
@@ -46,9 +72,10 @@ SweetHIDTouch::touch()
 真实驱动和合成定时器共用这个入口。`touch()` 期望面板像素
 （0..1079 × 0..2399），所以喂 `raw/10`。
 
-## 按键（0150）
+## 按键（0150 轮询；0169/0175 IRQ）
 
-0150 驱动轮询 MTK KPD 和 MT6359 `TOPSTATUS`：
+0150 驱动轮询 MTK KPD 和 MT6359 `TOPSTATUS`（保留为历史；0169 增加音量下
+KPD IRQ，0175 迁到 RubyGIC INTID 138）：
 
 - 音量下：KPD `KP_MEM1` bit0（0 = 按下）；
 - 电源：`TOPSTATUS 0x2a` bit1；音量上：bit3（低有效、消抖）；
@@ -58,7 +85,9 @@ SweetHIDTouch::touch()
 - 音量下+电源组合 parked；长按电源、音量上+电源可用。
 
 0155 的触摸 LDO 段与电池/probe 共用 I2C5 IOLock；`sweetgt=1` 重新启用
-0085 驱动。P2 测试镜像使用 `sweetgt=0`。
+0085 驱动。0179 runs 使用 IRQ 路径（`rubyeint=1`、`rubyeintb1=1`、
+`rubykpdirq=1`），并在 G4/G6 覆盖音量下键（G4 19 down/20 up；G6
+43/43）。P2 诊断镜像在注明处使用 `sweetgt=0`。
 
 ## 边缘位
 

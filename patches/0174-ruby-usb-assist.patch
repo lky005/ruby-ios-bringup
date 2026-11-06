@@ -1,0 +1,76 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -269,6 +269,7 @@
+  * on the connect event.
+  */
+ static volatile uint32_t ruby_ms;
++static volatile uint32_t ruby_enum_assist_until;
+ static void ruby_ep2_config(vm_offset_t mac);
+ static void ruby_ep2_push_log(vm_offset_t mac);
+ 
+@@ -1164,7 +1165,29 @@
+     (void)arg;
+     (void)wr;
+     for (;;) {
+-        ruby_ep0_service(ruby_mac_base, 0);
++        uint32_t now = ruby_ms;
++        int assist = ruby_enum_assist_until != 0 &&
++            now < ruby_enum_assist_until;
++
++        /*
++         * A runtime reattach happens after the boot window, where EP0 is
++         * serviced at 1 ms.  Run the boot-window 100 us cadence for a
++         * bounded time so the host's descriptor/address sequence does
++         * not lose the DATAEND race.
++         */
++        if (assist && ruby_cfg_seen &&
++            ruby_enum_assist_until > now + 200)
++            ruby_enum_assist_until = now + 200;
++        assist = ruby_enum_assist_until != 0 &&
++            now < ruby_enum_assist_until;
++        if (assist) {
++            for (uint32_t i = 0; i < 10; i++) {
++                ruby_ep0_service(ruby_mac_base, 0);
++                delay(100);
++            }
++        } else {
++            ruby_ep0_service(ruby_mac_base, 0);
++        }
+         ruby_cmd_tick(ruby_mac_base);
+         ruby_usb_attach_poll(ruby_mac_base, ruby_ippc_base);
+         ruby_usb_heartbeat(ruby_mac_base, ruby_ippc_base);
+@@ -1172,7 +1195,8 @@
+         ruby_ep2_push_log(ruby_mac_base);
+         ruby_ep2_rx_poll(ruby_mac_base);
+         ruby_ms++;
+-        delay(1000);
++        if (!assist)
++            delay(1000);
+     }
+ }
+ 
+@@ -2937,7 +2961,9 @@
+      * a new connect.  Reuse the 0116 boot-window sequence at runtime.
+      */
+     ruby_usb_reattach(mac, ruby_phy_base);
++    ruby_enum_assist_until = ruby_ms + 15000;
+     ruby_trace(0, RUBY_TR_STATE, 9, v, attaches, 0);
++    printf("RUBY USB: t=%u fast EP0 assist 15 s\n", ruby_ms);
+     printf("RUBY USB: t=%u VBUS attached (ext=1 seq=%u), device re-attached "
+         "(otg=%08x pm=%08x misc=%08x acr3=%08x)\n", ruby_ms, seq,
+         ruby_rd32(ippc, IPPC_OTG_STS_OFF),
+@@ -2967,10 +2993,12 @@
+     primed = 1;
+     next_ms = ruby_ms + 5000;
+     printf("RUBY USB HB: t=%u otg=%08x mac2=%08x acr3=%08x "
+-        "dmon1=%08x batt_seq=%u ext=%d\n", ruby_ms, otg, mac2,
++        "dmon1=%08x batt_seq=%u ext=%d setups=%u cfg=%u busreset=%u "
++        "assist=%u\n", ruby_ms, otg, mac2,
+         ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_ACR3) : 0,
+         ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_DMON1) : 0,
+-        seq, ext);
++        seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
++        ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
+     last_otg = otg;
+     last_mac2 = mac2;
+     last_ext = ext;

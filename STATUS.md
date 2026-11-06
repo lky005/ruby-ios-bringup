@@ -1,6 +1,6 @@
 # Status
 
-As of **2026-11-02**. This is a snapshot of verified results, not a live device
+As of **2026-11-06**. This is a snapshot of verified results, not a live device
 status. No phone is attached to this repository or to its CI.
 
 ## Verified
@@ -14,6 +14,7 @@ status. No phone is attached to this repository or to its CI.
 | Display | IOSurface/IOMFB to LK framebuffer; 1080x2400 | surface markers and live UI |
 | HID path | `SweetHIDTouch -> IOHIDEventService -> backboardd -> SpringBoard` | synthetic autoswipe + real touch reach SpringBoard |
 | Real touch | Goodix GT9916R/BerlinD over bit-bang SPI3; bottom-edge unlock, two-contact HID dispatch, edge events | 0085 boot 2026-10-22; `SWEET GT` init log, 206 down/206 up and 40 finger-1 kernel records; user-visible pinch not separately instrumented; see `docs/en/touch-goodix-9916r.md` |
+| Native touch IRQ | EINT14 edge → EINT child controller → dedicated IOWorkLoop oneshot → SPI3/HID → `service_done` re-arm; `gt_thread` removed; commands/diagnostics on `IOCommandGate`; 1–5-finger HID frames | 0179 device run 2026-11-06; G1–G6; first 10 min `isr 2381→6004`, `ok=5997`, `fail=7`; ~5 min stress `isr 8672→13282`, `ok=12866`, `fail +9`; no panic/stuck/re-activation |
 | Patch checks | 0084/0083/0081 apply to the pre-0084 build tree; 0080/0082 are already applied; 0085 applies after 0084 and built successfully | host-side `git apply --check`; CI run `39694456200` |
 | ICL tool | original block -> patched block reproduces `4a489542...` | host-side round-trip, 2026-10-21 |
 | Host pipeline | payload `50701e81...`; deterministic rebuild `a0ce0fe1...`; layout PASS vs 0084 | host-only, 2026-10-21; no root/phone |
@@ -27,6 +28,19 @@ The ICL blocks, boot images, root images and logs are **not** in this
 repository. Only their hashes and conclusions are recorded. Pre-boot image
 hashes are fixed for the named files; post-boot root/ring/log hashes are
 volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
+
+## 2026-11-06 state
+
+| Item | Result | Evidence |
+|---|---|---|
+| Current line | 0156-0179: P2 keys/USB hotplug/battery (0156-0174), P2 IRQ (0175), native EINT parent/child oneshot (0176-0179) | patchset `10b1e2e8...` (175 files); `config/0179.env` |
+| Kernel | full `2b008e52...`, exec-data `a4fb021e...`; CI `42114854911`; gate rerun `42115985782`; host-checks `42115991259` success | `config/0179.env`; workflow `xnu-0179` |
+| Image | `x16-0179-touch-retry.img` `d438ba47...`; payload `72fc737c...`; `boot_a` 0179 | device run 2026-11-06 |
+| Touch IRQ | EINT14 edge → EINT child controller → dedicated IOWorkLoop oneshot → SPI3/HID → `service_done` re-arm; `gt_thread` removed; commands on `IOCommandGate` | G1–G6; 0179 device run |
+| Failure behavior | dirty frame dropped, line stays active; 8-failure streak → SPI FIFO reset + chip soft handshake (9 `no-ack`, `ok` path not proven); KPD independent | 0179 device run |
+| Stress | first 10 min `isr 2381→6004`, `ok=5997`, `fail=7`; ~5 min `isr 8672→13282`, `ok=12866`, `fail +9`; 1–5 fingers; 0 panic/stuck/re-activation | 2026-11-06; device run |
+| Known limits | G7/G8 and full 10 min repeat not run by decision; no ESD timer; `soft reset ok` unproven; battery UI 30 s; Type-C read-only; USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep not implemented; single unit/host | decision 2026-11-06 |
+| Rollback | 0178 `156f3d9f...`; 0177 `ecb5fe2c...`; 0176 `cc5c887c...`; 0155 `3b44c0e2...` | images external |
 
 ## 2026-11-02 state
 
@@ -70,6 +84,19 @@ volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 | USB line | 0131b probe write; EP2 host-side XACT remains open | `usb-0131b-probe-write` (merge `fb0577d`); kernel exec `06db2bb3...` |
 | CI baseline | 82-file baseline from a private content-addressed mirror; public pin is manifest root `829d7598...`; fallback `ALLOW_PUBLIC_UPSTREAM=1` | `ci/baseline_manifest.py`; `config/0144.env` (current line), `config/0140.env`, `config/0131b.env` |
 | Main | ramdisk + USB combined (squashed 2026-10-29) | see `docs/en/11-ci-baseline.md` |
+
+## Build provenance (2026-11-06)
+
+- Apple xnu: `xnu-8796.141.3` (`f625db25...`).
+- Baseline: 82 files, manifest root `829d7598...`; private mirror, public
+  fallback `ALLOW_PUBLIC_UPSTREAM=1`.
+- 0179 line: patchset `10b1e2e8...` (175 files); kernel full `2b008e52...`,
+  exec `a4fb021e...`; CI `42114854911`; gate rerun `42115985782`; host-checks
+  `42115991259`; image `d438ba47...` (payload `72fc737c...`, `config/0179.env`);
+  workflow `xnu-0179`.
+- Build harness: `blacktop/darwin-xnu-build` @ `6639065`; macOS 13.5 xnu built
+  on a `macos-15` runner with Xcode 16.0; `DEVELOPMENT` + `MACHINE_CONFIG=SWEET`,
+  `-mcpu=cortex-a55`.
 
 ## Build provenance (2026-11-02)
 
@@ -164,9 +191,10 @@ volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
 ## Reproducibility guarantee
 
 The success path now has **one-unit device evidence** (B+NOP first boot ->
-A', and the CI kernel boot) plus the documented recipe. It is not an
-independently reproduced second-unit or clean-room guarantee. Pre-boot image
-hashes are fixed for the named files; post-boot root/ring/log hashes are
+A', the CI kernel boot, the 0155 run and the 0179 P2b line) plus the
+documented recipe. It is not an independently reproduced second-unit or
+clean-room guarantee; G7/G8 and a full 10 min repeat were not run. Pre-boot
+image hashes are fixed for the named files; post-boot root/ring/log hashes are
 volatile. See [`GUARANTEE.md`](GUARANTEE.md) and the "Hash stability" section
 of `VERIFICATION.md`.
 
@@ -176,8 +204,10 @@ of `VERIFICATION.md`.
   charger control/OTG; Type-C role.
 - Battery/charging is read-only; the UI polls every 30 s (P2.4: 100→98 on
   unplug).
-- Software fastboot and the volume-down+power combo are parked; a full USB
-  replug needs a reboot.
+- P2b: no ESD timer (a silent stuck panel needs a reboot); `soft reset ok` is
+  unproven; G7/G8 and a full 10 min repeat were not run.
+- Software fastboot and the volume-down+power combo are parked; USB hotplug
+  repeatability was 7/10 `cfg=1` and the host `GONE` signal is unreliable.
 - MobileGestalt cache is absent; the ICL NOP is a bypass, not a fix.
 - The original (unpatched) ICL block has not been regression-tested after the
   first-boot state was created.
@@ -187,6 +217,11 @@ of `VERIFICATION.md`.
 
 - **host-verified**: commands and tools run on the author's PC against local
   files; see `VERIFICATION.md`.
+- **device-verified (2026-11-06)**: 0179 (patchset `10b1e2e8...`; exec
+  `a4fb021e...`) booted on the author's unit: native EINT14 touch, G1–G6,
+  first 10 min + ~5 min stress, 1–5-finger HID, no panic/stuck/re-activation;
+  the 8-failure soft-reset branch logged `no-ack` (accepted boundary). G7/G8
+  and the full 10 min repeat were cancelled by decision.
 - **device-verified (2026-11-02)**: 0155 (patchset `da13b6df...`; exec
   `2e98fd85...`) booted on the author's unit: GT9916R touch, volume/power keys,
   battery 4311 mV `external=1/full=1`, 8/8 I2C5 arbiter, 19/19 probe, no panic;

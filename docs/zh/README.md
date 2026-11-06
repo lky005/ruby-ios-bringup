@@ -9,12 +9,12 @@
 
 | 项 | 值 |
 |---|---|
-| 线 | 0155 |
-| `main` / tag | `e81510f` / `v0.4.0` |
-| Patchset | `da13b6df…`（151 文件） |
-| 内核 | full `491f2373…`，exec-data `2e98fd85…` |
-| 镜像 | `3b44c0e2…`（`x16-0155-a00dd751.img`） |
-| 已知限制 | P2.4 电池 UI 30 s 滞后；Type-C 只读；无 USB host/音频/ Wi-Fi/BT/相机/GPU/RTC/sleep；P3 目标待选 |
+| 线 | 0179 |
+| `main` / tag | 合并待执行（M2）/ 计划 `v0.5.0` |
+| Patchset | `10b1e2e8…`（175 文件） |
+| 内核 | full `2b008e52…`，exec-data `a4fb021e…` |
+| 镜像 | `d438ba47…`（`x16-0179-touch-retry.img`） |
+| 已知限制 | G7/G8 与完整 10 min 复跑未跑；无 ESD timer；`soft reset ok` 未证；P2.4 电池 UI 30 s；Type-C 只读；无 USB host/音频/Wi-Fi/BT/相机/GPU/RTC/sleep；P3 目标待选 |
 
 见 [STATUS](../../STATUS.md) · [VERIFICATION](../../VERIFICATION.md) · [GUARANTEE.zh.md](../../GUARANTEE.zh.md)。
 
@@ -31,24 +31,24 @@
 | 文档 | 内容 | 状态 | 最后验证 |
 |---|---|---|---|
 | [`01-architecture`](01-architecture.md) | 启动链与组件地图 | `[实测]` | 2026-10-22 |
-| [`02-hardware`](02-hardware.md) | 实测 MT6877 硬件坐标 | `[实测]` | 2026-10-22 |
+| [`02-hardware`](02-hardware.md) | 实测 MT6877 硬件坐标 | `[实测]` | 2026-11-06 |
 | [`03-boot-chain`](03-boot-chain.md) | LK、128 MiB 镜像、看门狗/console | `[实测]` | 2026-10-22 |
 | [`04-display`](04-display.md) | surface 到 panel、缓存维护 | `[实测]` | 2026-10-22 |
 | [`05-userland`](05-userland.md) | launchd/LS/MG 死锁、ICL NOP 反汇编 | `[实测]` | 2026-10-22 |
-| [`06-input`](06-input.md) | 真实 Goodix 触摸、按键、SweetHID、边缘位、合成上滑 | `[实测]` | 2026-11-02 |
-| [`touch-goodix-9916r`](touch-goodix-9916r.md) | GT9916R 硬件、上电/协议手册、bring-up 记录 | `[实测]` | 2026-10-22 |
-| [`07-experiments`](07-experiments.md) | 时间线、失败目录、决策记录 | `[实测]` | 2026-11-02 |
+| [`06-input`](06-input.md) | 真实 Goodix 触摸、原生 EINT14、按键、SweetHID、边缘位、合成上滑 | `[实测]` | 2026-11-06 |
+| [`touch-goodix-9916r`](touch-goodix-9916r.md) | GT9916R 硬件、上电/协议手册、原生 EINT 服务、bring-up 记录 | `[实测]` | 2026-11-06 |
+| [`07-experiments`](07-experiments.md) | 时间线、失败目录、决策记录 | `[实测]` | 2026-11-06 |
 | [`08-recovery`](08-recovery.md) | Android 恢复、TWRP、raw I/O | `[实测]` | 2026-10-22 |
-| [`09-reproduce`](09-reproduce.md) | 构建、打包、刷写、验证 | `[实测]` | 2026-11-02 |
-| [`10-scripts`](10-scripts.md) | 逐脚本用途与边界 | `[实测]` | 2026-11-02 |
-| [`11-ci-baseline`](11-ci-baseline.md) | 内容固定的基线、分支 pin、exec-data 门禁 | `[实测]` | 2026-11-02 |
-| [`12-usb-host`](12-usb-host.md) | USB 上位机通道：测试条件、驱动绑定、安全调试 | `[实测]` | 2026-11-02 |
+| [`09-reproduce`](09-reproduce.md) | 构建、打包、刷写、验证 | `[实测]` | 2026-11-06 |
+| [`10-scripts`](10-scripts.md) | 逐脚本用途与边界 | `[实测]` | 2026-11-06 |
+| [`11-ci-baseline`](11-ci-baseline.md) | 内容固定的基线、分支 pin、exec-data 门禁 | `[实测]` | 2026-11-06 |
+| [`12-usb-host`](12-usb-host.md) | USB 上位机通道：测试条件、驱动绑定、安全调试 | `[实测]` | 2026-11-06 |
 | [`appendix-dualboot`](appendix-dualboot.md) | 可选布局；仅方法说明 | `[推断]` | — |
 | [`glossary`](glossary.md) | 代号、缩写与状态标签 | — | — |
 | [`device`](device.md) | 设备情况；不发布基线 hash | `[实测]` | 2026-10-22 |
 | [`root-recipe`](root-recipe.md) | root 输入与步骤；不含 root 镜像 | `[实测]` | 2026-10-22 |
-| [`reproducibility`](reproducibility.md) | Tier B recipe、防漂移、暂缓测试 | `[实测]` | 2026-11-02 |
-| [`保证`](../../GUARANTEE.zh.md) | 成功路径范围、bundle hash、暂缓测试 | `[实测]` | 2026-11-02 |
+| [`reproducibility`](reproducibility.md) | Tier B recipe、防漂移、暂缓测试 | `[实测]` | 2026-11-06 |
+| [`保证`](../../GUARANTEE.zh.md) | 成功路径范围、bundle hash、暂缓测试 | `[实测]` | 2026-11-06 |
 
 ## 规则
 
