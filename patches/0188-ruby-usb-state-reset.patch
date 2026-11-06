@@ -1,0 +1,71 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1358,6 +1358,7 @@
+ #define TX_SENDSTALL    (1u << 21)
+ #define TX_SENTSTALL    (1u << 22)
+ #define TX_FLUSHFIFO    (1u << 20)
++#define TX_FIFOEMPTY    (1u << 24)
+ 
+ #define QMU_Q_START     1u
+ #define QMU_Q_STOP      4u
+@@ -1657,6 +1658,32 @@
+     ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
+ }
+ 
++/*
++ * 0188: clear the software ring state and the hardware TX FIFO after an
++ * endpoint reset.  A host re-enumeration re-arms EP2 but used to keep
++ * enq/deq/inflight from the previous session (the first IN then failed).
++ */
++static void
++ruby_ep2_state_reset(vm_offset_t mac)
++{
++    uint32_t v, i, spins = 0;
++
++    ruby_ep2_ring_reset(mac);
++    v = ruby_rd32(mac, TX2CSR0_OFF);
++    ruby_wr32(mac, TX2CSR0_OFF, v | TX_FLUSHFIFO);
++    for (i = 0; i < 100; i++) {
++        spins = i;
++        if (ruby_rd32(mac, TX2CSR0_OFF) & TX_FIFOEMPTY)
++            break;
++        delay(10);
++    }
++    printf("RUBY USB: EP2 state reset enq=%u deq=%u inflight=%u "
++        "tx0=0x%08x fifo_empty=%u spins=%u\n",
++        ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
++        ruby_rd32(mac, TX2CSR0_OFF),
++        !!(ruby_rd32(mac, TX2CSR0_OFF) & TX_FIFOEMPTY), spins);
++}
++
+ static int
+ ruby_ep2_qmu_start(vm_offset_t mac)
+ {
+@@ -1797,6 +1824,8 @@
+     (void)ruby_rd32(mac, EP_RST_OFF);
+     ruby_seq("EPRST_TX", ruby_rd32(mac, TX2CSR0_OFF),
+         ruby_rd32(mac, TX2CSR2_OFF));
++    /* 0188: a re-enumeration re-arms EP2; drop the stale ring state. */
++    ruby_ep2_state_reset(mac);
+ 
+     /* 0142: same 512 MPS on the reset/rearm path. */
+     ruby_wr32(mac, TX2CSR0_OFF, 512u | (1u << 29));
+@@ -2282,7 +2311,8 @@
+ 
+     /*
+      * 0127: vendor CLEAR_FEATURE parity: W1C SENTSTALL, clear SENDSTALL,
+-     * pulse EP_RST.  No QMU stop/flush/start and no GPD ring reset.
++     * pulse EP_RST.  0188 adds a ring-state reset and TX FIFO flush after
++     * the pulse so a re-enumerated endpoint starts from slot 0.
+      */
+     ruby_wr32(mac, TX2CSR0_OFF,
+         (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+@@ -2290,6 +2320,8 @@
+     ruby_wr32(mac, EP_RST_OFF, 0);
+     ruby_seq("HALT_TX", ruby_rd32(mac, TX2CSR0_OFF),
+         ruby_rd32(mac, TQCSR2_OFF));
++    /* 0188: endpoint reset leaves no stale ring/FIFO state behind. */
++    ruby_ep2_state_reset(mac);
+     ruby_ep2_halt_clears++;
+     ruby_busy_ticks = 0;
+ 
