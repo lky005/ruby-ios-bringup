@@ -9,12 +9,12 @@
 
 | 项 | 值 |
 |---|---|
-| 线 | 0179 |
-| `main` / tag | `22cdb29` / `v0.5.0` |
-| Patchset | `10b1e2e8…`（175 文件） |
-| 内核 | full `2b008e52…`，exec-data `a4fb021e…` |
-| 镜像 | `d438ba47…`（`x16-0179-touch-retry.img`） |
-| 已知限制 | G7/G8 与完整 10 min 复跑未跑；无 ESD timer；`soft reset ok` 未证；P2.4 电池 UI 30 s；Type-C 只读；无 USB host/音频/Wi-Fi/BT/相机/GPU/RTC/sleep；P3 目标待选 |
+| 线 | 0195 |
+| `main` / tag | `1e45453` / `v0.6.0` |
+| Patchset | `a9cc0050…`（187 文件） |
+| 内核 | full `45ea1bc3…`、exec-data `6b22fc25…` |
+| 镜像 | `fe009b89…`（`x16-0195-ack.img`；黄金 boot 在 0194 `1808e440…` 验证） |
+| 已知限制 | XactErr `0xC0000011`；511 B 帧封装；连续 clear 风暴可能停主机端口；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep；研究性 bring-up |
 
 见 [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md) · [GUARANTEE.zh.md](../records/GUARANTEE.zh.md)。
 

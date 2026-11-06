@@ -10,12 +10,12 @@ personal paths, device identifiers or Apple binaries here.
 
 | Item | Value |
 |---|---|
-| Line | 0179 |
-| `main` / tag | `22cdb29` / `v0.5.0` |
-| Patchset | `10b1e2e8…` (175 files) |
-| Kernel | full `2b008e52…`, exec-data `a4fb021e…` |
-| Image | `d438ba47…` (`x16-0179-touch-retry.img`) |
-| Known limits | G7/G8 and the full 10 min repeat not run; no ESD timer; `soft reset ok` unproven; P2.4 battery UI 30 s; Type-C read-only; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep; P3 target open |
+| Line | 0195 |
+| `main` / tag | `1e45453` / `v0.6.0` |
+| Patchset | `a9cc0050…` (187 files) |
+| Kernel | full `45ea1bc3…`, exec-data `6b22fc25…` |
+| Image | `fe009b89…` (`x16-0195-ack.img`; golden boot verified on 0194 `1808e440…`) |
+| Known limits | XactErr `0xC0000011`; 511 B framing; host-port drop under clear storms; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep; research bring-up |
 
 See [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md) · [GUARANTEE](../records/GUARANTEE.md).
 

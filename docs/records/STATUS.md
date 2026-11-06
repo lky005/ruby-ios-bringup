@@ -1,6 +1,6 @@
 # Status
 
-As of **2026-11-06**. This is a snapshot of verified results, not a live device
+As of **2026-11-07**. This is a snapshot of verified results, not a live device
 status. No phone is attached to this repository or to its CI.
 
 ## Verified
@@ -28,6 +28,20 @@ The ICL blocks, boot images, root images and logs are **not** in this
 repository. Only their hashes and conclusions are recorded. Pre-boot image
 hashes are fixed for the named files; post-boot root/ring/log hashes are
 volatile and are not a contract (see `VERIFICATION.md` "Hash stability").
+
+## 2026-11-07 state
+
+| Item | Result | Evidence |
+|---|---|---|
+| Current line | 0180–0195 USB EP2: state machine, golden PHY, acknowledgements | patchset `a9cc0050...` (187); `config/0195.env` |
+| Main/tag | `1e45453` / `v0.6.0`; line tag `usb-ep2-0194-2026-11-07` → `a9e24e2` | 2026-11-07 |
+| Kernel | full `45ea1bc3...`, exec-data `6b22fc25...`; xnu `42301546006` + rerun `42302694315`; host-checks `42302515812`; main `42304310915` / `42304311052` | `config/0195.env`; workflow `xnu-0195` |
+| Image | `x16-0195-ack.img` `fe009b89...`; payload `3a97d52b...`; built, not flashed | host build 2026-11-07 |
+| Golden boot | 0194 `x16-0194-golden-srctrl.img` `1808e440...`; `golden acr5=0x40805000`; 14.1 s | device run 2026-11-07 |
+| USB EP2 | 0189 stop/reset/start; SRCTRL=5 62-frame peak; board eye 6/3/2/13; short frames are log slices; big read no aggregation; pacing per-URB; transparent resume endpoint-only | `docs/en/13-usb-ep2-golden.md` |
+| XactErr | USBD `0xC0000011`; ETW no CRC/toggle/STALL; USB2 analyser needed | 0180 ETW |
+| Known limits | XactErr; 511 B framing; host-port drop under clear storms; no guarantee | 2026-11-07 |
+| Rollback | 0194 `1808e440...`; 0189C `6eab7b69...`; TWRP archived | local archive |
 
 ## 2026-11-06 state
 
