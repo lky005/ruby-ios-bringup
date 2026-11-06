@@ -43,6 +43,7 @@
 | [`10-scripts`](10-scripts.md) | 逐脚本用途与边界 | `[实测]` | 2026-11-06 |
 | [`11-ci-baseline`](11-ci-baseline.md) | 内容固定的基线、分支 pin、exec-data 门禁 | `[实测]` | 2026-11-06 |
 | [`12-usb-host`](12-usb-host.md) | USB 上位机通道：测试条件、驱动绑定、安全调试 | `[实测]` | 2026-11-06 |
+| [`13-usb-ep2-golden`](13-usb-ep2-golden.md) | EP2 状态机 0180–0195、黄金 PHY、主机侧边界 | `[实测]` | 2026-11-07 |
 | [`appendix-dualboot`](appendix-dualboot.md) | 可选布局；仅方法说明 | `[推断]` | — |
 | [`glossary`](glossary.md) | 代号、缩写与状态标签 | — | — |
 | [`device`](device.md) | 设备情况；不发布基线 hash | `[实测]` | 2026-10-22 |
