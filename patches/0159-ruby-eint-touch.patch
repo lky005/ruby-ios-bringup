@@ -1,0 +1,263 @@
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -114,9 +114,25 @@
+ #define PR_SPI_STA0      0x1cu
+ #define PR_SPI_STA1      0x20u
+ #define PR_EINT_STA      0x000u
++#define PR_EINT_ACK      0x040u
+ #define PR_EINT_MASK     0x080u
++#define PR_EINT_MASK_SET 0x0c0u
++#define PR_EINT_MASK_CLR 0x100u
+ #define PR_EINT_SENS     0x140u
++#define PR_EINT_SENS_SET 0x180u
++#define PR_EINT_SENS_CLR 0x1c0u
+ #define PR_EINT_POL      0x300u
++#define PR_EINT_POL_SET  0x340u
++#define PR_EINT_POL_CLR  0x380u
++#define PR_EINT_TOUCH_BIT (1u << 14)
++#define PR_GICD_PA       0x0c000000u
++#define PR_GICD_SIZE     0x1000u
++#define PR_GICD_CTLR     0x000u
++/* GIC_SPI 256 is SPI 256 -> INTID 288 -> ISENABLER[9] bit 0. */
++#define PR_GIC_SPI256_INTID 288u
++#define PR_GICD_ISENABLER_SPI256 0x124u
++#define PR_GICD_ISPENDR_SPI256 0x224u
++#define PR_GIC_SPI256_BIT (1u << (PR_GIC_SPI256_INTID % 32))
+ #define PR_SPM_PWR_STA   0x0ef0u
+ #define PR_SPM_PWR_STA2  0x0ef4u
+ #define PR_SPM_XPU_STA   0x0ef8u
+@@ -130,7 +146,7 @@
+ };
+ 
+ struct pr_state {
+-	vm_offset_t gpio, pwrap, kpd, eint, wdt;
++	vm_offset_t gpio, pwrap, kpd, eint, gicd, wdt;
+ 	vm_offset_t ifrao, imp_s, imp_n;
+ 	vm_offset_t i2c5, i2c6, spi3, scpsys;
+ 	vm_offset_t iocfg[8];
+@@ -141,6 +157,7 @@
+ 	bool wrap_init_allowed;
+ 	bool wrap_init_attempted;
+ 	bool reboot_allowed;
++	bool eint_allowed;
+ };
+ 
+ static struct pr_state pr;
+@@ -1142,6 +1159,148 @@
+ }
+ 
+ static void
++pr_eint_status(void)
++{
++	const uint32_t bit = PR_EINT_TOUCH_BIT;
++	uint32_t mask, sens, pol, sta;
++	uint32_t gic_ctl = 0, gic_isen = 0, gic_pnd = 0;
++
++	if (!pr.eint) {
++		printf("RUBY EINT: eint not mapped\n");
++		return;
++	}
++	mask = pr_rd32(pr.eint, PR_EINT_MASK);
++	sens = pr_rd32(pr.eint, PR_EINT_SENS);
++	pol = pr_rd32(pr.eint, PR_EINT_POL);
++	sta = pr_rd32(pr.eint, PR_EINT_STA);
++	if (pr.gicd) {
++		gic_ctl = pr_rd32(pr.gicd, PR_GICD_CTLR);
++		gic_isen = pr_rd32(pr.gicd, PR_GICD_ISENABLER_SPI256);
++		gic_pnd = pr_rd32(pr.gicd, PR_GICD_ISPENDR_SPI256);
++	}
++	printf("RUBY EINT: eint14 sta=%u mask=%u sens=%u pol=%u\n",
++	    (sta & bit) != 0, (mask & bit) != 0,
++	    (sens & bit) != 0, (pol & bit) != 0);
++	printf("RUBY EINT: raw sta=%08x mask=%08x sens=%08x pol=%08x\n",
++	    sta, mask, sens, pol);
++	if (pr.gicd)
++		printf("RUBY EINT: gic ctlr=%08x isen=%08x pnd=%08x spi256=%u\n",
++		    gic_ctl, gic_isen, gic_pnd,
++		    (gic_isen & PR_GIC_SPI256_BIT) != 0);
++	else
++		printf("RUBY EINT: gicd not mapped\n");
++}
++
++static int
++pr_eint_touch(uint32_t ms)
++{
++	const uint32_t bit = PR_EINT_TOUCH_BIT;
++	uint32_t saved_mask, saved_sens, saved_pol;
++	uint32_t mask, sens, pol, sta;
++	uint32_t gic_ctl, gic_isen, gic_pnd;
++	uint32_t i, events = 0;
++
++	if (!pr.eint_allowed) {
++		printf("RUBY EINT: disabled (rubyeint=0)\n");
++		return 1;
++	}
++	if (!pr.eint) {
++		printf("RUBY EINT: eint not mapped\n");
++		return 1;
++	}
++	if (!pr.gicd) {
++		printf("RUBY EINT: gicd not mapped; refusing to arm\n");
++		return 1;
++	}
++	if (ms < 100)
++		ms = 100;
++	if (ms > 3000)
++		ms = 3000;
++
++	gic_ctl = pr_rd32(pr.gicd, PR_GICD_CTLR);
++	gic_isen = pr_rd32(pr.gicd, PR_GICD_ISENABLER_SPI256);
++	gic_pnd = pr_rd32(pr.gicd, PR_GICD_ISPENDR_SPI256);
++	printf("RUBY EINT: gic ctlr=%08x isen=%08x pnd=%08x spi256=%u\n",
++	    gic_ctl, gic_isen, gic_pnd,
++	    (gic_isen & PR_GIC_SPI256_BIT) != 0);
++	if (gic_ctl == 0 || gic_ctl == 0xffffffffu) {
++		printf("RUBY EINT: abort: GICD CTLR untrusted\n");
++		return 1;
++	}
++	if (gic_isen == 0xffffffffu) {
++		printf("RUBY EINT: abort: GICD ISENABLER untrusted\n");
++		return 1;
++	}
++	if (gic_isen & PR_GIC_SPI256_BIT) {
++		printf("RUBY EINT: abort: GIC SPI256 enabled\n");
++		return 1;
++	}
++	if (gic_pnd & PR_GIC_SPI256_BIT)
++		printf("RUBY EINT: note: GIC SPI256 pending while disabled\n");
++
++	saved_mask = pr_rd32(pr.eint, PR_EINT_MASK);
++	saved_sens = pr_rd32(pr.eint, PR_EINT_SENS);
++	saved_pol = pr_rd32(pr.eint, PR_EINT_POL);
++	printf("RUBY EINT: saved mask=%08x sens=%08x pol=%08x\n",
++	    saved_mask, saved_sens, saved_pol);
++
++	pr_wr32(pr.eint, PR_EINT_SENS_CLR, bit);
++	pr_wr32(pr.eint, PR_EINT_POL_CLR, bit);
++	pr_wr32(pr.eint, PR_EINT_ACK, bit);
++	pr_wr32(pr.eint, PR_EINT_MASK_CLR, bit);
++	delay(1);
++
++	mask = pr_rd32(pr.eint, PR_EINT_MASK);
++	sens = pr_rd32(pr.eint, PR_EINT_SENS);
++	pol = pr_rd32(pr.eint, PR_EINT_POL);
++	sta = pr_rd32(pr.eint, PR_EINT_STA);
++	printf("RUBY EINT: arm mask=%08x sens=%08x pol=%08x sta=%08x\n",
++	    mask, sens, pol, sta);
++
++	for (i = 0; i < ms; i++) {
++		sta = pr_rd32(pr.eint, PR_EINT_STA);
++		if (sta & bit) {
++			printf("RUBY EINT: t=%ums sta=%08x ack=1\n", i, sta);
++			pr_wr32(pr.eint, PR_EINT_ACK, bit);
++			events++;
++			if (events >= 8)
++				break;
++		}
++		delay(1);
++	}
++
++	pr_wr32(pr.eint, PR_EINT_ACK, bit);
++	if (saved_mask & bit)
++		pr_wr32(pr.eint, PR_EINT_MASK_SET, bit);
++	else
++		pr_wr32(pr.eint, PR_EINT_MASK_CLR, bit);
++	if (saved_sens & bit)
++		pr_wr32(pr.eint, PR_EINT_SENS_SET, bit);
++	else
++		pr_wr32(pr.eint, PR_EINT_SENS_CLR, bit);
++	if (saved_pol & bit)
++		pr_wr32(pr.eint, PR_EINT_POL_SET, bit);
++	else
++		pr_wr32(pr.eint, PR_EINT_POL_CLR, bit);
++	pr_wr32(pr.eint, PR_EINT_ACK, bit);
++	delay(1);
++
++	mask = pr_rd32(pr.eint, PR_EINT_MASK);
++	sens = pr_rd32(pr.eint, PR_EINT_SENS);
++	pol = pr_rd32(pr.eint, PR_EINT_POL);
++	sta = pr_rd32(pr.eint, PR_EINT_STA);
++	printf("RUBY EINT: restore mask=%08x sens=%08x pol=%08x sta=%08x events=%u\n",
++	    mask, sens, pol, sta, events);
++	if ((mask & bit) != (saved_mask & bit) ||
++	    (sens & bit) != (saved_sens & bit) ||
++	    (pol & bit) != (saved_pol & bit))
++		printf("RUBY EINT: restore MISMATCH\n");
++	else
++		printf("RUBY EINT: restore ok\n");
++	return 1;
++}
++
++static void
+ pr_snap_i2c_ctrl(void)
+ {
+ 	uint32_t i;
+@@ -1375,6 +1534,7 @@
+ 	printf("RUBY CMD: wdt [pet|off] | snap [pmic|gpio|clk|iocfg|wdt|found|all]\n");
+ 	printf("RUBY CMD: reboot bootloader (rubyreboot)\n");
+ 	printf("RUBY CMD: battery status\n");
++	printf("RUBY CMD: eint status | eint touch [ms] (rubyeint)\n");
+ }
+ 
+ static int
+@@ -1668,6 +1828,25 @@
+ 		pr_cmd_battery();
+ 		return 1;
+ 	}
++	if (!strncmp(p, "eint ", 5)) {
++		const char *q = pr_skip(p + 5);
++		uint32_t ms = 3000;
++
++		if (!strcmp(q, "status")) {
++			pr_eint_status();
++			return 1;
++		}
++		if (pr_sub(&q, "touch")) {
++			if (*q != '\0' &&
++			    (!pr_parse_u32(&q, &ms) || *pr_skip(q) != '\0')) {
++				printf("RUBY CMD: err: eint touch [ms]\n");
++				return 1;
++			}
++			return pr_eint_touch(ms);
++		}
++		printf("RUBY CMD: err: eint status|touch [ms]\n");
++		return 1;
++	}
+ 	if (!strncmp(p, "reboot", 6)) {
+ 		if (!strcmp(p, "reboot bootloader"))
+ 			return pr_reboot_bootloader();
+@@ -1720,11 +1899,15 @@
+ 	v = 0;
+ 	if (PE_parse_boot_argn("rubyreboot", &v, sizeof(v)) && v == 1)
+ 		pr.reboot_allowed = true;
++	v = 0;
++	if (PE_parse_boot_argn("rubyeint", &v, sizeof(v)) && v == 1)
++		pr.eint_allowed = true;
+ 
+ 	pr.gpio = ml_io_map(PR_GPIO_PA, PR_GPIO_SIZE);
+ 	pr.pwrap = ml_io_map(PR_PWRAP_PA, PR_REG_SIZE);
+ 	pr.kpd = ml_io_map(PR_KPD_PA, PR_REG_SIZE);
+ 	pr.eint = ml_io_map(PR_EINT_PA, PR_REG_SIZE);
++	pr.gicd = ml_io_map(PR_GICD_PA, PR_GICD_SIZE);
+ 	pr.wdt = ml_io_map(PR_WDT_PA, PR_REG_SIZE);
+ 	pr.ifrao = ml_io_map(PR_IFRAO_PA, PR_REG_SIZE);
+ 	pr.imp_s = ml_io_map(PR_IMP_S_PA, PR_REG_SIZE);
+@@ -1739,13 +1922,14 @@
+ 	ruby_i2c_bus_init(&pr.i2c[0], 5, pr.gpio, pr.iocfg[4], "RUBY PROBE");
+ 	ruby_i2c_bus_init(&pr.i2c[1], 6, pr.gpio, pr.iocfg[7], "RUBY PROBE");
+ 	pr.ready = (pr.gpio != 0 && pr.pwrap != 0);
+-	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d wrapinit=%d reboot=%d\n",
++	printf("RUBY PROBE: init gpio=%d pwrap=%d kpd=%d wdt=%d i2c5=%d i2c6=%d writes=%d pmic=%d wrapinit=%d reboot=%d eint=%d\n",
+ 	    pr.gpio != 0, pr.pwrap != 0, pr.kpd != 0, pr.wdt != 0,
+ 	    pr.iocfg[4] != 0, pr.iocfg[7] != 0,
+ 	    pr.probe_writes, pr.pmic_writes, pr.wrap_init_allowed,
+-	    pr.reboot_allowed);
+-	printf("RUBY PROBE: R0 map i2c5=%d i2c6=%d spi3=%d scpsys=%d\n",
+-	    pr.i2c5 != 0, pr.i2c6 != 0, pr.spi3 != 0, pr.scpsys != 0);
++	    pr.reboot_allowed, pr.eint_allowed);
++	printf("RUBY PROBE: R0 map i2c5=%d i2c6=%d spi3=%d scpsys=%d gicd=%d\n",
++	    pr.i2c5 != 0, pr.i2c6 != 0, pr.spi3 != 0, pr.scpsys != 0,
++	    pr.gicd != 0);
+ 	return pr.ready ? 0 : ENODEV;
+ }
+ #endif /* ARM64_BOARD_CONFIG_SWEET */

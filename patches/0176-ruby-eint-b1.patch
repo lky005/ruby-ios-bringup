@@ -1,0 +1,124 @@
+diff --git a/bsd/dev/ruby_eint.c b/bsd/dev/ruby_eint.c
+index 932362a..2ac9a4a 100644
+--- a/bsd/dev/ruby_eint.c
++++ b/bsd/dev/ruby_eint.c
+@@ -109,6 +109,7 @@ static lck_spin_t g_eint_lock;
+ static volatile int g_eint_state; /* 0 uninit, 1 init, 2 ready, 3 failed */
+ static bool g_eint_enabled;
+ static volatile uint32_t g_parent_owned;
++static int g_b1_no_wakeup;
+ 
+ #define RUBY_EINT_LOCK() \
+ 	boolean_t _eint_irq = ml_set_interrupts_enabled(FALSE); \
+@@ -159,9 +160,12 @@ ruby_eint_init(void)
+ 	g_gicd_base = gicd;
+ 	if (PE_parse_boot_argn("rubyeint", &v, sizeof(v)) && v == 1)
+ 		g_eint_enabled = true;
++	if (PE_parse_boot_argn("rubyeintb1", &v, sizeof(v)) && v == 1)
++		g_b1_no_wakeup = 1;
+ 
+-	printf("RUBY EINT: init eint=%d gicd=%d enabled=%d\n",
+-	    g_eint_base != 0, g_gicd_base != 0, g_eint_enabled);
++	printf("RUBY EINT: init eint=%d gicd=%d enabled=%d b1=%d\n",
++	    g_eint_base != 0, g_gicd_base != 0, g_eint_enabled,
++	    g_b1_no_wakeup);
+ 	__atomic_store_n(&g_eint_state,
+ 	    (g_eint_base != 0 && g_gicd_base != 0) ? 2 : 3, __ATOMIC_RELEASE);
+ }
+@@ -1034,12 +1038,14 @@ ruby_eint_demux_isr(void)
+ 	}
+ 	lck_spin_unlock(&g_eint_lock);
+ 
+-	for (p = 0; p < (int)RUBY_EINT_LINE_PORTS; p++) {
+-		uint32_t w = wake[p];
+-		while (w != 0) {
+-			uint32_t b = __builtin_ctz(w);
+-			w &= ~(1u << b);
+-			wakeup(&g_eint_slots[p * 32u + b].seq);
++	if (!g_b1_no_wakeup) {
++		for (p = 0; p < (int)RUBY_EINT_LINE_PORTS; p++) {
++			uint32_t w = wake[p];
++			while (w != 0) {
++				uint32_t b = __builtin_ctz(w);
++				w &= ~(1u << b);
++				wakeup(&g_eint_slots[p * 32u + b].seq);
++			}
+ 		}
+ 	}
+ 	return handled;
+@@ -1084,4 +1090,10 @@ ruby_eint_set_parent_owned(int owned)
+ 	    __ATOMIC_RELEASE);
+ }
+ 
++int
++ruby_eint_b1_mode(void)
++{
++	return g_b1_no_wakeup;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ruby_eint.h b/bsd/dev/ruby_eint.h
+index d886dd3..9e4b410 100644
+--- a/bsd/dev/ruby_eint.h
++++ b/bsd/dev/ruby_eint.h
+@@ -65,6 +65,7 @@ void ruby_eint_unmask(uint32_t line);
+ int ruby_eint_line_used(uint32_t line);
+ int ruby_eint_isr_handle(uint32_t line);
+ void ruby_eint_set_parent_owned(int owned);
++int ruby_eint_b1_mode(void);
+ int ruby_eint_safe(void);
+ int ruby_eint_read_port(uint32_t port, struct ruby_eint_port *out);
+ uint32_t ruby_eint_dom_read(uint32_t port);
+diff --git a/bsd/dev/sweet_goodix_spi.c b/bsd/dev/sweet_goodix_spi.c
+index 7b1cace..a9d072e 100644
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -1352,6 +1352,7 @@ gt_thread(void *arg, wait_result_t wr)
+ 	int bad = 0;
+ 	int miss = 0;
+ 	int good_polls = 0;
++	int b1 = 0;
+ 	uint32_t idle = 8;
+ 
+ 	(void)arg;
+@@ -1393,6 +1394,9 @@ gt_thread(void *arg, wait_result_t wr)
+ 		printf("SWEET GT: EINT14 poll fallback\n");
+ 	else
+ 		printf("SWEET GT: EINT14 unavailable; 8 ms polling\n");
++	b1 = ruby_eint_b1_mode();
++	if (gt.eint && b1)
++		printf("SWEET GT: EINT14 b1 poll-service\n");
+ 
+ 	for (;;) {
+ 		bool ev;
+@@ -1419,6 +1423,30 @@ gt_thread(void *arg, wait_result_t wr)
+ 			break;
+ 		}
+ 
++		if (gt.eint && b1 &&
++		    (ruby_eint_active(gt.eint) ||
++		    ruby_eint_deferred(gt.eint))) {
++			/*
++			 * B1: no wakeup from the demux.  Poll the deferred
++			 * state and service the frame here; the parent stays
++			 * gated until service_done() reopens the line.
++			 */
++			if (ruby_eint_deferred(gt.eint)) {
++				ok = gt_service_frame();
++				ruby_eint_service_done(gt.eint, ok, ok);
++				miss = 0;
++			} else if (ruby_eint_pending(gt.eint)) {
++				if (++miss >= 3) {
++					ruby_eint_force_poll(gt.eint);
++					miss = 0;
++				}
++			} else {
++				miss = 0;
++			}
++			gt_wait(1);
++			continue;
++		}
++
+ 		if (gt.eint && (ruby_eint_active(gt.eint) ||
+ 		    ruby_eint_deferred(gt.eint))) {
+ 			if (ruby_eint_wait(gt.eint, 8)) {

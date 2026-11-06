@@ -1,0 +1,107 @@
+--- a/bsd/dev/ruby_battery.c
++++ b/bsd/dev/ruby_battery.c
+@@ -42,6 +42,8 @@
+ static IOLock *rb_lock;
+ static volatile int rb_lock_state; /* 0 uninit, 1 allocating, 2 ready, 3 failed */
+ static bool rb_ready, rb_init_attempted, rb_probe_taken;
++static volatile uint32_t rb_poll_seq;
++static volatile int rb_last_external;
+ 
+ int
+ ruby_i2c5_lock_init(void)
+@@ -166,6 +168,21 @@
+ 	sample->chg_stat = chg;
+ 	sample->fod_stat = fod;
+ 	sample->usb_status = e4 ? 0 : usb;
++	/* Last valid CHRDET_EXT, for the USB hotplug diagnostic. */
++	__atomic_store_n(&rb_last_external, (fod & 0x10u) != 0, __ATOMIC_RELAXED);
++	__atomic_add_fetch(&rb_poll_seq, 1, __ATOMIC_RELAXED);
+ 	return 0;
+ }
++
++int
++ruby_battery_last_external(void)
++{
++	return __atomic_load_n(&rb_last_external, __ATOMIC_RELAXED);
++}
++
++uint32_t
++ruby_battery_poll_seq(void)
++{
++	return __atomic_load_n(&rb_poll_seq, __ATOMIC_RELAXED);
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/ruby_battery.h
++++ b/bsd/dev/ruby_battery.h
+@@ -16,6 +16,8 @@
+ 
+ int ruby_battery_init(void);
+ int ruby_battery_read(struct ruby_battery_sample *sample);
++int ruby_battery_last_external(void);
++uint32_t ruby_battery_poll_seq(void);
+ void ruby_battery_lock(void);
+ void ruby_battery_unlock(void);
+ void ruby_battery_taken(int taken);
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -27,6 +27,7 @@
+ #include <pexpert/pexpert.h>
+ 
+ #include "ruby_probe.h"
++#include "ruby_battery.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+@@ -863,6 +864,7 @@
+ static void ruby_usb_reset_check(vm_offset_t mac);
+ static void ruby_usb_attach_poll(vm_offset_t mac, vm_offset_t ippc);
+ static void ruby_usb_reattach(vm_offset_t mac, vm_offset_t phy);
++static void ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc);
+ 
+ static void
+ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+@@ -1165,6 +1167,7 @@
+         ruby_ep0_service(ruby_mac_base, 0);
+         ruby_cmd_tick(ruby_mac_base);
+         ruby_usb_attach_poll(ruby_mac_base, ruby_ippc_base);
++        ruby_usb_heartbeat(ruby_mac_base, ruby_ippc_base);
+         ruby_ep2_status_poll(ruby_mac_base);
+         ruby_ep2_push_log(ruby_mac_base);
+         ruby_ep2_rx_poll(ruby_mac_base);
+@@ -2935,6 +2938,36 @@
+ }
+ 
+ /*
++ * 0172 diagnostic: prove the EP0 thread is alive and identify which signal
++ * actually follows a physical cable pull.  Read-only; no behavior change.
++ * Print on change and at least every 5 s.
++ */
++static void
++ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
++{
++    static uint32_t next_ms, last_otg, last_mac2;
++    static int last_ext, primed;
++    uint32_t otg = ruby_rd32(ippc, IPPC_OTG_STS_OFF);
++    uint32_t mac2 = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
++    uint32_t seq = ruby_battery_poll_seq();
++    int ext = ruby_battery_last_external();
++
++    if (primed && ruby_ms < next_ms && otg == last_otg &&
++        mac2 == last_mac2 && ext == last_ext)
++        return;
++    primed = 1;
++    next_ms = ruby_ms + 5000;
++    printf("RUBY USB HB: t=%u otg=%08x mac2=%08x acr3=%08x "
++        "dmon1=%08x batt_seq=%u ext=%d\n", ruby_ms, otg, mac2,
++        ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_ACR3) : 0,
++        ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_DMON1) : 0,
++        seq, ext);
++    last_otg = otg;
++    last_mac2 = mac2;
++    last_ext = ext;
++}
++
++/*
+  * Vendor IN request 0xC0/0x21: live EP2/QMU state for the host, so a stuck
+  * queue can be inspected without another boot or a console read.
+  */

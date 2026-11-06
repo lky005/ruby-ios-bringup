@@ -1,0 +1,253 @@
+--- a/bsd/dev/ruby_irq.c
++++ b/bsd/dev/ruby_irq.c
+@@ -53,7 +53,6 @@
+ #define GICD_CTLR_GRP1NS      0x2u
+ 
+ #define RUBY_IRQ_PF_NODEV     (1u << 0)
+-#define RUBY_IRQ_PF_GROUP     (1u << 1)
+ #define RUBY_IRQ_PF_CTLR      (1u << 2)
+ #define RUBY_IRQ_PF_SRE       (1u << 3)
+ #define RUBY_IRQ_PF_GRPEN     (1u << 4)
+@@ -82,6 +81,7 @@
+ static uint32_t g_saved_prio;
+ static uint32_t g_saved_icfgr;
+ static uint32_t g_saved_enable9;
++static uint32_t g_saved_group9;
+ static uint64_t g_saved_router;
+ 
+ static int g_irq_chan;
+@@ -216,8 +216,6 @@
+ 	if (ruby_irq_status(st) != 0)
+ 		return RUBY_IRQ_PF_NODEV;
+ 
+-	if ((st->group9 & 1u) == 0)
+-		pf |= RUBY_IRQ_PF_GROUP;
+ 	if ((st->gicd_ctlr & (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS)) !=
+ 	    (GICD_CTLR_ARE_NS | GICD_CTLR_GRP1NS))
+ 		pf |= RUBY_IRQ_PF_CTLR;
+@@ -244,9 +242,6 @@
+ 	    pf, st->gicd_ctlr, st->group9, st->enable9, st->pending9,
+ 	    st->active9, st->icfgr & 3u,
+ 	    (unsigned long long)(st->icc_pmr & 0xffu));
+-	if (pf & RUBY_IRQ_PF_GROUP)
+-		printf("RUBY IRQ: INTID%u is Group0/secure; refusing\n",
+-		    RUBY_IRQ_INTID);
+ 	if (pf & RUBY_IRQ_PF_ENABLED)
+ 		printf("RUBY IRQ: INTID%u already enabled; refusing\n",
+ 		    RUBY_IRQ_INTID);
+@@ -267,7 +262,7 @@
+ ruby_irq_arm(void)
+ {
+ 	struct ruby_irq_status st;
+-	uint32_t pf, prio, cfg;
++	uint32_t pf, prio, cfg, group9;
+ 	uint64_t mpidr, route;
+ 
+ 	ruby_irq_init();
+@@ -290,7 +285,28 @@
+ 	g_saved_prio = ruby_rd32(g_gicd, GICD_IPRIORITY_288);
+ 	g_saved_icfgr = ruby_rd32(g_gicd, GICD_ICFGR_288);
+ 	g_saved_router = ruby_rd64(g_gicd, GICD_IROUTER_288);
++	g_saved_group9 = ruby_rd32(g_gicd, GICD_IGROUPR9);
+ 	__atomic_store_n(&g_configured, 1, __ATOMIC_RELEASE);
++
++	/*
++	 * A read of 0 is only the reset value; the secure world may have
++	 * left the SPI for the NS kernel to group.  Write one bit and read
++	 * it back: 1 = NS may own it, 0 = the write was ignored (secure).
++	 */
++	ruby_wr32(g_gicd, GICD_IGROUPR9, g_saved_group9 | 1u);
++	if (ruby_irq_rwp() != 0) {
++		printf("RUBY IRQ: RWP timeout after group write\n");
++		ruby_irq_disarm();
++		return ETIMEDOUT;
++	}
++	group9 = ruby_rd32(g_gicd, GICD_IGROUPR9);
++	if ((group9 & 1u) == 0) {
++		printf("RUBY IRQ: NS group write ignored; INTID%u is secure\n",
++		    RUBY_IRQ_INTID);
++		__atomic_store_n(&g_configured, 0, __ATOMIC_RELEASE);
++		return EPERM;
++	}
++	printf("RUBY IRQ: NS group write accepted group9=%08x\n", group9);
+ 
+ 	disable_preemption();
+ 	ml_install_interrupt_handler(NULL, RUBY_IRQ_INTID, NULL,
+@@ -327,9 +343,10 @@
+ 	}
+ 
+ 	ruby_eint_set_parent_owned(1);
+-	printf("RUBY IRQ: armed intid=%u mpidr=%016llx route=%016llx en9=%08x prio=%08x cfg=%08x\n",
++	printf("RUBY IRQ: armed intid=%u mpidr=%016llx route=%016llx en9=%08x group9=%08x prio=%08x cfg=%08x\n",
+ 	    RUBY_IRQ_INTID, (unsigned long long)mpidr,
+ 	    (unsigned long long)route, ruby_rd32(g_gicd, GICD_ISENABLER9),
++	    ruby_rd32(g_gicd, GICD_IGROUPR9),
+ 	    ruby_rd32(g_gicd, GICD_IPRIORITY_288),
+ 	    ruby_rd32(g_gicd, GICD_ICFGR_288) & 3u);
+ 	return 0;
+@@ -349,11 +366,14 @@
+ 		ruby_wr32(g_gicd, GICD_IPRIORITY_288, g_saved_prio);
+ 		ruby_wr32(g_gicd, GICD_ICFGR_288, g_saved_icfgr);
+ 		ruby_wr64(g_gicd, GICD_IROUTER_288, g_saved_router);
++		ruby_wr32(g_gicd, GICD_IGROUPR9, g_saved_group9);
+ 		if (g_saved_enable9 & 1u)
+ 			ruby_wr32(g_gicd, GICD_ISENABLER9, 1u);
+ 		else
+ 			ruby_wr32(g_gicd, GICD_ICENABLER9, 1u);
+ 		(void)ruby_irq_rwp();
++		printf("RUBY IRQ: group restore=%08x\n",
++		    ruby_rd32(g_gicd, GICD_IGROUPR9));
+ 		/*
+ 		 * ml_install_interrupt_handler() is per-CPU and arm/disarm
+ 		 * usually run from the same probe thread.  A stale handler on
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -434,6 +434,31 @@
+     uint8_t *buf, uint32_t len)
+ {
+ 	return ruby_i2c_read_regs(b, addr, reg, buf, len);
++}
++
++static int
++pr_i2c_write_reg(struct ruby_i2c_bus *b, uint8_t addr, uint8_t reg,
++    uint8_t val)
++{
++	int ack;
++
++	if (!ruby_i2c_start(b))
++		return ETIMEDOUT;
++	ack = ruby_i2c_write_byte(b, (uint8_t)(addr << 1));
++	if (ack != 1)
++		goto fail;
++	ack = ruby_i2c_write_byte(b, reg);
++	if (ack != 1)
++		goto fail;
++	ack = ruby_i2c_write_byte(b, val);
++	if (ack != 1)
++		goto fail;
++	ruby_i2c_stop(b);
++	return 0;
++
++fail:
++	ruby_i2c_stop(b);
++	return ack < 0 ? ETIMEDOUT : ENXIO;
+ }
+ 
+ static int
+@@ -1373,6 +1398,7 @@
+ 	printf("RUBY CMD: battery status\n");
+ 	printf("RUBY CMD: eint status | eint selftest <line> [ms] (rubyeint)\n");
+ 	printf("RUBY CMD: irq status|arm|disarm (rubyirq)\n");
++	printf("RUBY CMD: mt6360 status|ack (rubymt6360)\n");
+ }
+ 
+ static void
+@@ -1573,6 +1599,97 @@
+ 	return 1;
+ }
+ 
++static void
++pr_mt6360_dump(const char *tag, const uint8_t *irq, const uint8_t *mask)
++{
++	uint32_t i;
++
++	printf("RUBY MT6360: %s irq d0..df:", tag);
++	for (i = 0; i < 16; i++)
++		printf(" %02x", irq[i]);
++	printf("\n");
++	printf("RUBY MT6360: %s mask f0..ff:", tag);
++	for (i = 0; i < 16; i++)
++		printf(" %02x", mask[i]);
++	printf("\n");
++	printf("RUBY MT6360: %s base irq=d8:%02x mask=f8:%02x\n", tag,
++	    irq[8], mask[8]);
++}
++
++static void
++pr_mt6360_chg(const uint8_t *chg)
++{
++	uint32_t i;
++
++	printf("RUBY MT6360: chg e0..ef:");
++	for (i = 0; i < 16; i++)
++		printf(" %02x", chg[i]);
++	printf("\n");
++}
++
++static int
++pr_cmd_mt6360(const char *p)
++{
++	struct ruby_i2c_bus *b = &pr.i2c[0];
++	uint8_t irq[16], mask[16], chg[16], irq2[16], mask2[16];
++	int err;
++
++	if (!strcmp(p, "status")) {
++		err = pr_i2c_take(b);
++		if (!err)
++			err = pr_i2c_read_regs(b, 0x34, 0xD0, irq, 16);
++		if (!err)
++			err = pr_i2c_read_regs(b, 0x34, 0xF0, mask, 16);
++		if (!err)
++			err = pr_i2c_read_regs(b, 0x34, 0xE0, chg, 16);
++		(void)pr_i2c_release(b);
++		if (err) {
++			printf("RUBY MT6360: status err=%d\n", err);
++			return 1;
++		}
++		pr_mt6360_dump("now", irq, mask);
++		pr_mt6360_chg(chg);
++		pr_gpio_read(4);
++		return 1;
++	}
++	if (!strcmp(p, "ack")) {
++		int gate = 0;
++
++		if (!PE_parse_boot_argn("rubymt6360", &gate, sizeof(gate)) ||
++		    gate != 1) {
++			printf("RUBY MT6360: locked (rubymt6360=1)\n");
++			return 1;
++		}
++		err = pr_i2c_take(b);
++		if (!err)
++			err = pr_i2c_read_regs(b, 0x34, 0xD0, irq, 16);
++		if (!err)
++			err = pr_i2c_read_regs(b, 0x34, 0xF0, mask, 16);
++		if (!err)
++			err = pr_i2c_read_regs(b, 0x34, 0xE0, chg, 16);
++		if (!err)
++			err = pr_i2c_write_reg(b, 0x34, 0xF8, 0xFF);
++		if (!err)
++			err = pr_i2c_read_regs(b, 0x34, 0xF0, mask2, 16);
++		if (!err)
++			err = pr_i2c_write_reg(b, 0x34, 0xD8, 0x9E);
++		if (!err)
++			err = pr_i2c_read_regs(b, 0x34, 0xD0, irq2, 16);
++		(void)pr_i2c_release(b);
++		if (err) {
++			printf("RUBY MT6360: ack err=%d\n", err);
++			return 1;
++		}
++		pr_mt6360_dump("before", irq, mask);
++		pr_mt6360_chg(chg);
++		pr_mt6360_dump("after", irq2, mask2);
++		pr_gpio_read(4);
++		return 1;
++	}
++	printf("RUBY CMD: err: mt6360 status|ack\n");
++	return 1;
++}
++
+ static int
+ pr_cmd_clk(char *line)
+ {
+@@ -1718,6 +1835,10 @@
+ 		pr_cmd_battery();
+ 		return 1;
+ 	}
++	if (!strncmp(p, "mt6360 ", 7))
++		return pr_cmd_mt6360(pr_skip(p + 7));
++	if (!strcmp(p, "mt6360"))
++		return pr_cmd_mt6360("");
+ 	if (!strncmp(p, "irq ", 4))
+ 		return pr_cmd_irq(pr_skip(p + 4));
+ 	if (!strcmp(p, "irq"))

@@ -1,0 +1,46 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -862,6 +862,7 @@
+ static void ruby_ep2_rx_halt_clear(vm_offset_t mac);
+ static void ruby_usb_reset_check(vm_offset_t mac);
+ static void ruby_usb_attach_poll(vm_offset_t mac, vm_offset_t ippc);
++static void ruby_usb_reattach(vm_offset_t mac, vm_offset_t phy);
+ 
+ static void
+ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+@@ -2918,9 +2919,19 @@
+         return;             /* attached at boot: nothing to redo */
+     seen_detach = 0;
+     attaches++;
+-    ruby_usb_rearm(mac, RUBY_REARM_ATTACH);
++    /*
++     * A VBUS detach drops the U2 PHY session, so the light MAC rearm is
++     * not enough: the D+ pull-up has to be cycled before the host can see
++     * a new connect.  Reuse the 0116 boot-window sequence at runtime.
++     */
++    ruby_usb_reattach(mac, ruby_phy_base);
+     ruby_trace(0, RUBY_TR_STATE, 9, v, attaches, 0);
+-    printf("RUBY USB: t=%u VBUS attached, device re-armed\n", ruby_ms);
++    printf("RUBY USB: t=%u VBUS attached, device re-attached "
++        "(otg=%08x pm=%08x misc=%08x acr3=%08x)\n", ruby_ms,
++        ruby_rd32(ippc, IPPC_OTG_STS_OFF),
++        ruby_rd32(mac, PM_CTRL - MTU3_PA),
++        ruby_rd32(mac, MISC_CTRL - MTU3_PA),
++        ruby_rd32(ruby_phy_base, PHY_U2_ACR3));
+ }
+ 
+ /*
+@@ -3332,6 +3343,13 @@
+     delay(150000);
+ 
+     ruby_ep0_set_maxpacket(mac);
++    /*
++     * A physical unplug drops the PHY session; re-assert the MAC session
++     * bits before the D+ pull-up goes back up, in the same order as the
++     * probe path.
++     */
++    v = ruby_rd32(mac, MISC_CTRL - MTU3_PA);
++    ruby_wr32(mac, MISC_CTRL - MTU3_PA, v | 0x3u);
+     v = ruby_rd32(phy, PHY_U2_ACR3);
+     ruby_wr32(phy, PHY_U2_ACR3, v | ACR3_EN_PU_DP);
+     delay(1000);

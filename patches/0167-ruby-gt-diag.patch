@@ -1,0 +1,153 @@
+--- a/bsd/dev/ruby_probe.c
++++ b/bsd/dev/ruby_probe.c
+@@ -29,6 +29,7 @@
+ #include "ruby_irq.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void sweet_goodix_diag(void);
+ 
+ #define PR_GPIO_PA       0x10005000u
+ #define PR_PWRAP_PA      0x10026000u
+@@ -1399,6 +1400,7 @@
+ 	printf("RUBY CMD: eint status | eint selftest <line> [ms] (rubyeint)\n");
+ 	printf("RUBY CMD: irq status|arm|disarm (rubyirq)\n");
+ 	printf("RUBY CMD: mt6360 status|ack (rubymt6360)\n");
++	printf("RUBY CMD: gt diag (read-only gt_frame counters)\n");
+ }
+ 
+ static void
+@@ -1835,6 +1837,10 @@
+ 		}
+ 		return pr_key_watch(ms);
+ 	}
++	if (!strcmp(p, "gt diag")) {
++		sweet_goodix_diag();
++		return 1;
++	}
+ 	if (!strcmp(p, "battery status")) {
+ 		pr_cmd_battery();
+ 		return 1;
+--- a/bsd/dev/sweet_goodix_spi.c
++++ b/bsd/dev/sweet_goodix_spi.c
+@@ -18,6 +18,7 @@
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+ #include <kern/sched_prim.h>
++#include <mach/mach_time.h>
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ #include "ruby_battery.h"
+@@ -79,6 +80,17 @@
+ 
+ static int gt_sleep_chan;
+ 
++/* Read-only diagnostics: split gt_frame() failures by return path so the
++ * IRQ owner's service_fail counter can be attributed. */
++static struct {
++	uint32_t ok, release, touch;
++	uint32_t err_zero, err_head, err_noevent, err_ngt2;
++	uint32_t err_dcsum, err_point;
++	uint32_t status[16];
++	uint32_t n[16];
++	uint32_t reads, us_sum, us_max;
++} gt_diag;
++
+ static const struct ruby_eint_child gt_eint_child = {
+ 	.name = "goodix",
+ 	.init = NULL,
+@@ -625,24 +637,40 @@
+ 	uint8_t tx[40], rx[40];
+ 	const uint8_t *d = &rx[8];
+ 	uint32_t nz = 0, n, mask = 0, sum = 0;
++	uint64_t t0, dt_ns;
+ 	int i;
+ 
++	t0 = mach_absolute_time();
+ 	spi_read_req(tx, 0x10308);
+ 	spi_xfer(tx, rx, 34);
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &dt_ns);
++	gt_diag.reads++;
++	gt_diag.us_sum += (uint32_t)(dt_ns / 1000);
++	if ((uint32_t)(dt_ns / 1000) > gt_diag.us_max)
++		gt_diag.us_max = (uint32_t)(dt_ns / 1000);
++	gt_diag.status[(d[0] >> 4) & 0xf]++;
++	gt_diag.n[d[2] & 0x0f]++;
+ 
+ 	for (i = 0; i < 8; i++) {
+ 		nz |= d[i];
+ 	}
+-	if (!nz || !gt_head_ok(d)) {
++	if (!nz) {
++		gt_diag.err_zero++;
++		return EAGAIN;
++	}
++	if (!gt_head_ok(d)) {
++		gt_diag.err_head++;
+ 		return EAGAIN;
+ 	}
+ 
+ 	if (!(d[0] & 0x80)) {
++		gt_diag.err_noevent++;
+ 		gt_clear_sync();
+ 		return EAGAIN;
+ 	}
+ 	n = d[2] & 0x0f;
+ 	if (n > 2) {
++		gt_diag.err_ngt2++;
+ 		gt_clear_sync();
+ 		return EIO;
+ 	}
+@@ -653,6 +681,7 @@
+ 		}
+ 		if ((sum & 0xffff) !=
+ 		    (uint32_t)(d[8 + n * 8] | (d[8 + n * 8 + 1] << 8))) {
++			gt_diag.err_dcsum++;
+ 			gt_clear_sync();
+ 			return EIO;
+ 		}
+@@ -664,6 +693,7 @@
+ 
+ 			if (id >= GT_MAX || (mask & (1u << id)) ||
+ 			    type == 1 || type == 3) {
++				gt_diag.err_point++;
+ 				gt_clear_sync();
+ 				return EIO;
+ 			}
+@@ -690,9 +720,37 @@
+ 		}
+ 	}
+ 	gt.active = mask;
++	gt_diag.ok++;
++	if (n == 0)
++		gt_diag.release++;
++	else
++		gt_diag.touch++;
+ 	return 0;
+ }
+ 
++void
++sweet_goodix_diag(void)
++{
++	int i;
++
++	printf("SWEET GT DIAG: ok=%u rel=%u touch=%u zero=%u head=%u noev=%u ngt2=%u dcsum=%u point=%u\n",
++	    gt_diag.ok, gt_diag.release, gt_diag.touch, gt_diag.err_zero,
++	    gt_diag.err_head, gt_diag.err_noevent, gt_diag.err_ngt2,
++	    gt_diag.err_dcsum, gt_diag.err_point);
++	printf("SWEET GT DIAG: status hi:");
++	for (i = 0; i < 16; i++)
++		printf(" %x:%u", i, gt_diag.status[i]);
++	printf("\nSWEET GT DIAG: n:");
++	for (i = 0; i < 16; i++)
++		printf(" %x:%u", i, gt_diag.n[i]);
++	printf("\n");
++	if (gt_diag.reads) {
++		printf("SWEET GT DIAG: reads=%u avg_us=%u max_us=%u\n",
++		    gt_diag.reads, gt_diag.us_sum / gt_diag.reads,
++		    gt_diag.us_max);
++	}
++}
++
+ static void
+ gt_thread(void *arg, wait_result_t wr)
+ {
