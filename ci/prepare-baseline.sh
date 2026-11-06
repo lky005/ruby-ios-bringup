@@ -167,6 +167,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0177-ruby-eint-native-parent.patch" \
     "$ROOT/patches/0178-ruby-eint-child-oneshot.patch" \
     "$ROOT/patches/0179-ruby-eint-retry.patch" \
+    "$ROOT/patches/0180-ruby-usb-qcr1-zlp.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
