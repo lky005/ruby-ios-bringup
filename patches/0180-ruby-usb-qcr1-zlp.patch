@@ -1,0 +1,24 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1551,7 +1551,7 @@
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
+ 
+     ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) & ~(1u << 2));
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 2));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 18) | (1u << 2));
+ 
+@@ -1704,9 +1704,10 @@
+      * The verified P9 TX path only ever sent short packets.  Keep each
+      * frame one byte below wMaxPacketSize so every GPD ends on a short
+      * packet; 64-byte frames are an untested exact multiple and never
+-     * produced a TX done.  TX ZLP stays off for the same reason.
++     * produced a TX done.  Enable the vendor global TX ZLP bit; the
++     * GPD ZLP flag stays off, so 511-byte short packets are unchanged.
+      */
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) & ~(1u << 2));
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 2));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 18) | (1u << 2));
+     ruby_wr32(mac, TQSAR2_OFF, (uint32_t)ruby_ring_pa);

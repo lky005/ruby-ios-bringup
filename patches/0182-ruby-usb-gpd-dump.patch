@@ -1,0 +1,49 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -272,6 +272,7 @@
+ static volatile uint32_t ruby_enum_assist_until;
+ static void ruby_ep2_config(vm_offset_t mac);
+ static void ruby_ep2_push_log(vm_offset_t mac);
++static void ruby_ep2_dump_gpd(vm_offset_t mac, uint32_t first, uint32_t last);
+ 
+ static inline uint32_t
+ ruby_rd32(vm_offset_t base, uint32_t off)
+@@ -1824,6 +1825,29 @@
+ }
+ 
+ static void
++ruby_ep2_dump_gpd(vm_offset_t mac, uint32_t first, uint32_t last)
++{
++    uint32_t i;
++
++    printf("RUBY USB: GPD dump cur=%02x enq=%u deq=%u inflight=%u "
++        "hwo=%llx tqcsr=%08x tqcpr=%08x tqerr=%08x qisar0=%08x\n",
++        ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
++        ruby_inflight, (unsigned long long)ruby_ep2_hwo_bits(),
++        ruby_rd32(mac, TQCSR2_OFF), ruby_rd32(mac, TQCPR2_OFF),
++        ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, QISAR0_OFF));
++    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    for (i = first; i <= last && i < RUBY_GPD_NUM; i++) {
++        volatile uint8_t *g = ruby_gpd_ring + i * RUBY_GPD_STRIDE;
++
++        printf("RUBY USB: GPD[%02u] flag=%02x chk=%02x len=%u "
++            "next=%08x buf=%08x\n", i, g[0], g[1],
++            (uint32_t)(*(volatile uint16_t *)(g + 12)),
++            *(volatile uint32_t *)(g + 4),
++            *(volatile uint32_t *)(g + 8));
++    }
++}
++
++static void
+ ruby_ep2_push_log(vm_offset_t mac)
+ {
+     uint32_t q0, q1, txq1, err, enq, i, csr0;
+@@ -1965,6 +1989,8 @@
+                             ruby_ep2_drain_max, ruby_ep2_drain_calls);
+                         ruby_ep2_stuck_log_ms = ruby_ms;
+                     }
++                    if (ruby_ep2_inflight_stuck == 1)
++                        ruby_ep2_dump_gpd(mac, 20, 32);
+                     ruby_ep2_resume(mac);
+                 }
+             }
