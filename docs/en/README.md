@@ -44,6 +44,7 @@ See [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md)
 | [`10-scripts`](10-scripts.md) | per-script purpose and boundaries | `[measured]` | 2026-11-06 |
 | [`11-ci-baseline`](11-ci-baseline.md) | content-pinned baseline, branch pins, exec-data gates | `[measured]` | 2026-11-06 |
 | [`12-usb-host`](12-usb-host.md) | USB host channel: test conditions, driver binding, safe debugging | `[measured]` | 2026-11-06 |
+| [`13-usb-ep2-golden`](13-usb-ep2-golden.md) | EP2 state machine 0180–0195, golden PHY, host-side limits | `[measured]` | 2026-11-07 |
 | [`appendix-dualboot`](appendix-dualboot.md) | optional layout; method note only | `[inferred]` | — |
 | [`glossary`](glossary.md) | codenames, acronyms and status tags | — | — |
 | [`device`](device.md) | device situation; no baseline hashes | `[measured]` | 2026-10-22 |

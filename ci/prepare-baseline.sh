@@ -167,6 +167,18 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0177-ruby-eint-native-parent.patch" \
     "$ROOT/patches/0178-ruby-eint-child-oneshot.patch" \
     "$ROOT/patches/0179-ruby-eint-retry.patch" \
+    "$ROOT/patches/0180-ruby-usb-qcr1-zlp.patch" \
+    "$ROOT/patches/0181-ruby-usb-gpd-cache-order.patch" \
+    "$ROOT/patches/0182-ruby-usb-gpd-dump.patch" \
+    "$ROOT/patches/0183-ruby-usb-gpd-dump-halt.patch" \
+    "$ROOT/patches/0184-ruby-usb-inflight16.patch" \
+    "$ROOT/patches/0185-ruby-usb-phy-eye-noise.patch" \
+    "$ROOT/patches/0186-ruby-usb-tx-slew.patch" \
+    "$ROOT/patches/0187-ruby-usb-init-order.patch" \
+    "$ROOT/patches/0188-ruby-usb-state-reset.patch" \
+    "$ROOT/patches/0189-ruby-usb-state-start.patch" \
+    "$ROOT/patches/0194-ruby-usb-golden-srctrl.patch" \
+    "$ROOT/patches/0195-ruby-usb-acknowledgements.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

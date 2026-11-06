@@ -1,0 +1,104 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -136,6 +136,8 @@
+ #define RUBY_SLEW_REF_MHZ  26u
+ #define RUBY_SLEW_COEF     28u
+ #define RUBY_SLEW_CYCLE    1024u
++/* 0194: live-sweep golden PHY value (SRCTRL=5, bit30 reserved). */
++#define RUBY_GOLDEN_ACR5   0x40805000u
+ 
+ /* 0185/0187: ruby u2port0 HS eye tuning (board ruby-mt6877.dtsi). */
+ #define PHY_U2_ACR1     0x0304
+@@ -449,8 +451,7 @@
+ static void
+ ruby_usb_u2_phy_on(vm_offset_t phy)
+ {
+-    uint32_t v, fm_out, calib, i;
+-    uint32_t fmmon0, fmmon1, fmmon0_last, fmmon1_last, polls;
++    uint32_t v;
+ 
+     /* u2_phy_instance_init (tphy v2, generic-tphy-v2). */
+     v = ruby_rd32(phy, PHY_U2_DTM0);
+@@ -542,77 +543,12 @@
+     ruby_wr32(phy, PHY_U2_DTM1, v);
+ 
+     /*
+-     * 0186/0187: vendor hs_slew_rate_calibrate (ruby u2port0 has no
+-     * eye-src).  Runs after instance power-on; 0187 moves the whole
+-     * PHY block before the IP global reset and U3D device enable to
+-     * match ssusb_rscs_init -> ssusb_ip_sw_reset -> mtu3_hw_init.
++     * 0194: FM calibration retired.  The 0189C live sweep selected
++     * SRCTRL=5 (ACR5=0x40805000) as the golden board value; the FM
++     * counter never oscillated on this port, so it is not a selector.
+      */
+-    v = ruby_rd32(phy, PHY_U2_ACR5);
+-    ruby_wr32(phy, PHY_U2_ACR5, v | ACR5_SRCAL_EN);
+-    delay(1);
+-    v = ruby_rd32(phy, PHY_U2_FMMONR1);
+-    ruby_wr32(phy, PHY_U2_FMMONR1, v | FMMONR1_FRCK_EN);
+-    v = ruby_rd32(phy, PHY_U2_FMCR0);
+-    v &= ~FMCR0_CYCLECNT;
+-    v |= RUBY_SLEW_CYCLE & FMCR0_CYCLECNT;
+-    ruby_wr32(phy, PHY_U2_FMCR0, v);
+-    ruby_wr32(phy, PHY_U2_FMCR0, v | FMCR0_FREQDET_EN);
+-
+-    fm_out = 0;
+-    fmmon0 = 0;
+-    fmmon1 = 0;
+-    fmmon0_last = ~0u;
+-    fmmon1_last = ~0u;
+-    polls = 0;
+-    for (i = 0; i < 200; i++) {
+-        fmmon0 = ruby_rd32(phy, PHY_U2_FMMONR0);
+-        fmmon1 = ruby_rd32(phy, PHY_U2_FMMONR1);
+-        if (polls < 8 &&
+-            (fmmon0 != fmmon0_last || fmmon1 != fmmon1_last)) {
+-            printf("RUBY USB: slew poll i=%u fmmon0=0x%08x "
+-                "fmmonr1=0x%08x\n", i, fmmon0, fmmon1);
+-            fmmon0_last = fmmon0;
+-            fmmon1_last = fmmon1;
+-            polls++;
+-        }
+-        if (fmmon1 & FMMONR1_FM_VALID) {
+-            fm_out = ruby_rd32(phy, PHY_U2_FMVAL);
+-            break;
+-        }
+-        if (fmmon0 != 0) {
+-            fm_out = ruby_rd32(phy, PHY_U2_FMVAL);
+-            if (fm_out)
+-                break;
+-        }
+-        delay(10);
+-    }
+-    printf("RUBY USB: slew fmcr0=0x%08x fmmon0=0x%08x fmmonr1=0x%08x "
+-        "fmval=0x%08x\n", ruby_rd32(phy, PHY_U2_FMCR0), fmmon0, fmmon1,
+-        ruby_rd32(phy, PHY_U2_FMVAL));
+-
+-    v = ruby_rd32(phy, PHY_U2_FMCR0);
+-    ruby_wr32(phy, PHY_U2_FMCR0, v & ~FMCR0_FREQDET_EN);
+-    v = ruby_rd32(phy, PHY_U2_FMMONR1);
+-    ruby_wr32(phy, PHY_U2_FMMONR1, v & ~FMMONR1_FRCK_EN);
+-    if (fm_out) {
+-        calib = (RUBY_SLEW_REF_MHZ * RUBY_SLEW_COEF * RUBY_SLEW_CYCLE /
+-            fm_out + 500u) / 1000u;
+-        if (calib > 7u)
+-            calib = 7u;
+-        v = ruby_rd32(phy, PHY_U2_ACR5);
+-        v &= ~(ACR5_SRCAL_EN | ACR5_SRCTRL);
+-        v |= (calib & 7u) << 12;
+-        ruby_wr32(phy, PHY_U2_ACR5, v);
+-    } else {
+-        /*
+-         * 0187: measurement missed.  Never write the vendor fallback
+-         * 4; keep the known-good SRCTRL=1 baseline.
+-         */
+-        calib = 1u;
+-        ruby_wr32(phy, PHY_U2_ACR5, 0x40801000u);
+-    }
+-    printf("RUBY USB: slew fm_out=%u calib=%u acr5=0x%08x\n",
+-        fm_out, calib, ruby_rd32(phy, PHY_U2_ACR5));
++    ruby_wr32(phy, PHY_U2_ACR5, RUBY_GOLDEN_ACR5);
++    printf("RUBY USB: golden acr5=0x%08x\n", ruby_rd32(phy, PHY_U2_ACR5));
+ }
+ 
+ static void
