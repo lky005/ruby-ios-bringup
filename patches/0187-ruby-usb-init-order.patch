@@ -1,0 +1,181 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -124,6 +124,7 @@
+ 
+ /* 0186: vendor hs_slew_rate_calibrate (tphy v2, U2FREQ bank at +0x100). */
+ #define PHY_U2_FMCR0    0x0100
++#define PHY_U2_FMMONR0  0x0108
+ #define PHY_U2_FMVAL    0x010c
+ #define PHY_U2_FMMONR1  0x0110
+ #define ACR5_SRCAL_EN   (1u << 15)
+@@ -136,16 +137,18 @@
+ #define RUBY_SLEW_COEF     28u
+ #define RUBY_SLEW_CYCLE    1024u
+ 
+-/* 0185: ruby u2port0 HS eye tuning (mt6877.dts device values). */
++/* 0185/0187: ruby u2port0 HS eye tuning (board ruby-mt6877.dtsi). */
+ #define PHY_U2_ACR1     0x0304
+ #define ACR1_VRT_SEL    (0x7u << 12)    /* PA1_RG_VRT_SEL  [14:12] */
+ #define ACR1_TERM_SEL   (0x7u << 8)     /* PA1_RG_TERM_SEL [10:8] */
+ #define ACR6_REV6_SEL   (0x3u << 30)    /* PA6_RG_U2_PHY_REV6  [31:30] */
+ #define ACR6_DISCTH_SEL (0xfu << 4)     /* PA6_RG_U2_DISCTH    [7:4] */
++#define ACR6_SQTH_SEL   0x0fu           /* PA6_RG_U2_SQTH      [3:0] */
+ #define RUBY_U2_EYE_VRT  6u
+-#define RUBY_U2_EYE_TERM 6u
+-#define RUBY_U2_EYE_REV6 1u
+-#define RUBY_U2_EYE_DISC 7u
++#define RUBY_U2_EYE_TERM 3u
++#define RUBY_U2_EYE_REV6 2u
++#define RUBY_U2_EYE_DISC 13u
++#define RUBY_U2_SQTH     2u
+ 
+ /* PS5169 enable: GPIO121, bank 3 */
+ #define GPIO_PINMUX_121 0x03f0
+@@ -447,6 +450,7 @@
+ ruby_usb_u2_phy_on(vm_offset_t phy)
+ {
+     uint32_t v, fm_out, calib, i;
++    uint32_t fmmon0, fmmon1, fmmon0_last, fmmon1_last, polls;
+ 
+     /* u2_phy_instance_init (tphy v2, generic-tphy-v2). */
+     v = ruby_rd32(phy, PHY_U2_DTM0);
+@@ -476,10 +480,10 @@
+     ruby_wr32(phy, PHY_U2_ACR6, v);
+ 
+     /*
+-     * 0185: board eye tuning from u2port0 in mt6877.dts (device side):
+-     * VRT 4->6, TERM 4->6, REV6 0->1, DISCTH 4->7.  Vendor order is
+-     * instance_init -> props_set -> power_on, so this sits before the
+-     * SUSPENDM sequence below.
++     * 0185/0187: board eye tuning from ruby-mt6877.dtsi &u2port0
++     * (model "RUBY"): VRT=6, TERM=3, REV6=2, DISCTH=13, SQTH=2.
++     * Vendor order is instance_init -> efuse -> props_set -> power_on,
++     * so this sits before the SUSPENDM sequence below.
+      */
+     v = ruby_rd32(phy, PHY_U2_ACR1);
+     v &= ~(ACR1_VRT_SEL | ACR1_TERM_SEL);
+@@ -487,8 +491,9 @@
+     ruby_wr32(phy, PHY_U2_ACR1, v);
+ 
+     v = ruby_rd32(phy, PHY_U2_ACR6);
+-    v &= ~(ACR6_REV6_SEL | ACR6_DISCTH_SEL);
+-    v |= (RUBY_U2_EYE_REV6 << 30) | (RUBY_U2_EYE_DISC << 4);
++    v &= ~(ACR6_REV6_SEL | ACR6_DISCTH_SEL | ACR6_SQTH_SEL);
++    v |= (RUBY_U2_EYE_REV6 << 30) | (RUBY_U2_EYE_DISC << 4) |
++        RUBY_U2_SQTH;
+     ruby_wr32(phy, PHY_U2_ACR6, v);
+     printf("RUBY USB: PHY eye acr1=0x%08x acr6=0x%08x\n",
+         ruby_rd32(phy, PHY_U2_ACR1), ruby_rd32(phy, PHY_U2_ACR6));
+@@ -537,9 +542,10 @@
+     ruby_wr32(phy, PHY_U2_DTM1, v);
+ 
+     /*
+-     * 0186: vendor hs_slew_rate_calibrate (ruby u2port0 has no eye-src).
+-     * Runs after instance power-on and before the D+ pull-up, matching
+-     * mtk_phy_power_on() -> u2_phy_instance_power_on() -> this.
++     * 0186/0187: vendor hs_slew_rate_calibrate (ruby u2port0 has no
++     * eye-src).  Runs after instance power-on; 0187 moves the whole
++     * PHY block before the IP global reset and U3D device enable to
++     * match ssusb_rscs_init -> ssusb_ip_sw_reset -> mtu3_hw_init.
+      */
+     v = ruby_rd32(phy, PHY_U2_ACR5);
+     ruby_wr32(phy, PHY_U2_ACR5, v | ACR5_SRCAL_EN);
+@@ -551,27 +557,60 @@
+     v |= RUBY_SLEW_CYCLE & FMCR0_CYCLECNT;
+     ruby_wr32(phy, PHY_U2_FMCR0, v);
+     ruby_wr32(phy, PHY_U2_FMCR0, v | FMCR0_FREQDET_EN);
++
+     fm_out = 0;
++    fmmon0 = 0;
++    fmmon1 = 0;
++    fmmon0_last = ~0u;
++    fmmon1_last = ~0u;
++    polls = 0;
+     for (i = 0; i < 200; i++) {
+-        if (ruby_rd32(phy, PHY_U2_FMMONR1) & FMMONR1_FM_VALID) {
++        fmmon0 = ruby_rd32(phy, PHY_U2_FMMONR0);
++        fmmon1 = ruby_rd32(phy, PHY_U2_FMMONR1);
++        if (polls < 8 &&
++            (fmmon0 != fmmon0_last || fmmon1 != fmmon1_last)) {
++            printf("RUBY USB: slew poll i=%u fmmon0=0x%08x "
++                "fmmonr1=0x%08x\n", i, fmmon0, fmmon1);
++            fmmon0_last = fmmon0;
++            fmmon1_last = fmmon1;
++            polls++;
++        }
++        if (fmmon1 & FMMONR1_FM_VALID) {
+             fm_out = ruby_rd32(phy, PHY_U2_FMVAL);
+             break;
+         }
++        if (fmmon0 != 0) {
++            fm_out = ruby_rd32(phy, PHY_U2_FMVAL);
++            if (fm_out)
++                break;
++        }
+         delay(10);
+     }
++    printf("RUBY USB: slew fmcr0=0x%08x fmmon0=0x%08x fmmonr1=0x%08x "
++        "fmval=0x%08x\n", ruby_rd32(phy, PHY_U2_FMCR0), fmmon0, fmmon1,
++        ruby_rd32(phy, PHY_U2_FMVAL));
++
+     v = ruby_rd32(phy, PHY_U2_FMCR0);
+     ruby_wr32(phy, PHY_U2_FMCR0, v & ~FMCR0_FREQDET_EN);
+     v = ruby_rd32(phy, PHY_U2_FMMONR1);
+     ruby_wr32(phy, PHY_U2_FMMONR1, v & ~FMMONR1_FRCK_EN);
+-    calib = fm_out ?
+-        (RUBY_SLEW_REF_MHZ * RUBY_SLEW_COEF * RUBY_SLEW_CYCLE / fm_out +
+-            500u) / 1000u : 4u;
+-    if (calib > 7u)
+-        calib = 7u;
+-    v = ruby_rd32(phy, PHY_U2_ACR5);
+-    v &= ~(ACR5_SRCAL_EN | ACR5_SRCTRL);
+-    v |= (calib & 7u) << 12;
+-    ruby_wr32(phy, PHY_U2_ACR5, v);
++    if (fm_out) {
++        calib = (RUBY_SLEW_REF_MHZ * RUBY_SLEW_COEF * RUBY_SLEW_CYCLE /
++            fm_out + 500u) / 1000u;
++        if (calib > 7u)
++            calib = 7u;
++        v = ruby_rd32(phy, PHY_U2_ACR5);
++        v &= ~(ACR5_SRCAL_EN | ACR5_SRCTRL);
++        v |= (calib & 7u) << 12;
++        ruby_wr32(phy, PHY_U2_ACR5, v);
++    } else {
++        /*
++         * 0187: measurement missed.  Never write the vendor fallback
++         * 4; keep the known-good SRCTRL=1 baseline.
++         */
++        calib = 1u;
++        ruby_wr32(phy, PHY_U2_ACR5, 0x40801000u);
++    }
+     printf("RUBY USB: slew fm_out=%u calib=%u acr5=0x%08x\n",
+         fm_out, calib, ruby_rd32(phy, PHY_U2_ACR5));
+ }
+@@ -3831,6 +3870,16 @@
+     u2 = ruby_rd32(ippc, 0x50);
+     rst = ruby_rd32(ippc, 0x98);
+ 
++    /*
++     * 0187: vendor order is rscs_init (PHY init + power_on + slew
++     * calibration) -> ssusb_ip_sw_reset -> mtu3_hw_init (device reset
++     * and port enable).  Run the PHY block before the IP global reset
++     * and the U3D device/port enable.
++     */
++    ruby_usb_u3_phy_on(phy);
++    ruby_usb_u2_phy_on(phy);
++    delay(1000);
++
+     /* Global IP reset pulse, then release it. */
+     ruby_wr32(ippc, 0x00, c0 | C0_SW_RST);
+     delay(200);
+@@ -3853,10 +3902,6 @@
+     else
+         printf("RUBY USB: IPPC ready (s1=0x%08x s2=0x%08x)\n", s1, s2);
+ 
+-    ruby_usb_u3_phy_on(phy);
+-    ruby_usb_u2_phy_on(phy);
+-    delay(1000);
+-
+     /* Device PHY mode: IDDIG forced; D+ stays down until the attach step. */
+     v = ruby_rd32(phy, PHY_U2_DTM1);
+     v |= DTM1_FORCE_IDDIG | DTM1_RG_IDDIG;

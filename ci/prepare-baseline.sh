@@ -174,6 +174,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0184-ruby-usb-inflight16.patch" \
     "$ROOT/patches/0185-ruby-usb-phy-eye-noise.patch" \
     "$ROOT/patches/0186-ruby-usb-tx-slew.patch" \
+    "$ROOT/patches/0187-ruby-usb-init-order.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
