@@ -1,0 +1,12 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2155,6 +2155,9 @@
+         ruby_ep2_drain_invariant, ruby_ep2_drain_max,
+         ruby_ep2_drain_calls, ruby_ep2_halt_clears);
+ 
++    if (ruby_ep2_halt_clears < 2)
++        ruby_ep2_dump_gpd(mac, 20, 32);
++
+     /*
+      * 0127: vendor CLEAR_FEATURE parity: W1C SENTSTALL, clear SENDSTALL,
+      * pulse EP_RST.  No QMU stop/flush/start and no GPD ring reset.
