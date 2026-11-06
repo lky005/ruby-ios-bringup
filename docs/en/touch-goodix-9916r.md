@@ -182,7 +182,13 @@ succeeded but reads were all zero. The vendor resets the FIFO (`SPI_CMD_RST`)
 on CS deassert. A future controller path must flush the FIFO between transfers
 or use DMA. The current XNU driver uses bit-bang and avoids this.
 
-## 6. XNU driver
+## 6. XNU driver (0085 poll; 0179 native EINT)
+
+> The table below describes the historical 0085 polling driver. The current
+> 0179 line keeps the same power/protocol code but services frames from the
+> EINT14 hardware edge; see §6.1.
+
+
 
 | Item | Value |
 |---|---|
@@ -200,6 +206,29 @@ or use DMA. The current XNU driver uses bit-bang and avoids this.
 The power/protocol logic is the same as the bare-metal probe. XNU runs with
 the MMU on, so the probe's Device-memory unaligned-access restriction no
 longer applies.
+
+### 6.1 Native EINT service (0179)
+
+```text
+EINT14 (edge falling)
+  -> EINT child controller (vector = line)
+       -> child IOInterruptEventSource on a dedicated IOWorkLoop
+            -> gt_service_frame(): SPI3 read + HID submit
+            -> service_done(): MASK_CLR + ACTIVE, re-arm the pin
+```
+
+- SPI288 parent is level and becomes RubyGIC INTID 288; its filter only
+  masks/acks/counts and raises line 14.
+- The child action owns SPI3/HID; commands and diagnostics run on the same
+  `IOCommandGate`; `gt_thread` is removed and there is no second consumer.
+- A failed frame is dropped and the line is re-armed. Eight consecutive
+  failures run one SPI FIFO reset + chip soft handshake. Injected tests logged
+  `soft reset no-ack` (the injector leaves 1–2 fail credits at the boundary),
+  so the `ok` path is not proven.
+- No ESD timer; a silent stuck panel needs a reboot.
+- Evidence: G1–G6; first 10 min `isr 2381→6004`, `ok=5997`, `fail=7`; ~5 min
+  stress `isr 8672→13282`, `ok=12866`, `fail +9`; no panic/stuck/re-activation.
+  G7 (0177 rollback) and G8 (USB re-plug) were cancelled by decision.
 
 ## 7. Bring-up history (including wrong turns)
 

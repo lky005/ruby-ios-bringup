@@ -38,6 +38,20 @@ must not appear in the public tree:
 | Config-mode layout | pass without golden; 11 pinned checks |
 | Linux host CI | pass before the final docs/template-only amendment; see Actions |
 
+## CI-verified (2026-11-06)
+
+| Check | Result |
+|---|---|
+| Baseline manifest | 82 files, root `829d7598...`, manifest matches |
+| Patchset (0179) | `10b1e2e8...` (175 files) |
+| Kernel (0179) | full `2b008e52...`, exec-data `a4fb021e...`; CI `42114854911`; gate rerun `42115985782`; host-checks `42115991259` |
+| Image (0179) | `d438ba47...`; payload `72fc737c...`; cmdline `config/0179-boot.cmdline` |
+| Toolchain | `macos-15` arm64, Xcode 16.0, SDK 15.0, clang 16.0.0; workflow `xnu-0179` |
+| Device | 0179 boots; native EINT14 touch (child controller + oneshot WorkLoop); G1–G6; 1–5-finger HID; 0 panic/stuck/re-activation |
+| Failure path | dirty frame dropped, line stays active; 8-failure streak runs the soft-reset branch; 9 `no-ack` events, `ok` path not proven |
+| Known limits | G7/G8 and the full 10 min repeat were not run by decision; no ESD timer; battery UI 30 s; Type-C read-only; USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep not implemented; single unit/host |
+| Host checks | `scripts/verify-local.py --ci-config config/0179.env` passes, including the toolchain-pin, document-parity, commit-message and denied-identifier scans |
+
 ## CI-verified (2026-11-02)
 
 | Check | Result |
@@ -202,10 +216,19 @@ paths or device identifiers.
   no panic. Known limits: P2.4 battery UI latency, Type-C read-only,
   software fastboot/combo parked, USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep
   not implemented, P3 target open.
+- **G5 — 2026-11-06 (P2b):** 0179 booted on the author's unit and passed
+  G1–G6: native EINT14 → child controller → dedicated IOWorkLoop oneshot →
+  SPI3/HID, `gt_thread` removed. First 10 min: `isr 2381→6004`, `ok=5997`,
+  `fail=7`, 0 panic/0 re-activation/0 stuck. ~5 min touch/key stress:
+  `isr 8672→13282`, `ok=12866`, `fail +9` all self-healed. The 8-failure
+  soft-reset branch ran under injected faults (9 `no-ack`, line stayed
+  active); the `ok` path is not proven. G7 (0177 rollback) and G8 (USB
+  re-plug) were cancelled by decision, as was the remaining 5 min of the
+  repeat.
 - **Deferred:** second-unit boot, Linux clean-room CI, strict pinned payload
   rebuild (the test used ref `33852e3`), root/shim/ADT builders as clean-room
   tools, original ICL block regression, USB host/OTG, Wi-Fi/BT/audio/camera/
-  GPU/RTC/sleep, long-run stability.
+  GPU/RTC/sleep, long-run stability, ESD/silent-stuck recovery.
 - Device-baseline hashes are intentionally not published.
 
 The scope, hashes and non-guarantees are in [`GUARANTEE.md`](GUARANTEE.md).
@@ -288,7 +311,9 @@ are not reproduced by CI and are not a guarantee for another unit or firmware.
 
 ## Not verified
 
-- Hardware buttons, USB, Wi-Fi, GPU and RTC.
+- P2b G7/G8 (0177 rollback, USB re-plug) and a full 10 min repeat; the
+  8-failure soft reset's `ok` path; an ESD/silent-stuck recovery.
+- Wi-Fi, GPU and RTC.
 - Regression of the original (unpatched) ICL block after the first-boot state
   was created.
 - A from-scratch reproduction on a different `ruby` unit, a second-unit boot,

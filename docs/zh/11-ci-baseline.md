@@ -23,6 +23,7 @@
 
 | 线 | patchset | 文件数 | 配置 | 内核参考 |
 |---|---|---|---|---|
+| main（2026-11-06 线，合并准备） | `10b1e2e8...` | 175 | `config/0179.env` | full `2b008e52...`，exec `a4fb021e...`（CI `42114854911`；gate `42115985782`；host `42115991259`） |
 | main（2026-11-02 集成） | `da13b6df...` | 151 | `config/0155.env` | full `491f2373...`，exec `2e98fd85...`（CI `41354317810`；gate `41355922057`） |
 | main（2026-11-01 集成） | `9f7b41cf...` | 141 | `config/0144.env` | full `9c82ea75...`，exec `62a17d48...`（CI `41222632828`） |
 | main（2026-10-30 集成） | `f47f4c19...` | 139 | `config/0143.env` | full `d2eae74d...`，exec `6fa65088...`（CI `41022192026`） |
@@ -31,7 +32,9 @@
 | USB（`usb-0131b-probe-write`，历史） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
 
 - main 包含 0080/0084/0085、0086-0131b、0140/0141、0142/0143、
-  0144/0145，以及 0146a-0155 线（探针/pwrap、按键/复位、电池、触摸）。
+  0144/0145、历史 0146a-0155 线（探针/pwrap、按键/复位、电池、触摸），
+  以及当前 0156-0179 线（HAL/I2C、USB 热插拔、RubyGIC/KPD、原生 EINT
+  触摸）。
 - 0142 把 EP2 IN bulk MPS 扩到 512；0143 把每帧日志扩到 511 B（16 B 头
   + 最多 495 B 文本），并在停 QMU 后 reset TX 环。host 侧首会话 XACT
   在 0143 仍未闭环。
@@ -63,7 +66,7 @@ ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
-python scripts/verify-local.py --ci-config config/0155.env
+python scripts/verify-local.py --ci-config config/0179.env
 ```
 
 USB 分支使用 `--ci-config config/0131b.env`。

@@ -1,7 +1,9 @@
 # 触控 bring-up 实验室
 
 真实触摸已通过 0085 移植并在实机验证（锁屏底边上滑、双指 contact 分发、
-edge；用户态 pinch 未单独验证）。
+edge；用户态 pinch 未单独验证）。当前 0179 线改由 EINT14 原生中断 +
+子 controller + oneshot WorkLoop 驱动（1–5 指帧；无 ESD timer）；
+0085 的 bit-bang 轮询保留为历史。
 0084 的合成上滑证明了
 `SweetHIDTouch -> IOHIDEventService -> backboardd -> SpringBoard` 链路；
 本目录保留 probe 阶梯、硬件契约和失败记录，完整手册见

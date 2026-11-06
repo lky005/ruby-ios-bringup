@@ -179,7 +179,12 @@ MTK SPI 控制器 FIFO 只有 32 字节，而 34 字节预读必须用 DMA 或
 `mtk_spi_reset()`（`SPI_CMD_RST`）清 FIFO；后续若改用控制器，必须在传输
 前后清 FIFO，或直接用 DMA。当前 XNU 驱动用 bit-bang，绕开了这个坑。
 
-## 6. XNU 驱动
+## 6. XNU 驱动（0085 轮询；0179 原生 EINT）
+
+> 下表描述历史 0085 轮询驱动。当前 0179 线保留相同上电/协议代码，但由
+> EINT14 硬件边沿服务触摸帧；见 §6.1。
+
+
 
 | 项 | 值 |
 |---|---|
@@ -196,6 +201,28 @@ MTK SPI 控制器 FIFO 只有 32 字节，而 34 字节预读必须用 DMA 或
 
 上电/协议逻辑与 bare-metal probe 完全一致；XNU 下 MMU 打开，不再有
 probe 的 Device-memory 非对齐访问限制。
+
+### 6.1 原生 EINT 服务（0179）
+
+```text
+EINT14（下降沿）
+  -> EINT 子 controller（vector = line）
+       -> 专用 IOWorkLoop 上的子 IOInterruptEventSource
+            -> gt_service_frame()：SPI3 读帧 + HID 提交
+            -> service_done()：MASK_CLR + ACTIVE，重开引脚
+```
+
+- SPI288 父线是 level，注册为 RubyGIC INTID 288；filter 只做 mask/ACK/
+  计数并 raise line 14。
+- 子 action 拥有 SPI3/HID；命令/诊断在同一 `IOCommandGate` 串行；
+  `gt_thread` 已删除，没有第二个消费者。
+- 读帧失败只丢帧并重开线；连续 8 次失败做一次 SPI FIFO 复位 + 芯片软
+  握手。注入下记录到 `soft reset no-ack`（注入器在边界残留 1–2 帧失败），
+  `ok` 路径未证。
+- 无 ESD timer；静默卡低只能重启。
+- 证据：G1–G6；首次 10 min `isr 2381→6004`、`ok=5997`、`fail=7`；约
+  5 min 压测 `isr 8672→13282`、`ok=12866`、`fail +9`；无 panic/STUCK/
+  重激活。G7（0177 回退）和 G8（USB re-plug）按决定取消。
 
 ## 7. Bring-up 记录（含错误路径）
 

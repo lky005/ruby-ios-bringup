@@ -24,6 +24,7 @@ project's delta.
 
 | Line | Patchset | Files | Config | Kernel reference |
 |---|---|---|---|---|
+| main (2026-11-06 line, merge prep) | `10b1e2e8...` | 175 | `config/0179.env` | full `2b008e52...`, exec `a4fb021e...` (CI `42114854911`; gate `42115985782`; host `42115991259`) |
 | main (2026-11-02 integration) | `da13b6df...` | 151 | `config/0155.env` | full `491f2373...`, exec `2e98fd85...` (CI `41354317810`; gate `41355922057`) |
 | main (2026-11-01 integration) | `9f7b41cf...` | 141 | `config/0144.env` | full `9c82ea75...`, exec `62a17d48...` (CI `41222632828`) |
 | main (2026-10-30 integration) | `f47f4c19...` | 139 | `config/0143.env` | full `d2eae74d...`, exec `6fa65088...` (CI `41022192026`) |
@@ -32,8 +33,9 @@ project's delta.
 | USB (`usb-0131b-probe-write`, historical) | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`, exec `06db2bb3...` |
 
 - Main includes 0080/0084/0085, 0086-0131b, 0140/0141, 0142/0143,
-  0144/0145, and the 0146a-0155 line (probe/pwrap, keys/reboot, battery,
-  touch).
+  0144/0145, the historical 0146a-0155 line (probe/pwrap, keys/reboot,
+  battery, touch) and the current 0156-0179 line (HAL/I2C, USB hotplug,
+  RubyGIC/KPD and native EINT touch).
 - 0142 widens the EP2 IN bulk MPS to 512; 0143 grows each log frame to
   511 bytes (16 B header + up to 495 B text) and resets the TX ring on
   rearm after stopping the QMU. The host-side first-session XACT remains
@@ -69,7 +71,7 @@ ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
-python scripts/verify-local.py --ci-config config/0155.env
+python scripts/verify-local.py --ci-config config/0179.env
 ```
 
 The USB branch passes `--ci-config config/0131b.env`.

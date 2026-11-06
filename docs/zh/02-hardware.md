@@ -76,11 +76,11 @@ XNU UFS 驱动用 LUN 2，GPT header 在 512、entries 在 1024。作者布局�
 | 项 | 值 | 说明 |
 |---|---|---|
 | 触摸 | Goodix **GT9916R** | SPI3 `0x11013000` |
-| IRQ/reset | GPIO14 / GPIO15 | DVDD GPIO110 |
+| IRQ/reset | EINT14（GPIO14，下降沿）/ GPIO15 | DVDD GPIO110；SPI288 父线为 level，映射 RubyGIC INTID 288 |
 | 量程 | ABS 10800×24000 | 面板 1080×2400（10×） |
 | 固件 | `goodix_firmware_m16_TM.bin` | **TM** 已确认；版本/config 相等时无需主机下载 |
-| 驱动 | 0085，GPIO bit-bang SPI3 | MT6360 LDO3 1.8 V / LDO2 3.3 V；见[触摸手册](touch-goodix-9916r.md) |
-| 按键 | `mtk-kpd @ 0x10010000` | 电源/音量；不是 pwrap 按键 |
+| 驱动 | 0179，原生 EINT14 → 子 controller → oneshot WorkLoop → SPI3 | MT6360 LDO3 1.8 V / LDO2 3.3 V；0085 bit-bang 轮询为历史；见[触摸手册](touch-goodix-9916r.md) |
+| 按键 | `mtk-kpd @ 0x10010000` | 电源/音量；音量下 KPD IRQ 走 RubyGIC INTID 138；不是 pwrap 按键 |
 | PMIC | pwrap `0x10026000/0x10028000` | MT6359；MT6360 充电；MT6315 SPMI |
 | USB | MTU3 `usb0@11201000` | U2/U3 PHY，MT6360 Type-C；未移植 |
 

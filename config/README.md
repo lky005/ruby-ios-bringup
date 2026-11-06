@@ -35,11 +35,18 @@ Xcode 16.0; CI `41229568807`, kernel exec-data `62a17d48...`):
 `rubyprobe=1` for the I2C pin takeover/WDT emergency writes, `sweetgt=0` so
 the probe owns I2C5, and no `rubypmic` (pwrap/rail writes stay locked).
 
-`0155.env` and `0155-boot.cmdline` are the 2026-11-02 current line (patchset
-`da13b6df...`, 151 files; CI `41354317810`, gate `41355922057`, kernel
-exec-data `2e98fd85...`, image `3b44c0e2...`): `rubyusb=1`, `rubyprobe=1`,
-`rubypwrap=1`, `rubkeys=1`, `rubybatt=1`, `sweetgt=1`; no `sweetbattery`.
-Touch and battery share the I2C5 IOLock.
+`0179.env` and `0179-boot.cmdline` are the 2026-11-06 current line (patchset
+`10b1e2e8...`, 175 files; CI `42114854911`, gate `42115985782`, host-checks
+`42115991259`, kernel exec-data `a4fb021e...`, image `d438ba47...`):
+`rubyusb=1`, `rubyprobe=1`, `rubypwrap=1`, `rubkeys=1`, `rubybatt=1`,
+`sweetgt=1`, `rubyeint=1`, `rubyeintb1=1`, `rubykpdirq=1`; no `sweetbattery`.
+Touch uses the native EINT14 oneshot path; battery remains read-only.
+
+`0155.env` and `0155-boot.cmdline` are the historical 2026-11-02 line
+(patchset `da13b6df...`, 151 files; CI `41354317810`, gate `41355922057`,
+kernel exec-data `2e98fd85...`, image `3b44c0e2...`): `rubyusb=1`,
+`rubyprobe=1`, `rubypwrap=1`, `rubkeys=1`, `rubybatt=1`, `sweetgt=1`; no
+`sweetbattery`. Touch and battery share the I2C5 IOLock.
 
 The kernel SHA and image SHA in `0085.env` are from the build that booted.
 A CI rebuild is not promised to be byte-identical; the canonical patchset hash

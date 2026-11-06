@@ -30,11 +30,11 @@ avoiding an `hdr_loaded` rejection.
 |---|---|---|
 | Bootloader | Xiaomi LK | none; only `boot_a` is written |
 | Payload | shim/loader | early `src/bringup`; upstream loader for 0084 |
-| Kernel | XNU 8796 | patches 0080/0085 (real touch); 0084 previous; 0081–0083 historical |
+| Kernel | XNU 8796 | patches 0080/0085 (real touch), 0156-0179 (HAL/USB/battery/native IRQ); 0084 previous; 0081–0083 historical |
 | Root | HFS+ in `iosroot` | pulled v14 + seed; not in the repo |
 | Userland | iOS 16.7.16 | ICL 4-byte NOP |
 | Display | IOSurface/IOMFB | 0081 debug path |
-| Input | SweetHID | real Goodix touch (0085); 0084 autoswipe retained |
+| Input | SweetHID | real Goodix touch driven by native EINT14 since 0179 (0085 bit-bang poll historical); 0084 autoswipe retained |
 
 ## The three walls
 

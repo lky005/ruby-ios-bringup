@@ -2,7 +2,7 @@
 
 [English](README.md) · **中文**
 
-[![xnu-0155](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![xnu-0179](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
 [![tag v0.4.0](https://img.shields.io/badge/tag-v0.4.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.4.0)
 
@@ -10,12 +10,13 @@
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
 > [!IMPORTANT]
-> **状态 2026-11-02 — 0155 线。** `main e81510f`、`v0.4.0`；patchset
-> `da13b6df…`（151 文件）、exec-data `2e98fd85…`、镜像 `3b44c0e2…`；
-> `boot_a` 0155。已通：UFS root、显示、真实 GT9916R 触摸、音量/电源键、
-> 电池只读（4311 mV，external=1/full=1）、USB 探针。
-> 限制：P2.4 电池 UI 30 s 滞后（100→98）、Type-C 只读、无 USB host/
-> audio/Wi-Fi/BT/camera/GPU/RTC/sleep；软件 fastboot/组合键 parked。
+> **状态 2026-11-06 — 0179 线。** `main` 合并待执行（M2），计划 `v0.5.0`；
+> patchset `10b1e2e8…`（175 文件）、exec-data `a4fb021e…`、镜像
+> `d438ba47…`；`boot_a` 0179。已通：UFS root、显示、原生 EINT14 触摸
+> （子 controller + oneshot WorkLoop）、音量/电源键、电池只读、USB 探针/
+> 热插拔。限制：G7/G8 与完整 10 min 复跑按决定未跑；无 ESD timer；
+> Type-C 只读；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep；
+> 软件 fastboot/组合键 parked。
 > 见 [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [docs](docs/README.md)。
 
 ## 从这里开始
@@ -44,11 +45,11 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | CPU | 6× Cortex-A55，16K 页，GICv3，定时器 |
 | 显示 | IOSurface/IOMFB → LK framebuffer，1080×2400 |
 | 用户态 | launchd → lsd → backboardd → SpringBoard |
-| 输入 | **真实 Goodix GT9916R**，bit-bang SPI3；解锁、双指 contact 上报、edge；音量/电源键经 HID；0084 合成上滑仍保留 |
+| 输入 | **真实 Goodix GT9916R**，SPI3；0179 由 EINT14 经子 EINT controller + 专用 IOWorkLoop oneshot 驱动（命令/诊断走 `IOCommandGate`）；解锁、多指 contact 上报、edge；音量/电源键经 HID；0084 合成上滑仍保留 |
 | 电源 | MT6360 电池/充电只读：4311 mV、`external=1/full=1`；Type-C read-only；无充电控制/OTG |
 | 存储 | UFS LUN 2，`iosroot` 上读写 HFS+；4 MB HFS 救援根走 LK ramdisk 槽 |
-| 最新 runs（分开记录） | 2026-11-02 0155（P1/P2/P3：探针、按键、电池、触摸；19/19、8/8 I2C5、0 panic）；2026-10-30 USB 0143（512 MPS/511 B；稳定性 13/7/23 帧，一次掉链）；2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动（harness 与 main-CI 重建）；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
-| 未闭环 | P2.4 电池 UI 滞后（30 s 轮询；拔电 100→98）；P3 目标（USB host/音频/传感器）；第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
+| 最新 runs（分开记录） | 2026-11-06 0179（P2b 原生 EINT 触摸；G1–G6；10 min + 5 min 压测；0 panic）；2026-11-02 0155（P1/P2/P3：探针、按键、电池、触摸；19/19、8/8 I2C5、0 panic）；2026-10-30 USB 0143（512 MPS/511 B；稳定性 13/7/23 帧，一次掉链）；2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
+| 未闭环 | P2b G7/G8 与完整 10 min 复跑未跑；无 ESD 健康检查；P2.4 电池 UI 滞后（30 s 轮询；拔电 100→98）；P3 目标（USB host/音频/传感器）；第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
 | 未通 | Wi-Fi、Bluetooth、蜂窝、音频、相机、GPU、RTC；USB host/OTG；sleep/wake；充电控制；Type-C role |
 | 安全 | AMFI/sandbox/签名关闭；可能丢数据 |
 
@@ -67,10 +68,10 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | `ACKNOWLEDGEMENTS.zh.md`、`LEGAL.zh.md` | 致谢与法律风险声明 |
 | `docs/en/`、`docs/zh/` | 英文与中文章节 |
 | `touch/` | probe 阶梯、硬件契约与脱敏实验记录 |
-| `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0155 USB/探针/按键/电池/触摸、0140/0141 ramdisk；历史 0081-0084 |
+| `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0179 USB/探针/按键/电池/触摸/原生 IRQ、0140/0141 ramdisk；历史 0081-0084 |
 | `ci/` | 基线清单/recipe、固定 patchset 哈希、内核分段哈希与来源 |
-| `config/` | 0155 当前线（0143/0144 为历史）；0085 真实触摸和 0084 为历史 |
-| `.github/workflows/xnu.yml` | 复现当前内核并校验 patchset/exec-data 哈希；workflow 名 `xnu-0155` |
+| `config/` | 0179 当前线（0156-0179）；0155 及更早为历史 |
+| `.github/workflows/xnu.yml` | 复现当前内核并校验 patchset/exec-data 哈希；workflow 名 `xnu-0179` |
 | `src/bringup/` | 早期启动 payload、shim、镜像打包 |
 | `src/ufs-probe/` | MT6877 UFS 只读探针 |
 | `tools/image/` | ICL 补丁、dyld 扫描、boot 校验 |
@@ -114,7 +115,7 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: da13b6df...（main，151 文件；历史 9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
+patchset: 10b1e2e8...（当前线，175 文件；历史 da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -124,20 +125,21 @@ patchset 哈希不匹配就停止。boot 镜像本身**不在**仓库里；`tool
 提供离线校验和补丁工具。详见 `docs/zh/11-ci-baseline.md`。
 
 Host 管线（不碰设备、不碰 root）：`scripts/test-pipeline.sh`，输入 base
-boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0155 用
-`config/0155.env`）；生成 payload、确定性 boot 镜像并校验布局；见
+boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0179 用
+`config/0179.env`）；生成 payload、确定性 boot 镜像并校验布局；见
 `docs/zh/09-reproduce.md`。
 
 ## 当前线与验证
 
 | Pin | 值 |
 |---|---|
-| Patchset | `da13b6df…`（151 文件） |
-| 内核 | full `491f2373…`，exec-data `2e98fd85…` |
-| 镜像 | `3b44c0e2…`（`x16-0155-a00dd751.img`，payload `a00dd751…`） |
-| CI | `xnu-0155` `41362698995`；host-checks `41362698921` |
-| Tags | `v0.4.0` → `e81510f`；`p3-touch-0155-final` → `44824e2` |
-| `boot_a` | 0155 |
+| Patchset | `10b1e2e8…`（175 文件） |
+| 内核 | full `2b008e52…`，exec-data `a4fb021e…` |
+| 镜像 | `d438ba47…`（`x16-0179-touch-retry.img`，payload `72fc737c…`） |
+| CI | `xnu-0179` `42114854911`；gate rerun `42115985782`；host-checks `42115991259` |
+| Tags | `v0.5.0` → M2（待建）；`p2b-native-touch-2026-11-06` → `f6c5795`；历史 `v0.4.0` → `e81510f` |
+| `boot_a` | 0179 |
+| 设备证据 | G1–G6；首次 10 min + 约 5 min 压测；8 连败软重置（`no-ack` 边界）；0 panic |
 | 证据 | [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [GUARANTEE.zh.md](GUARANTEE.zh.md) |
 
 ## 设备情况
@@ -147,8 +149,8 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0155 �
 | 设备 | Redmi Note 12 Pro 5G，`ruby` / MT6877，8 GB + 256 GB |
 | 系统 | Android 12 / MIUI 13.0.4，已解锁，Magisk，slot `_a` |
 | 布局 | `userdata` 208.4 GiB + `iosroot` 17 GiB；`boot_a` 128 MiB；`super` 约 9.1 GB |
-| 当前状态 | 0155 镜像/内核；0085/0084 为历史；root A/A' 快照、ICL 块、boot cmdline；设备不在本仓库内 |
-| 成功工件 | 0155 镜像、内核、root A/A' 快照、ICL 块、boot cmdline |
+| 当前状态 | 0179 镜像/内核；0155 与 0085/0084 为历史；root A/A' 快照、ICL 块、boot cmdline；设备不在本仓库内 |
+| 成功工件 | 0179 镜像、内核、root A/A' 快照、ICL 块、boot cmdline |
 | 需匹配 | 固件/GPT、root hash、boot 镜像、启动参数、面板/显示 |
 | 不需要 | 触摸固件、Wi-Fi/BT、音频、相机/GPU、RTC |
 
@@ -176,11 +178,12 @@ hash 在 `config/0085.env`。见 [`docs/zh/device.md`](docs/zh/device.md)。
 
 ## 保证
 
-成功路径——启动到锁屏、真实 GT9916R 触摸、按键和电池读数（0155）——有
-**单台设备证据**（B+NOP 首启 -> A'、CI kernel 启动、0155 真机）和文档化
-配方。它不是第二台/干净室保证。启动前工件 hash 对命名文件是固定的；启动后
-的 live-root/ring/日志 hash 易变。从 IPSW 造 root/shim/ADT 的 builder 和严格
-pin 的 payload 仍未完成。见 [`GUARANTEE.zh.md`](GUARANTEE.zh.md)。
+成功路径——启动到锁屏、原生 EINT14 触摸、按键和电池读数（0179）——有
+**单台设备证据**（B+NOP 首启 -> A'、CI kernel 启动、0155 真机、0179 P2b
+线）和文档化配方。它不是第二台/干净室保证；G7/G8 与完整 10 min 复跑未做。
+启动前工件 hash 对命名文件是固定的；启动后的 live-root/ring/日志 hash 易变。
+从 IPSW 造 root/shim/ADT 的 builder 和严格 pin 的 payload 仍未完成。见
+[`GUARANTEE.zh.md`](GUARANTEE.zh.md)。
 
 ## 文档
 

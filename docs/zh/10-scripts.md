@@ -33,7 +33,7 @@
 | `tools/image/boot_layout.py` | 重建镜像 vs golden 布局对比 | 只读 | 已测 |
 | `scripts/test-pipeline.sh` | payload → pack → layout（0084 里程碑） | 临时写 | 0084 通过；0085 用 `09-reproduce` 的三条命令 |
 | `tools/host/ruby_usb_host.py` | USB 上位机会话管理（`status`/`cmd`/`watch`）；EP0 只读，一条 EP2 OUT 命令，可选单次 `pnputil` 重启 | 仅主机；僵死设备可能掉链 | 0143/0150/0151 实测；见 [`12-usb-host`](12-usb-host.md) |
-| `config/0140.env`、`config/0131b.env`、`config/0142.env`、`config/0143.env`、`config/0144.env`、`config/0155.env` | 分支 pin 与 boot cmdline；0086 文件为历史 | 数据 | run/pin 检查 |
+| `config/0140.env`、`config/0131b.env`、`config/0142.env`、`config/0143.env`、`config/0144.env`、`config/0155.env`、`config/0179.env` | 分支 pin 与 boot cmdline；0086 文件为历史 | 数据 | run/pin 检查 |
 | `config/0085.env`、`0085-boot.cmdline` | 来源记录（真实触摸） | 数据 | run/pin 检查 |
 | `config/0084.env`、`0084-boot.cmdline` | 上一里程碑（合成上滑） | 数据 | 历史 |
 

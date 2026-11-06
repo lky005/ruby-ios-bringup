@@ -7,6 +7,17 @@
 > This page describes how to operate the channel; it is not a fix for the
 > open host-side XACT.
 
+## What is verified (2026-11-06) [measured]
+
+- Kernel 0179 (patchset `10b1e2e8...`, 175 files; CI `42114854911`;
+  exec-data `a4fb021e...`) runs USB 2.0 device mode, the EP0 `0x2E` command
+  channel and the 0171-0174 hotplug/assist path. The 0179 runs used `0x2E`
+  commands throughout; occasional `EPIPE` on the status stage was recovered
+  by checking the done counter, re-sending once, or re-enumerating the USB
+  device. Keys/touch IRQ are outside this chapter.
+- 0174 repeatability was 7/10 `cfg=1` (8/10 with the first host `PRESENT`);
+  the host `GONE` signal is unreliable, so use device-side detach counts.
+
 ## What is verified (2026-11-02) [measured]
 
 - Kernel 0155 (patchset `da13b6df...`, 151 files; CI `41354317810`;

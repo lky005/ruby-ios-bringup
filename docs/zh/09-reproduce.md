@@ -29,19 +29,21 @@
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（不复制上游树）
-patchset: da13b6df...（main，151 文件）
-          历史：9f7b41cf...（141 文件，config/0144.env）、
+patchset: 10b1e2e8...（当前线，175 文件）
+          历史：da13b6df...（151 文件，config/0155.env）、
+          9f7b41cf...（141 文件，config/0144.env）、
           f47f4c19...（139 文件，config/0143.env）
-kernel:   full 491f2373...，exec-data 2e98fd85...
-          （CI 41354317810；gate rerun 41355922057）
-image:    x16-0155-a00dd751.img，3b44c0e2...（payload a00dd751...）
+kernel:   full 2b008e52...，exec-data a4fb021e...
+          （CI 42114854911；gate rerun 42115985782）
+image:    x16-0179-touch-retry.img，d438ba47...（payload 72fc737c...）
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-15, Xcode 16.0, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-main 构建 ramdisk/0140 集，以及到 0155 的 P1/P2/P3 线（探针/pwrap、
-按键/复位、电池、触摸）。下面的 0086/0085 引用是历史记录。
+main 构建 ramdisk/0140 集，以及当前 0156-0179 线（HAL/I2C、按键、USB
+热插拔、电池、RubyGIC/KPD、原生 EINT 触摸）。下面的 0155 及更早引用是
+历史记录。
 
 从 **Actions → xnu → Run workflow** 运行，或推送 `ci/`、`patches/`、
 `config/`、workflow 的改动。产物：`xnu-kernel`、`xnu-buildtree`。
