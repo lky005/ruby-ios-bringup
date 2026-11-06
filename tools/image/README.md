@@ -28,7 +28,8 @@ python icl_nop.py --image root.img --block-index 2438140 \
 ```
 
 The original 4K block and the patched block used during the bring-up are not
-included in the repository. The hashes are recorded in `VERIFICATION.md`.
+included in the repository. The hashes are recorded in
+`docs/records/VERIFICATION.md`.
 
 ## dyld scanner
 

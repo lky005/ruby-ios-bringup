@@ -69,8 +69,8 @@ TOOLCHAIN_XCODE = "16.0"
 PIN_CARRIERS = (
     "README.md",
     "README.zh.md",
-    "STATUS.md",
-    "SECURITY.md",
+    "docs/records/STATUS.md",
+    ".github/SECURITY.md",
     "ci/README.md",
     "docs/en/09-reproduce.md",
     "docs/zh/09-reproduce.md",
@@ -80,7 +80,8 @@ PIN_CARRIERS = (
     "docs/zh/reproducibility.md",
 )
 # Carriers that must also name the runner image.
-PIN_RUNNER_CARRIERS = tuple(p for p in PIN_CARRIERS if p != "SECURITY.md")
+PIN_RUNNER_CARRIERS = tuple(
+    p for p in PIN_CARRIERS if p != ".github/SECURITY.md")
 
 
 def run(cmd, cwd=None):

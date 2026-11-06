@@ -272,7 +272,7 @@ EINT14（下降沿）
 - 实机内核：`9eb9acac…`；exec-data `e4823afb…`；boot 镜像 `ace60d16…`；
 - cmdline：`config/0085-boot.cmdline`（`sweetgt=1`，无 autoswipe）；
 - 刷机：只写 `boot_a`；回滚镜像和 Magisk 基底保持在仓库外。安全边界见
-  `SAFETY.md`：不写 preloader/lk/persist/nvram，不碰 UFS GPT。
+  `docs/records/SAFETY.md`：不写 preloader/lk/persist/nvram，不碰 UFS GPT。
 
 ## 10. 证据
 

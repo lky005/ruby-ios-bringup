@@ -88,4 +88,4 @@ is not possible because its filler was random.
 No device regression tests were run for this packaging. The home-screen result
 is historical (boot23); CI builds the kernel only. The exact device effect is
 conditional on the same root/boot artifacts and device class. See
-[`../../GUARANTEE.md`](../../GUARANTEE.md).
+[`../../GUARANTEE.md`](../records/GUARANTEE.md).

@@ -17,13 +17,13 @@ A research bring-up, packaged as an independent, sanitized delta.
 > USB probe/hotplug. Limits: G7/G8 and the full 10 min repeat were not run by
 > decision; no ESD timer; Type-C read-only; no USB host/audio/Wi-Fi/BT/camera/
 > GPU/RTC/sleep; software fastboot/combo parked.
-> See [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [docs](docs/README.md).
+> See [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [docs](docs/README.md).
 
 ## Start here
 
 | 5 min | 30 min | Deep |
 |---|---|---|
-| [README](README.md) + [STATUS](STATUS.md) | [08-recovery](docs/en/08-recovery.md), [09-reproduce](docs/en/09-reproduce.md), [10-scripts](docs/en/10-scripts.md) | [01–07](docs/en/README.md), [11](docs/en/11-ci-baseline.md), [12](docs/en/12-usb-host.md) |
+| [README](README.md) + [STATUS](docs/records/STATUS.md) | [08-recovery](docs/en/08-recovery.md), [09-reproduce](docs/en/09-reproduce.md), [10-scripts](docs/en/10-scripts.md) | [01–07](docs/en/README.md), [11](docs/en/11-ci-baseline.md), [12](docs/en/12-usb-host.md) |
 
 ## Demo
 
@@ -67,8 +67,8 @@ evidence and the wrong turns.
 
 | Path | Contents |
 |---|---|
-| `README.md`, `STATUS.md`, `SCOPE.md`, `SAFETY.md` | entry points and boundaries |
-| `ACKNOWLEDGEMENTS.md`, `LEGAL.md` | credits and legal risk notice |
+| `README.md` | entry point |
+| `docs/records/` | status, verification, guarantee, scope, safety, legal, acknowledgements |
 | `docs/en/`, `docs/zh/` | English and Chinese chapters |
 | `touch/` | probe ladder, hardware contract and sanitized lab notes |
 | `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0179 USB/probe/keys/battery/touch/native IRQ, 0140/0141 ramdisk; historical 0081-0084 |
@@ -147,7 +147,7 @@ a deterministic image and checks the layout.
 | Tags | `v0.5.0` → `22cdb29`; `p2b-native-touch-2026-11-06` → `f6c5795`; historical `v0.4.0` → `e81510f` |
 | `boot_a` | 0179 |
 | Device evidence | G1–G6; first 10 min + ~5 min stress; 8-failure soft reset (`no-ack` boundary); no panic |
-| Evidence | [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [GUARANTEE](GUARANTEE.md) |
+| Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) |
 
 ## Device situation
 
@@ -180,10 +180,10 @@ they can fingerprint the unit. Artifact hashes are in `config/0085.env`. See
   data loss.**
 - The dual-boot layout is an appendix **method note**, not an installer.
 - No Apple firmware, no activation against Apple servers, no personal data.
-- Read [`SAFETY.md`](SAFETY.md) and [`SCOPE.md`](SCOPE.md) before flashing.
+- Read [`SAFETY.md`](docs/records/SAFETY.md) and [`SCOPE.md`](docs/records/SCOPE.md) before flashing.
 - Content policy: do not post or request Apple firmware, iOS root, dyld
   caches, device dumps, serials/IMEI/MAC or personal data. See the issue
-  template (`.github/ISSUE_TEMPLATE/`) and [`CONTRIBUTING.md`](CONTRIBUTING.md).
+  template (`.github/ISSUE_TEMPLATE/`) and [`CONTRIBUTING.md`](.github/CONTRIBUTING.md).
 
 ## Guarantee
 
@@ -194,7 +194,7 @@ documented recipe. It is not a second-unit or clean-room guarantee; G7/G8 and
 a full 10 min repeat were not run. Pre-boot artifact hashes are fixed for the
 named files; post-boot live-root/ring/log hashes are volatile. The from-IPSW
 root/shim/ADT builders and the strict pinned payload rebuild are still open.
-See [`GUARANTEE.md`](GUARANTEE.md).
+See [`GUARANTEE.md`](docs/records/GUARANTEE.md).
 
 ## Docs
 
@@ -202,11 +202,11 @@ Start at the [docs index](docs/README.md) ([English](docs/en/README.md) / [中�
 
 | Start | Reference | Evidence |
 |---|---|---|
-| [09-reproduce](docs/en/09-reproduce.md), [08-recovery](docs/en/08-recovery.md) | [11-ci-baseline](docs/en/11-ci-baseline.md), [12-usb-host](docs/en/12-usb-host.md) | [STATUS](STATUS.md), [VERIFICATION](VERIFICATION.md), [GUARANTEE](GUARANTEE.md) |
+| [09-reproduce](docs/en/09-reproduce.md), [08-recovery](docs/en/08-recovery.md) | [11-ci-baseline](docs/en/11-ci-baseline.md), [12-usb-host](docs/en/12-usb-host.md) | [STATUS](docs/records/STATUS.md), [VERIFICATION](docs/records/VERIFICATION.md), [GUARANTEE](docs/records/GUARANTEE.md) |
 
 ## History
 
-See [STATUS](STATUS.md) and [07-experiments](docs/en/07-experiments.md).
+See [STATUS](docs/records/STATUS.md) and [07-experiments](docs/en/07-experiments.md).
 
 <details>
 <summary>Project history (2026-10-22 → 2026-11-01)</summary>
@@ -257,12 +257,12 @@ See [STATUS](STATUS.md) and [07-experiments](docs/en/07-experiments.md).
 > **Device regression:** the B+NOP first boot -> A', the CI kernel boot, and
 > the real-touch 0085 boot were run on the author's unit on 2026-10-22. A
 > second unit/clean-room and the from-IPSW root/shim/ADT builders remain open.
-> See [`GUARANTEE.md`](GUARANTEE.md).
+> See [`GUARANTEE.md`](docs/records/GUARANTEE.md).
 </details>
 
 ## Acknowledgements and legal
 
-See [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md) and [`LEGAL.md`](LEGAL.md).
+See [`ACKNOWLEDGEMENTS.md`](docs/records/ACKNOWLEDGEMENTS.md) and [`LEGAL.md`](docs/records/LEGAL.md).
 Media capture rules are in [`media/CAPTURE.md`](media/CAPTURE.md).
 
 ## License
@@ -275,4 +275,4 @@ listed in [`NOTICE`](NOTICE).
 pinned commits. This repository does not contain the complete upstream trees;
 it publishes a recipe, this project's patches, and the disclosed 0010/0012
 change in `ci/baseline-changes.patch`. No upstream permission is claimed.
-See [`LEGAL.md`](LEGAL.md).
+See [`LEGAL.md`](docs/records/LEGAL.md).

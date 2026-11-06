@@ -3,7 +3,7 @@
 [English](../en/09-reproduce.md) · **中文**
 
 > 成功路径范围、bundle hash 和不保证项见
-> [`../../GUARANTEE.zh.md`](../../GUARANTEE.zh.md)。
+> [`../../GUARANTEE.zh.md`](../records/GUARANTEE.zh.md)。
 
 内核构建可复现；boot 镜像和 iOS root 不是完全自包含：Apple 用户态不可
 分发，0085/0084 镜像用了上游 shim/loader/ADT 构建器，而它不在仓库里。这一章
@@ -144,7 +144,7 @@ fastboot reboot
 - 可能有黑壁纸、`Waiting...` widget、Messages badge。
 - 0085 内核真实触摸已通（底边上滑解锁、双指 contact 分发、edge）；按键、Wi-Fi、GPU、RTC 未通；0131b 有 USB probe，但未形成可用接口。
 - 启动前镜像 hash 固定；启动后的 live-root/ring/日志 hash 和时序易变（见
-  `GUARANTEE.zh.md` 的「hash 稳定性」）。
+  `docs/records/GUARANTEE.zh.md` 的「hash 稳定性」）。
 
 ## 验证
 

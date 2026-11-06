@@ -33,4 +33,4 @@ GUID 的 hash **有意不发布**：它们可能成为设备指纹。成功契�
 2026-10-22 在作者设备上跑过 0085 真实触摸启动（底边上滑解锁、双指
 contact 分发、edge；用户态 pinch 未单独验证）、0084 进桌面和 CI 内核启动；
 没有第二台/干净室回归。CI 只构建内核。
-完整保证范围和暂缓项见 [`../../GUARANTEE.zh.md`](../../GUARANTEE.zh.md)。
+完整保证范围和暂缓项见 [`../../GUARANTEE.zh.md`](../records/GUARANTEE.zh.md)。

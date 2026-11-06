@@ -38,5 +38,5 @@ edge; user-visible pinch not separately instrumented) and the
 0084 home-screen/CI-kernel boots were observed on the author's unit on
 2026-10-22; no second unit or clean-room has been tested. CI builds the kernel
 only. See
-[`../../GUARANTEE.md`](../../GUARANTEE.md) for the exact guarantee and the
+[`../../GUARANTEE.md`](../records/GUARANTEE.md) for the exact guarantee and the
 deferred tests.

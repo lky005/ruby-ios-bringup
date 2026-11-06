@@ -146,4 +146,4 @@ upstream delta. The full baseline is not redistributed; only the manifest root
 and the disclosed 0010/0012 change (`ci/baseline-changes.patch`) are published.
 The upstream projects had no license file at the pinned commits; obtain
 permission or keep the recipe private before public redistribution. See
-`LEGAL.md`.
+`../docs/records/LEGAL.md`.
