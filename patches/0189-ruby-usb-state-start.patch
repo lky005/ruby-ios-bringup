@@ -1,0 +1,46 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1659,15 +1659,20 @@
+ }
+ 
+ /*
+- * 0188: clear the software ring state and the hardware TX FIFO after an
+- * endpoint reset.  A host re-enumeration re-arms EP2 but used to keep
++ * 0188/0189: clear the software ring state and the hardware TX FIFO after
++ * an endpoint reset.  A host re-enumeration re-arms EP2 but used to keep
+  * enq/deq/inflight from the previous session (the first IN then failed).
++ * 0189 stops the QMU first: resetting the ring while it is active leaves
++ * an inactive/desynced queue (tqcsr=0, drain gap/invariant counters grow).
+  */
+ static void
+ ruby_ep2_state_reset(vm_offset_t mac)
+ {
+     uint32_t v, i, spins = 0;
+ 
++    if (ruby_ep2_qmu_stop(mac) != 0)
++        printf("RUBY USB: state reset stop timeout spins=%u timeouts=%u\n",
++            ruby_ep2_stop_spins_last, ruby_ep2_stop_timeouts);
+     ruby_ep2_ring_reset(mac);
+     v = ruby_rd32(mac, TX2CSR0_OFF);
+     ruby_wr32(mac, TX2CSR0_OFF, v | TX_FLUSHFIFO);
+@@ -2312,7 +2317,7 @@
+     /*
+      * 0127: vendor CLEAR_FEATURE parity: W1C SENTSTALL, clear SENDSTALL,
+      * pulse EP_RST.  0188 adds a ring-state reset and TX FIFO flush after
+-     * the pulse so a re-enumerated endpoint starts from slot 0.
++     * the pulse; 0189 restarts the QMU so the re-armed endpoint is live.
+      */
+     ruby_wr32(mac, TX2CSR0_OFF,
+         (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+@@ -2326,8 +2331,9 @@
+     ruby_busy_ticks = 0;
+ 
+     if (!(ruby_rd32(mac, TQCSR2_OFF) & QMU_Q_ACTIVE)) {
+-        ruby_ep2_resume(mac);
+-        resumed = 1;
++        /* 0189: RESUME cannot start a stopped queue; do a full start. */
++        if (ruby_ep2_qmu_start(mac) == 0)
++            resumed = 1;
+     }
+     printf("RUBY USB: EP2 halt_clear3 tqcsr=%08x cur=%02x enq=%u deq=%u "
+         "inflight=%u hwo=%llx resumed=%u clears=%u\n",
