@@ -58,7 +58,7 @@ not automate the 16 GiB root.
   the success snapshot; A' is a first-boot snapshot.
 - The root image is not distributable; users must supply it.
 - Pre-boot image hashes are fixed; post-boot live-root/ring/log hashes are
-  volatile. See the "Hash stability" section of `GUARANTEE.md`.
+  volatile. See the "Hash stability" section of `docs/records/GUARANTEE.md`.
 - The exact first-boot state may require a device run; a host-only recipe
   cannot recreate the pulled phone state.
 - No device regression tests were run for this packaging.

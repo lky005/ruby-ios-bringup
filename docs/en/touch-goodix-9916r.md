@@ -283,7 +283,7 @@ Lessons:
 - Cmdline: `config/0085-boot.cmdline` (`sweetgt=1`, no autoswipe).
 - Flash only `boot_a`; keep the rollback and Magisk base outside the
   repository. Boundaries: no preloader/lk/persist/nvram writes, no UFS GPT
-  changes. See `SAFETY.md`.
+  changes. See `docs/records/SAFETY.md`.
 
 ## 10. Evidence
 

@@ -3,7 +3,7 @@
 **English** · [中文](#中文)
 
 This repository is a research and interoperability record. Before opening an
-issue or pull request, read the template in `.github/ISSUE_TEMPLATE/`.
+issue or pull request, read the template in `ISSUE_TEMPLATE/`.
 
 Do not post or request:
 
@@ -21,7 +21,7 @@ projects.
 ## 中文
 
 本仓库只做研究/互操作记录。开 issue 或 PR 前请先看
-`.github/ISSUE_TEMPLATE/` 里的模板说明。
+`ISSUE_TEMPLATE/` 里的模板说明。
 
 不要发布或索要：
 

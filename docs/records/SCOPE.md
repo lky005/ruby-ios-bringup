@@ -10,8 +10,8 @@
 
 - The dual-boot layout (shrink `userdata`, create `iosroot`) is a **method
   note**, not the default path and not automated. See
-  [`docs/en/appendix-dualboot.md`](docs/en/appendix-dualboot.md) (or the
-  [Chinese version](docs/zh/appendix-dualboot.md)).
+  [`../en/appendix-dualboot.md`](../en/appendix-dualboot.md) (or the
+  [Chinese version](../zh/appendix-dualboot.md)).
 
 ## Default path and data risk
 

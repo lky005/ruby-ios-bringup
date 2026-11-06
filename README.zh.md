@@ -17,13 +17,13 @@
 > 热插拔。限制：G7/G8 与完整 10 min 复跑按决定未跑；无 ESD timer；
 > Type-C 只读；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep；
 > 软件 fastboot/组合键 parked。
-> 见 [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [docs](docs/README.md)。
+> 见 [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [docs](docs/README.md)。
 
 ## 从这里开始
 
 | 5 分钟 | 30 分钟 | 深入 |
 |---|---|---|
-| [README](README.zh.md) + [STATUS](STATUS.md) | [08-recovery](docs/zh/08-recovery.md)、[09-reproduce](docs/zh/09-reproduce.md)、[10-scripts](docs/zh/10-scripts.md) | [01–07](docs/zh/README.md)、[11](docs/zh/11-ci-baseline.md)、[12](docs/zh/12-usb-host.md) |
+| [README](README.zh.md) + [STATUS](docs/records/STATUS.md) | [08-recovery](docs/zh/08-recovery.md)、[09-reproduce](docs/zh/09-reproduce.md)、[10-scripts](docs/zh/10-scripts.md) | [01–07](docs/zh/README.md)、[11](docs/zh/11-ci-baseline.md)、[12](docs/zh/12-usb-host.md) |
 
 ## 演示
 
@@ -64,8 +64,8 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 
 | 路径 | 内容 |
 |---|---|
-| `README.md`、`STATUS.md`、`SCOPE.md`、`SAFETY.md` | 入口与边界 |
-| `ACKNOWLEDGEMENTS.zh.md`、`LEGAL.zh.md` | 致谢与法律风险声明 |
+| `README.md` | 入口 |
+| `docs/records/` | 状态、验证、保证、范围、安全、法律、致谢 |
 | `docs/en/`、`docs/zh/` | 英文与中文章节 |
 | `touch/` | probe 阶梯、硬件契约与脱敏实验记录 |
 | `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0179 USB/探针/按键/电池/触摸/原生 IRQ、0140/0141 ramdisk；历史 0081-0084 |
@@ -140,7 +140,7 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0179 �
 | Tags | `v0.5.0` → `22cdb29`；`p2b-native-touch-2026-11-06` → `f6c5795`；历史 `v0.4.0` → `e81510f` |
 | `boot_a` | 0179 |
 | 设备证据 | G1–G6；首次 10 min + 约 5 min 压测；8 连败软重置（`no-ack` 边界）；0 panic |
-| 证据 | [STATUS](STATUS.md) · [VERIFICATION](VERIFICATION.md) · [GUARANTEE.zh.md](GUARANTEE.zh.md) |
+| 证据 | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE.zh.md](docs/records/GUARANTEE.zh.md) |
 
 ## 设备情况
 
@@ -171,10 +171,10 @@ hash 在 `config/0085.env`。见 [`docs/zh/device.md`](docs/zh/device.md)。
 - 默认路径会写 iOS root，可能清掉 Android 数据。**按会丢数据准备。**
 - 双系统布局只是附录**方法说明**，不是安装器。
 - 不含 Apple 固件，不连 Apple 激活服务器，不放个人数据。
-- 刷机前读 [`SAFETY.md`](SAFETY.md) 和 [`SCOPE.md`](SCOPE.md)。
+- 刷机前读 [`SAFETY.md`](docs/records/SAFETY.md) 和 [`SCOPE.md`](docs/records/SCOPE.md)。
 - 内容政策：不要发布或索要 Apple 固件、iOS root、dyld 缓存、设备 dump、
   序列号/IMEI/MAC 或个人信息。见 issue 模板
-  （`.github/ISSUE_TEMPLATE/`）和 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+  （`.github/ISSUE_TEMPLATE/`）和 [`CONTRIBUTING.md`](.github/CONTRIBUTING.md)。
 
 ## 保证
 
@@ -183,7 +183,7 @@ hash 在 `config/0085.env`。见 [`docs/zh/device.md`](docs/zh/device.md)。
 线）和文档化配方。它不是第二台/干净室保证；G7/G8 与完整 10 min 复跑未做。
 启动前工件 hash 对命名文件是固定的；启动后的 live-root/ring/日志 hash 易变。
 从 IPSW 造 root/shim/ADT 的 builder 和严格 pin 的 payload 仍未完成。见
-[`GUARANTEE.zh.md`](GUARANTEE.zh.md)。
+[`GUARANTEE.zh.md`](docs/records/GUARANTEE.zh.md)。
 
 ## 文档
 
@@ -191,11 +191,11 @@ hash 在 `config/0085.env`。见 [`docs/zh/device.md`](docs/zh/device.md)。
 
 | 入门 | 参考 | 证据 |
 |---|---|---|
-| [09-reproduce](docs/zh/09-reproduce.md)、[08-recovery](docs/zh/08-recovery.md) | [11-ci-baseline](docs/zh/11-ci-baseline.md)、[12-usb-host](docs/zh/12-usb-host.md) | [STATUS](STATUS.md)、[VERIFICATION](VERIFICATION.md)、[GUARANTEE.zh.md](GUARANTEE.zh.md) |
+| [09-reproduce](docs/zh/09-reproduce.md)、[08-recovery](docs/zh/08-recovery.md) | [11-ci-baseline](docs/zh/11-ci-baseline.md)、[12-usb-host](docs/zh/12-usb-host.md) | [STATUS](docs/records/STATUS.md)、[VERIFICATION](docs/records/VERIFICATION.md)、[GUARANTEE.zh.md](docs/records/GUARANTEE.zh.md) |
 
 ## 历史
 
-见 [STATUS](STATUS.md) 和 [07-experiments](docs/zh/07-experiments.md)。
+见 [STATUS](docs/records/STATUS.md) 和 [07-experiments](docs/zh/07-experiments.md)。
 
 <details>
 <summary>项目历史（2026-10-22 → 2026-11-01）</summary>
@@ -235,13 +235,13 @@ hash 在 `config/0085.env`。见 [`docs/zh/device.md`](docs/zh/device.md)。
 >
 > **设备回归：** B+NOP 首启 -> A' 和 CI kernel 启动已在 2026-10-22 于作者设备
 > 上跑过。第二台/干净室，以及从 IPSW 造 root/shim/ADT 的 builder 仍未完成。
-> 见 [`GUARANTEE.zh.md`](GUARANTEE.zh.md)。
+> 见 [`GUARANTEE.zh.md`](docs/records/GUARANTEE.zh.md)。
 </details>
 
 ## 致谢与法律
 
-见 [`ACKNOWLEDGEMENTS.zh.md`](ACKNOWLEDGEMENTS.zh.md) 和
-[`LEGAL.zh.md`](LEGAL.zh.md)。媒体拍摄规范见
+见 [`ACKNOWLEDGEMENTS.zh.md`](docs/records/ACKNOWLEDGEMENTS.zh.md) 和
+[`LEGAL.zh.md`](docs/records/LEGAL.zh.md)。媒体拍摄规范见
 [`media/CAPTURE.zh.md`](media/CAPTURE.zh.md)。
 
 ## 许可
@@ -252,4 +252,4 @@ hash 在 `config/0085.env`。见 [`docs/zh/device.md`](docs/zh/device.md)。
 **上游声明：** `ios-sweet` 和 `ios-topaz` 在固定 commit 上**没有 LICENSE
 文件**。本仓库不包含完整上游树；发布 recipe、本项目补丁，以及已披露的
 `ci/baseline-changes.patch`（0010/0012 改动）；不声称已获得上游许可。
-见 [`LEGAL.zh.md`](LEGAL.zh.md)。
+见 [`LEGAL.zh.md`](docs/records/LEGAL.zh.md)。

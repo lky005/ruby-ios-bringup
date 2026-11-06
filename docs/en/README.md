@@ -17,7 +17,7 @@ personal paths, device identifiers or Apple binaries here.
 | Image | `d438ba47…` (`x16-0179-touch-retry.img`) |
 | Known limits | G7/G8 and the full 10 min repeat not run; no ESD timer; `soft reset ok` unproven; P2.4 battery UI 30 s; Type-C read-only; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep; P3 target open |
 
-See [STATUS](../../STATUS.md) · [VERIFICATION](../../VERIFICATION.md) · [GUARANTEE](../../GUARANTEE.md).
+See [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md) · [GUARANTEE](../records/GUARANTEE.md).
 
 ## Reading paths
 
@@ -49,7 +49,7 @@ See [STATUS](../../STATUS.md) · [VERIFICATION](../../VERIFICATION.md) · [GUARA
 | [`device`](device.md) | device situation; no baseline hashes | `[measured]` | 2026-10-22 |
 | [`root-recipe`](root-recipe.md) | root inputs and steps; no root image | `[measured]` | 2026-10-22 |
 | [`reproducibility`](reproducibility.md) | Tier B recipe, drift controls, deferred tests | `[measured]` | 2026-11-06 |
-| [`Guarantee`](../../GUARANTEE.md) | success-path scope, bundle hashes, deferred tests | `[measured]` | 2026-11-06 |
+| [`Guarantee`](../records/GUARANTEE.md) | success-path scope, bundle hashes, deferred tests | `[measured]` | 2026-11-06 |
 
 ## Rules
 

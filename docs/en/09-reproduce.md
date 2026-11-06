@@ -3,7 +3,7 @@
 **English** · [中文](../zh/09-reproduce.md)
 
 > The success-path scope, bundle hashes and non-guarantees are in
-> [`../../GUARANTEE.md`](../../GUARANTEE.md).
+> [`../../GUARANTEE.md`](../records/GUARANTEE.md).
 
 The kernel build is reproducible. The boot image and the iOS root are not fully
 self-contained here: Apple's userland is not distributable, and the 0085/0084
@@ -164,7 +164,8 @@ The 0084 synthetic-swipe milestone uses `config/0084-boot.cmdline` with
   dispatch, edge). Keys, Wi-Fi, GPU and RTC are not implemented; USB is a probe
   only (0131b), not a usable interface.
 - Pre-boot image hashes are fixed; post-boot live-root/ring/log hashes and
-  timing are volatile (see the "Hash stability" section of `GUARANTEE.md`).
+  timing are volatile (see the "Hash stability" section of
+  `docs/records/GUARANTEE.md`).
 
 ## Verify
 

@@ -42,4 +42,4 @@ set from a private content-addressed mirror; only its manifest root and the
 disclosed 0010/0012 change are published. No complete upstream patch file is
 redistributed in this repository. The upstream projects had no license file
 at the pinned commits. Obtain permission before public redistribution or keep
-the repository private. See LEGAL.md.
+the repository private. See docs/records/LEGAL.md.

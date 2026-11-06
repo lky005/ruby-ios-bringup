@@ -78,4 +78,4 @@ host 阶段已具备并用 0084 输入测过：payload `50701e81…`、确定性
 
 这次打包没有做设备回归测试。进桌面是历史结果（boot23）；CI 只构建内核。
 精确设备效果依赖同一 root/boot 工件和同一类设备。见
-[`../../GUARANTEE.zh.md`](../../GUARANTEE.zh.md)。
+[`../../GUARANTEE.zh.md`](../records/GUARANTEE.zh.md)。

@@ -16,7 +16,7 @@
 | 镜像 | `d438ba47…`（`x16-0179-touch-retry.img`） |
 | 已知限制 | G7/G8 与完整 10 min 复跑未跑；无 ESD timer；`soft reset ok` 未证；P2.4 电池 UI 30 s；Type-C 只读；无 USB host/音频/Wi-Fi/BT/相机/GPU/RTC/sleep；P3 目标待选 |
 
-见 [STATUS](../../STATUS.md) · [VERIFICATION](../../VERIFICATION.md) · [GUARANTEE.zh.md](../../GUARANTEE.zh.md)。
+见 [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md) · [GUARANTEE.zh.md](../records/GUARANTEE.zh.md)。
 
 ## 阅读路径
 
@@ -48,7 +48,7 @@
 | [`device`](device.md) | 设备情况；不发布基线 hash | `[实测]` | 2026-10-22 |
 | [`root-recipe`](root-recipe.md) | root 输入与步骤；不含 root 镜像 | `[实测]` | 2026-10-22 |
 | [`reproducibility`](reproducibility.md) | Tier B recipe、防漂移、暂缓测试 | `[实测]` | 2026-11-06 |
-| [`保证`](../../GUARANTEE.zh.md) | 成功路径范围、bundle hash、暂缓测试 | `[实测]` | 2026-11-06 |
+| [`保证`](../records/GUARANTEE.zh.md) | 成功路径范围、bundle hash、暂缓测试 | `[实测]` | 2026-11-06 |
 
 ## 规则
 
