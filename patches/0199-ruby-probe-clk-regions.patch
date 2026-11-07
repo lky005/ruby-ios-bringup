@@ -1,0 +1,120 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -62,12 +62,17 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define PHY_PA       0x11e40000UL
+ #define GPIO_PA      0x10005000UL
+ #define IFRAO_PA     0x10001000UL
++/* 0199: clock-audit regions (probe read-only). */
++#define TOPCKGEN_PA  0x10000000UL
++#define APMIXED_PA   0x11c00000UL
+ 
+ #define IPPC_SIZE    0x100
+ #define MTU3_SIZE    0x3000
+ #define PHY_SIZE     0x2000
+ #define GPIO_SIZE    0x1000
+ #define IFRAO_SIZE   0x1000
++#define TOPCKGEN_SIZE 0x1000
++#define APMIXED_SIZE  0x1000
+ 
+ /* IPPC */
+ #define C0_SW_RST    (1u << 0)
+@@ -321,6 +326,9 @@ static vm_offset_t ruby_ippc_base;
+ static vm_offset_t ruby_phy_base;
+ static vm_offset_t ruby_gpio_base;
+ static vm_offset_t ruby_ifrao_base;
++/* 0199: clock-audit regions (probe read-only). */
++static vm_offset_t ruby_topckgen_base;
++static vm_offset_t ruby_apmixed_base;
+ static uint32_t ruby_probe_enabled;
+ static uint32_t ruby_ep2log_on = 1;
+ static volatile uint32_t ruby_probe_wr_pending;
+@@ -445,23 +453,30 @@ struct ruby_probe_region {
+     uint32_t size;
+     vm_offset_t *va;
+     const char *name;
++    int ro;                     /* 0199: read-only for the probe w32 path */
+ };
+ 
+ static struct ruby_probe_region ruby_probe_regions[] = {
+-    { MTU3_PA, MTU3_SIZE, &ruby_mac_base, "mtu3" },
+-    { IPPC_PA, IPPC_SIZE, &ruby_ippc_base, "ippc" },
+-    { PHY_PA, PHY_SIZE, &ruby_phy_base, "phy" },
+-    { GPIO_PA, GPIO_SIZE, &ruby_gpio_base, "gpio" },
+-    { IFRAO_PA, IFRAO_SIZE, &ruby_ifrao_base, "ifrao" },
++    { MTU3_PA, MTU3_SIZE, &ruby_mac_base, "mtu3", 0 },
++    { IPPC_PA, IPPC_SIZE, &ruby_ippc_base, "ippc", 0 },
++    { PHY_PA, PHY_SIZE, &ruby_phy_base, "phy", 0 },
++    { GPIO_PA, GPIO_SIZE, &ruby_gpio_base, "gpio", 0 },
++    { IFRAO_PA, IFRAO_SIZE, &ruby_ifrao_base, "ifrao", 0 },
++    /*
++     * 0199: clock audit regions (docs/98 §3a).  Read-only: a stray
++     * probe w32 into the PLL or top muxes could glitch the clocks.
++     */
++    { TOPCKGEN_PA, TOPCKGEN_SIZE, &ruby_topckgen_base, "topckgen", 1 },
++    { APMIXED_PA, APMIXED_SIZE, &ruby_apmixed_base, "apmixed", 1 },
+ };
+ 
+-static vm_offset_t
+-ruby_probe_lookup(uint32_t pa, uint32_t len, const char **name)
++static struct ruby_probe_region *
++ruby_probe_region_for(uint32_t pa, uint32_t len)
+ {
+     uint32_t i;
+ 
+     if (pa & 3u)
+-        return 0;
++        return NULL;
+     for (i = 0; i < sizeof(ruby_probe_regions) /
+         sizeof(ruby_probe_regions[0]); i++) {
+         struct ruby_probe_region *r = &ruby_probe_regions[i];
+@@ -470,11 +485,21 @@ ruby_probe_lookup(uint32_t pa, uint32_t len, const char **name)
+             continue;
+         if (pa < r->pa || len > r->size || pa - r->pa > r->size - len)
+             continue;
+-        if (name)
+-            *name = r->name;
+-        return *r->va + (pa - r->pa);
++        return r;
+     }
+-    return 0;
++    return NULL;
++}
++
++static vm_offset_t
++ruby_probe_lookup(uint32_t pa, uint32_t len, const char **name)
++{
++    struct ruby_probe_region *r = ruby_probe_region_for(pa, len);
++
++    if (r == NULL)
++        return 0;
++    if (name)
++        *name = r->name;
++    return *r->va + (pa - r->pa);
+ }
+ 
+ static int
+@@ -491,10 +516,12 @@ ruby_probe_read32(uint32_t pa, uint32_t *out)
+ static int
+ ruby_probe_write32(uint32_t pa, uint32_t val)
+ {
+-    vm_offset_t va = ruby_probe_lookup(pa, 4, NULL);
++    struct ruby_probe_region *r = ruby_probe_region_for(pa, 4);
++    vm_offset_t va;
+ 
+-    if (!va)
++    if (r == NULL || r->ro)
+         return 0;
++    va = *r->va + (pa - r->pa);
+     ruby_wr32(va, 0, val);
+     return 1;
+ }
+@@ -4246,6 +4273,9 @@ ruby_usb_probe(void)
+     }
+     ruby_gpio_base = gpio;
+     ruby_ifrao_base = ifrao;
++    /* 0199: clock-audit maps; a failed map just keeps the region closed. */
++    ruby_topckgen_base = ml_io_map(TOPCKGEN_PA, TOPCKGEN_SIZE);
++    ruby_apmixed_base = ml_io_map(APMIXED_PA, APMIXED_SIZE);
+     /*
+      * 0196: the IRQ service workloop can run as soon as it is activated,
+      * and the reattach handoff uses these bases, so publish them before

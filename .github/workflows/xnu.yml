@@ -1,4 +1,4 @@
-name: xnu-0198
+name: xnu-0199
 
 # Builds the ruby kernel without vendoring the upstream tree.
 # ci/prepare-baseline.sh takes a content-pinned 82-file baseline (private
@@ -59,14 +59,14 @@ env:
   # BASELINE_SSH_KEY. The public pin is the manifest root, not a URL.
   BASELINE_MANIFEST_SHA256: 829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910
   BASELINE_FILES: "82"
-  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || 'c9aed16b301f629121f09d061c550af1fbf624caed6030d11f17398d3c62e575' }}
+  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || 'fa4880feeebfab682d9744fecc7ae6396474d6d147803d81f800ae6222cd6371' }}
   SKIP_PATCHES: ${{ inputs.skip_patches || '' }}
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   RUNNER_IMAGE: ${{ inputs.runner || 'macos-15' }}
   XCODE_VERSION: ${{ inputs.xcode_version || '16.0' }}
-  HASH_CONFIG: ${{ inputs.hash_config || 'config/0198.env' }}
+  HASH_CONFIG: ${{ inputs.hash_config || 'config/0199.env' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
   # ccache: xnu is ~2000 compiles; a patch usually changes a few of them
@@ -157,7 +157,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0198.env', '.github/workflows/xnu.yml') }}
+          key: ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0199.env', '.github/workflows/xnu.yml') }}
           restore-keys: |
             ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
 
