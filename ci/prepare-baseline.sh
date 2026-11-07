@@ -183,6 +183,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0197-ruby-usb-qmu-irq.patch" \
     "$ROOT/patches/0198-ruby-ep2-pad-frames.patch" \
     "$ROOT/patches/0199-ruby-probe-clk-regions.patch" \
+    "$ROOT/patches/0200-sweetfb-dbg-gate.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

@@ -1,0 +1,32 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -439,10 +439,25 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 		flush_dcache64((addr64_t)(fPixels + (uint64_t)cy * fRowBytes), (uint32_t)(64 * fRowBytes), FALSE);
+ 		__asm__ __volatile__("dsb sy" ::: "memory");
+-		IOLog("SWEET FB DBG: center va=%p pa=0x%llx px=%08x\n",
+-		    (void *)(fPixels + (uint64_t)cy * fRowBytes + (uint64_t)cx * 4),
+-		    (uint64_t)fPhys + (uint64_t)cy * fRowBytes + (uint64_t)cx * 4,
+-		    *(const uint32_t *)(fPixels + (uint64_t)(fHeight / 2) * fRowBytes + (uint64_t)(fWidth / 2) * 4));
++		/*
++		 * 0200: this per-refresh IOLog floods the SWEETLOG ring
++		 * (up to sweetfb_hz lines/s, the R2b noise target in
++		 * docs/98) -- keep it behind sweetfbdbg, default off.
++		 */
++		static int dbg = -1;
++
++		if (dbg < 0) {
++			uint32_t v = 0;
++
++			dbg = (PE_parse_boot_argn("sweetfbdbg", &v,
++			    sizeof(v)) && v == 1) ? 1 : 0;
++		}
++		if (dbg) {
++			IOLog("SWEET FB DBG: center va=%p pa=0x%llx px=%08x\n",
++			    (void *)(fPixels + (uint64_t)cy * fRowBytes + (uint64_t)cx * 4),
++			    (uint64_t)fPhys + (uint64_t)cy * fRowBytes + (uint64_t)cx * 4,
++			    *(const uint32_t *)(fPixels + (uint64_t)(fHeight / 2) * fRowBytes + (uint64_t)(fWidth / 2) * 4));
++		}
+ 	}
+ 	if (sweet_fb_dbg_logged < 12) {
+ 		sweet_fb_dbg_logged++;
