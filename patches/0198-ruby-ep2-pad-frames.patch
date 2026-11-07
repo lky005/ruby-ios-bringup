@@ -1,0 +1,98 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -383,6 +383,8 @@ static volatile uint32_t ruby_irq_reattach_done;
+  * watcher (latches with no event path).
+  */
+ static int ruby_qmu_irq_mode;
++/* 0198: padded frames (rubypad=1): every frame exactly MPS, 24 B header. */
++static int ruby_pad_mode;
+ static volatile uint32_t ruby_irq_qmu;
+ static volatile uint32_t ruby_irq_qmu_idle;
+ static volatile uint32_t ruby_irq_qmu_fused;
+@@ -1487,6 +1489,16 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+  */
+ #define RUBY_EP2_FRAME  511
+ #define RUBY_LOG_TEXT   (RUBY_EP2_FRAME - RUBY_HDR_LEN)
++/*
++ * 0198: padded frame mode (rubypad=1).  Every frame is exactly MPS so a
++ * 16 KB URB aggregates 32 frames; the text length moves into a 24 B
++ * header.  0108 saw exact-MPS frames produce no TX done on the 64 B
++ * path, so the mode is opt-in and its gates watch the qmu/drain
++ * counters directly (docs/98 §4a).
++ */
++#define RUBY_HDR_LEN_V2 24
++#define RUBY_PAD_TEXT   (RUBY_LOG_CHUNK - RUBY_HDR_LEN_V2)
++#define RUBY_PAD_MAGIC  0x25u    /* 6-bit format tag, hdr[4] bits 15:10 */
+ 
+ static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+ static uint8_t ruby_log_buf[RUBY_GPD_NUM][RUBY_LOG_CHUNK]
+@@ -2250,7 +2262,12 @@ ruby_ep2_push_log(vm_offset_t mac)
+         buf = ruby_log_buf[enq];
+         log_pa = ruby_log_pa[enq];
+         pos = ruby_log_pos;
+-        n = sweet_log_copy(&pos, (char *)buf + RUBY_HDR_LEN, RUBY_LOG_TEXT);
++        if (ruby_pad_mode)
++            n = sweet_log_copy(&pos, (char *)buf + RUBY_HDR_LEN_V2,
++                RUBY_PAD_TEXT);
++        else
++            n = sweet_log_copy(&pos, (char *)buf + RUBY_HDR_LEN,
++                RUBY_LOG_TEXT);
+         if (!n) {
+             ruby_ep2_no_log++;
+             if (ruby_ep2_no_log <= 3 ||
+@@ -2276,6 +2293,17 @@ ruby_ep2_push_log(vm_offset_t mac)
+         if (csr0 & (1u << 22))  /* TX_SENTSTALL is W1C */
+             ruby_wr32(mac, TX2CSR0_OFF, (csr0 & ~(1u << 22)) | (1u << 22));
+         hdr[3] = csr0;
++        if (ruby_pad_mode) {
++            /*
++             * 0198 header v2: text length + 6-bit format tag, so the
++             * host can split padded 512 B frames.  hdr[0..3] are
++             * byte-identical to the legacy header.
++             */
++            hdr[4] = (uint32_t)n | (RUBY_PAD_MAGIC << 10);
++            hdr[5] = 0;
++            memset(buf + RUBY_HDR_LEN_V2 + n, 0,
++                (size_t)(RUBY_PAD_TEXT - n));
++        }
+         ruby_push_seq++;
+ 
+         ruby_gpd_clear(enq);
+@@ -2284,7 +2312,8 @@ ruby_ep2_push_log(vm_offset_t mac)
+             (((np >> 32) & 0xfu) << 4));
+         *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+         *(volatile uint32_t *)(g + 8) = (uint32_t)log_pa;
+-        *(volatile uint16_t *)(g + 12) = (uint16_t)(RUBY_HDR_LEN + n);
++        *(volatile uint16_t *)(g + 12) = (uint16_t)(ruby_pad_mode ?
++            RUBY_LOG_CHUNK : (RUBY_HDR_LEN + n));
+         g[1] = ruby_gpd_chksum(g);
+         /* Make the payload and all descriptor fields visible before HWO. */
+         ruby_dc_civac(buf, RUBY_LOG_CHUNK);
+@@ -4173,6 +4202,7 @@ ruby_usb_probe(void)
+     int ep2log = 1;
+     int usbirq = 0;
+     int qmuirq = 0;
++    int pad = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -4182,14 +4212,19 @@ ruby_usb_probe(void)
+     PE_parse_boot_argn("rubyep2log", &ep2log, sizeof(ep2log));
+     PE_parse_boot_argn("rubyusbirq", &usbirq, sizeof(usbirq));
+     PE_parse_boot_argn("rubyqmuirq", &qmuirq, sizeof(qmuirq));
++    PE_parse_boot_argn("rubypad", &pad, sizeof(pad));
+     ruby_irq_mode = (enable == 1 && usbirq == 1);
+     ruby_qmu_irq_mode = (ruby_irq_mode && qmuirq == 1);
++    ruby_pad_mode = (pad == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log != 0);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+         ruby_ep2log_on ? "on" : "off", ep2log);
++    printf("RUBY USB: EP2 frames %s (rubypad=%d)\n",
++        ruby_pad_mode ? "padded 512 (hdr v2 24 B)" : "legacy 511 (hdr 16 B)",
++        pad);
+     if (ruby_irq_mode)
+         printf("RUBY USB: QMU irq %s (rubyqmuirq=%d)\n",
+             ruby_qmu_irq_mode ? "on" : "off", qmuirq);
