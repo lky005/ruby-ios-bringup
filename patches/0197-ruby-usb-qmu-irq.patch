@@ -1,0 +1,351 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -374,6 +374,28 @@ static volatile uint32_t ruby_irq_fused;
+ static volatile uint32_t ruby_irq_requeues;
+ static volatile uint32_t ruby_irq_reattach_req;
+ static volatile uint32_t ruby_irq_reattach_done;
++/*
++ * 0197: QMU group on the IRQ service (rubyqmuirq=1, needs rubyusbirq=1).
++ * The primary pass only W1Cs the sub-statuses nothing else consumes and
++ * routes the rest to their services; every EP2 mutation runs on the
++ * service workloop (single owner).  The 1 ms thread keeps two kick-based
++ * liveness duties only: the log-pending refill primer and the SENTSTALL
++ * watcher (latches with no event path).
++ */
++static int ruby_qmu_irq_mode;
++static volatile uint32_t ruby_irq_qmu;
++static volatile uint32_t ruby_irq_qmu_idle;
++static volatile uint32_t ruby_irq_qmu_fused;
++static volatile uint32_t ruby_qmu_push_req;
++static volatile uint32_t ruby_qmu_rx_req;
++static volatile uint32_t ruby_qmu_stall_req;
++static volatile uint32_t ruby_qmu_recover_req;
++static volatile uint32_t ruby_qmu_rx_recover_req;
++static volatile uint32_t ruby_qmu_primer_kicks;
++/* 0197 G7: primary-pass occupancy (us), sampled from the C++ wrapper. */
++static volatile uint32_t ruby_irq_lat_n;
++static volatile uint32_t ruby_irq_lat_acc_us;
++static volatile uint32_t ruby_irq_lat_max_us;
+ static void ruby_ep2_config(vm_offset_t mac);
+ static void ruby_ep2_push_log(vm_offset_t mac);
+ static void ruby_ep2_dump_gpd(vm_offset_t mac, uint32_t first, uint32_t last);
+@@ -1006,6 +1028,9 @@ void ruby_usb_reattach_impl(void);
+ extern int ruby_usb_irq_prepare(void);
+ extern int ruby_usb_irq_activate(void);
+ extern int ruby_usb_irq_kick(void);
++/* 0197: G7 primary-pass occupancy sampler (RubyUSBIntService irqAction). */
++void ruby_usb_irq_lat_sample(uint32_t us);
++static void ruby_ep2_tick_assist(vm_offset_t mac);
+ 
+ static void
+ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+@@ -1343,9 +1368,18 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+         ruby_cmd_tick(ruby_mac_base);
+         ruby_usb_attach_poll(ruby_mac_base, ruby_ippc_base);
+         ruby_usb_heartbeat(ruby_mac_base, ruby_ippc_base);
+-        ruby_ep2_status_poll(ruby_mac_base);
+-        ruby_ep2_push_log(ruby_mac_base);
+-        ruby_ep2_rx_poll(ruby_mac_base);
++        if (ruby_qmu_irq_mode) {
++            /*
++             * 0197: the EP2 data plane lives on the IRQ workloop.  The
++             * tick keeps the two kick-based liveness duties only; every
++             * mutation happens on the workloop.
++             */
++            ruby_ep2_tick_assist(ruby_mac_base);
++        } else {
++            ruby_ep2_status_poll(ruby_mac_base);
++            ruby_ep2_push_log(ruby_mac_base);
++            ruby_ep2_rx_poll(ruby_mac_base);
++        }
+         ruby_ms++;
+         if (!assist)
+             delay(1000);
+@@ -1417,6 +1451,16 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define QISAR1_RXQ_CSERR    (1u << 17)
+ #define QISAR1_RXQ_LENERR   (1u << 18)
+ #define QISAR1_RXQ_ZLPERR   (1u << 20)
++/* 0197: QMU sub-enable registers (vendor U3D_QIER0/1) and routed sets. */
++#define QIER0_OFF           0x0704
++#define QIER1_OFF           0x0714
++#define RUBY_QMU_TX_DONE    (1u << 2)
++#define RUBY_QMU_TXQ_BITS   (QISAR1_TXQ_EMPTY | QISAR1_TXQ_CSERR | \
++    QISAR1_TXQ_LENERR)
++#define RUBY_QMU_RXQ_EMPTY_BITS (QISAR1_RXQ_EMPTY | QISAR1_RXQ_ZLPERR)
++#define RUBY_QMU_RXQ_ERR_BITS   (QISAR1_RXQ_CSERR | QISAR1_RXQ_LENERR)
++#define RUBY_QMU_QIER1_SET  (RUBY_QMU_TXQ_BITS | QISAR1_RXQ_EMPTY | \
++    RUBY_QMU_RXQ_ERR_BITS | QISAR1_RXQ_ZLPERR)
+ #define EP_RST_RX2_BIT      (1u << 2)
+ #define EP_RST_TX2_BIT      (1u << 18)  /* EP_RST(in, 2) = BIT(16) << 2 */
+ #define RUBY_RX_GPD_NUM 16
+@@ -3183,6 +3227,56 @@ ruby_usb_irq_pass(void)
+         ruby_irq_bmu++;
+         ruby_ep0_service(mac, ruby_ms);
+     }
++    if (level1 & LV1_QMU_INTR) {
++        uint32_t q0, q1, terr;
++        uint32_t routed = 0;
++
++        ruby_irq_qmu++;
++        q0 = ruby_rd32(mac, QISAR0_OFF);
++        q1 = ruby_rd32(mac, QISAR1_OFF);
++        terr = ruby_rd32(mac, TQERRIR0_OFF);
++        /*
++         * 0197: drain the sub-statuses nothing else consumes (F1: they
++         * pull the group line regardless of QIER; enable-set <= service-
++         * set holds at the group level).  TXQ_EMPTY asserts on every
++         * normal run-dry and doubles as the refill liveness signal; the
++         * TXQ error bits have no other consumer either.  Everything
++         * routed below is W1C'd by its owning service inside the requeue
++         * pass (push_log/rx_poll/recover), so the line may stay pending
++         * until then -- the event source is hard-masked in between.
++         */
++        if (q1 & RUBY_QMU_TXQ_BITS)
++            ruby_wr32(mac, QISAR1_OFF, q1 & RUBY_QMU_TXQ_BITS);
++        if (terr != 0)
++            ruby_wr32(mac, TQERRIR0_OFF, terr);
++        if ((q0 & RUBY_QMU_TX_DONE) || (q1 & QISAR1_TXQ_EMPTY)) {
++            ruby_qmu_push_req = 1;
++            routed = 1;
++        }
++        if ((q0 & QMU_RX_DONE_BIT) || (q1 & RUBY_QMU_RXQ_EMPTY_BITS)) {
++            ruby_qmu_rx_req = 1;
++            routed = 1;
++        }
++        if ((q1 & (QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR)) || terr != 0) {
++            ruby_qmu_recover_req = 1;
++            routed = 1;
++        }
++        if (q1 & RUBY_QMU_RXQ_ERR_BITS) {
++            ruby_qmu_rx_recover_req = 1;
++            routed = 1;
++        }
++        if (routed) {
++            ruby_irq_qmu_idle = 0;
++            more = 1;
++        } else if (++ruby_irq_qmu_idle > 1000) {
++            /* Phantom group: bounded isolation, fuse the group off. */
++            ruby_irq_qmu_idle = 0;
++            ruby_irq_qmu_fused++;
++            ruby_wr32(mac, LV1IECR - MTU3_PA, LV1_QMU_INTR);
++            printf("RUBY USB IRQ: QMU fused off after 1000 idle "
++                "passes\n");
++        }
++    }
+     if (ruby_ep0_tx_pending || ruby_rst_seen)
+         more = 1;
+     return more;
+@@ -3192,11 +3286,79 @@ ruby_usb_irq_pass(void)
+ void
+ ruby_usb_irq_service_work(void)
+ {
++    vm_offset_t mac = ruby_mac_base;
++
+     if (ruby_irq_reattach_req) {
+         ruby_irq_reattach_req = 0;
+-        ruby_usb_reattach(ruby_mac_base, ruby_phy_base);
++        ruby_usb_reattach(mac, ruby_phy_base);
+         ruby_irq_reattach_done = 1;
+     }
++    if (!ruby_qmu_irq_mode)
++        return;
++    /*
++     * 0197: the EP2 data plane runs here only (single owner).  push/rx
++     * are bounded non-blocking passes; the recover paths own the
++     * destructive stop/flush/start sequences.  Recover runs before
++     * push/rx so a reset ring is refilled from clean state.
++     */
++    if (ruby_qmu_recover_req) {
++        ruby_qmu_recover_req = 0;
++        ruby_ep2_recover(mac);
++    }
++    if (ruby_qmu_stall_req) {
++        ruby_qmu_stall_req = 0;
++        ruby_ep2_status_poll(mac);
++    }
++    if (ruby_qmu_rx_recover_req) {
++        ruby_qmu_rx_recover_req = 0;
++        ruby_ep2_rx_recover(mac);
++    }
++    if (ruby_qmu_push_req) {
++        ruby_qmu_push_req = 0;
++        ruby_ep2_push_log(mac);
++    }
++    if (ruby_qmu_rx_req) {
++        ruby_qmu_rx_req = 0;
++        ruby_ep2_rx_poll(mac);
++    }
++}
++
++/* 0197 G7: primary-pass occupancy, sampled by the C++ irqAction wrapper. */
++void
++ruby_usb_irq_lat_sample(uint32_t us)
++{
++    ruby_irq_lat_n++;
++    ruby_irq_lat_acc_us += us;
++    if (us > ruby_irq_lat_max_us)
++        ruby_irq_lat_max_us = us;
++}
++
++/*
++ * 0197: 1 ms liveness duties while the EP2 data plane is on the IRQ
++ * workloop (rubyqmuirq=1).  Read-only here: set request flags and kick;
++ * the workloop performs every mutation.  The primer covers the one hole
++ * events cannot see -- log text arriving while the ring is empty and the
++ * queue idle (no GPD to complete, TXQ_EMPTY already consumed).
++ */
++static void
++ruby_ep2_tick_assist(vm_offset_t mac)
++{
++    if (ruby_ep_ready && ruby_ep2log_on &&
++        sweet_log_position() != ruby_log_pos) {
++        ruby_qmu_push_req = 1;
++        ruby_qmu_primer_kicks++;
++        ruby_usb_irq_kick();
++    }
++    if (ruby_ep_ready &&
++        (ruby_rd32(mac, TX2CSR0_OFF) & TX_SENTSTALL)) {
++        ruby_qmu_stall_req = 1;
++        ruby_usb_irq_kick();
++    }
++    if (ruby_rx_ready &&
++        (ruby_rd32(mac, RX2CSR0_OFF) & RX_SENTSTALL_BIT)) {
++        ruby_qmu_rx_recover_req = 1;
++        ruby_usb_irq_kick();
++    }
+ }
+ 
+ /* Called from RubyUSBIntService (same workloop as the pass). */
+@@ -3295,12 +3457,23 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_DMON1) : 0,
+         seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
+         ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
+-    if (ruby_irq_mode)
+-        printf("RUBY USB IRQ: pass=%u mac2=%u bmu=%u resume=%u "
+-            "suspend=%u idle=%u fused=%u requeue=%u\n",
+-            ruby_irq_passes, ruby_irq_mac2, ruby_irq_bmu,
+-            ruby_irq_resume, ruby_irq_suspend, ruby_irq_idle,
+-            ruby_irq_fused, ruby_irq_requeues);
++    if (ruby_irq_mode) {
++        if (ruby_qmu_irq_mode)
++            printf("RUBY USB IRQ: pass=%u mac2=%u bmu=%u qmu=%u "
++                "qfused=%u lat_n=%u lat_avg=%u lat_max=%u "
++                "resume=%u suspend=%u idle=%u fused=%u requeue=%u\n",
++                ruby_irq_passes, ruby_irq_mac2, ruby_irq_bmu,
++                ruby_irq_qmu, ruby_irq_qmu_fused, ruby_irq_lat_n,
++                ruby_irq_lat_n ? ruby_irq_lat_acc_us / ruby_irq_lat_n : 0,
++                ruby_irq_lat_max_us, ruby_irq_resume, ruby_irq_suspend,
++                ruby_irq_idle, ruby_irq_fused, ruby_irq_requeues);
++        else
++            printf("RUBY USB IRQ: pass=%u mac2=%u bmu=%u resume=%u "
++                "suspend=%u idle=%u fused=%u requeue=%u\n",
++                ruby_irq_passes, ruby_irq_mac2, ruby_irq_bmu,
++                ruby_irq_resume, ruby_irq_suspend, ruby_irq_idle,
++                ruby_irq_fused, ruby_irq_requeues);
++    }
+     last_otg = otg;
+     last_mac2 = mac2;
+     last_ext = ext;
+@@ -3996,6 +4169,7 @@ ruby_usb_probe(void)
+     int probe = 0;
+     int ep2log = 1;
+     int usbirq = 0;
++    int qmuirq = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -4004,13 +4178,18 @@ ruby_usb_probe(void)
+     PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
+     PE_parse_boot_argn("rubyep2log", &ep2log, sizeof(ep2log));
+     PE_parse_boot_argn("rubyusbirq", &usbirq, sizeof(usbirq));
++    PE_parse_boot_argn("rubyqmuirq", &qmuirq, sizeof(qmuirq));
+     ruby_irq_mode = (enable == 1 && usbirq == 1);
++    ruby_qmu_irq_mode = (ruby_irq_mode && qmuirq == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log != 0);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+         ruby_ep2log_on ? "on" : "off", ep2log);
++    if (ruby_irq_mode)
++        printf("RUBY USB: QMU irq %s (rubyqmuirq=%d)\n",
++            ruby_qmu_irq_mode ? "on" : "off", qmuirq);
+     if (enable != 1) {
+         printf("RUBY USB: disabled (rubyusb=%d)\n", enable);
+         return;
+@@ -4167,11 +4346,28 @@ ruby_usb_probe(void)
+         if (ruby_usb_irq_prepare() != 0) {
+             printf("RUBY USB: irq service absent, staying on polling\n");
+             ruby_irq_mode = 0;
++            ruby_qmu_irq_mode = 0;
+             ruby_wr32(mac, LV1IECR - MTU3_PA, ~0u);
+             ruby_wr32(mac, EPIECR_OFF, ~0u);
+         } else {
+             ruby_wr32(mac, EPIESR_OFF, RUBY_IRQ_EPI_SET);
+-            ruby_wr32(mac, LV1IESR_OFF, RUBY_IRQ_LV1_SET);
++            if (ruby_qmu_irq_mode) {
++                /*
++                 * 0197: the QMU group joins the enable set together with
++                 * its full service (drain-all action + workloop data
++                 * plane, an enabled group is never left without a live
++                 * consumer).  QIER mirrors the routed bits; if silicon
++                 * aggregates sub-statuses regardless of QIER (the F1
++                 * shape) these writes are inert, not harmful.
++                 */
++                ruby_wr32(mac, LV1IESR_OFF,
++                    RUBY_IRQ_LV1_SET | LV1_QMU_INTR);
++                ruby_wr32(mac, QIER0_OFF,
++                    RUBY_QMU_TX_DONE | QMU_RX_DONE_BIT);
++                ruby_wr32(mac, QIER1_OFF, RUBY_QMU_QIER1_SET);
++            } else {
++                ruby_wr32(mac, LV1IESR_OFF, RUBY_IRQ_LV1_SET);
++            }
+             v = ruby_rd32(mac, MAC2_INTR_ENABLE_OFF);
+             ruby_wr32(mac, MAC2_INTR_ENABLE_OFF,
+                 v | MAC2_INTR_RESET | MAC2_INTR_RESUME |
+@@ -4180,6 +4376,7 @@ ruby_usb_probe(void)
+                 printf("RUBY USB: irq activate failed, staying on "
+                     "polling\n");
+                 ruby_irq_mode = 0;
++                ruby_qmu_irq_mode = 0;
+                 ruby_wr32(mac, LV1IECR - MTU3_PA, ~0u);
+                 ruby_wr32(mac, EPIECR_OFF, ~0u);
+             } else {
+--- a/iokit/Kernel/arm/RubyUSBIntService.cpp
++++ b/iokit/Kernel/arm/RubyUSBIntService.cpp
+@@ -21,6 +21,7 @@
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/IOWorkLoop.h>
++#include <mach/mach_time.h>
+ #include <libkern/c++/OSArray.h>
+ #include <libkern/c++/OSData.h>
+ #include <libkern/c++/OSSymbol.h>
+@@ -42,6 +43,7 @@ static RubyUSBIntService *gRubyUSBIntService;
+ extern "C" {
+ int ruby_usb_irq_pass(void);        /* 1 = deferred EP0 work remains */
+ void ruby_usb_irq_service_work(void);
++void ruby_usb_irq_lat_sample(uint32_t us);  /* 0197: G7 action timing */
+ }
+ 
+ bool
+@@ -223,6 +225,7 @@ RubyUSBIntService::irqAction(OSObject *owner,
+     IOInterruptEventSource *sender, int count)
+ {
+ 	RubyUSBIntService *self = (RubyUSBIntService *)owner;
++	uint64_t t0, delta_ns;
+ 
+ 	(void)sender;
+ 	(void)count;
+@@ -230,7 +233,11 @@ RubyUSBIntService::irqAction(OSObject *owner,
+ 		return;
+ 	}
+ 	self->fRequeues = 0;
++	/* 0197 G7: action occupancy (primary pass, interrupt-driven only). */
++	t0 = mach_absolute_time();
+ 	self->serviceWork();
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &delta_ns);
++	ruby_usb_irq_lat_sample((uint32_t)(delta_ns / 1000));
+ }
+ 
+ void
