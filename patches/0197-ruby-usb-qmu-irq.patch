@@ -61,12 +61,15 @@
          ruby_ms++;
          if (!assist)
              delay(1000);
-@@ -1417,6 +1451,16 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+@@ -1417,6 +1451,19 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
  #define QISAR1_RXQ_CSERR    (1u << 17)
  #define QISAR1_RXQ_LENERR   (1u << 18)
  #define QISAR1_RXQ_ZLPERR   (1u << 20)
 +/* 0197: QMU sub-enable registers (vendor U3D_QIER0/1) and routed sets. */
 +#define QIER0_OFF           0x0704
++/* F6: direct QIER writes do not hold; enables are set via QIESR0/1. */
++#define QIESR0_OFF          0x0708
++#define QIESR1_OFF          0x0718
 +#define QIER1_OFF           0x0714
 +#define RUBY_QMU_TX_DONE    (1u << 2)
 +#define RUBY_QMU_TXQ_BITS   (QISAR1_TXQ_EMPTY | QISAR1_TXQ_CSERR | \
@@ -78,7 +81,7 @@
  #define EP_RST_RX2_BIT      (1u << 2)
  #define EP_RST_TX2_BIT      (1u << 18)  /* EP_RST(in, 2) = BIT(16) << 2 */
  #define RUBY_RX_GPD_NUM 16
-@@ -3183,6 +3227,56 @@ ruby_usb_irq_pass(void)
+@@ -3183,6 +3230,56 @@ ruby_usb_irq_pass(void)
          ruby_irq_bmu++;
          ruby_ep0_service(mac, ruby_ms);
      }
@@ -135,7 +138,7 @@
      if (ruby_ep0_tx_pending || ruby_rst_seen)
          more = 1;
      return more;
-@@ -3192,11 +3286,79 @@ ruby_usb_irq_pass(void)
+@@ -3192,11 +3289,79 @@ ruby_usb_irq_pass(void)
  void
  ruby_usb_irq_service_work(void)
  {
@@ -216,7 +219,7 @@
  }
  
  /* Called from RubyUSBIntService (same workloop as the pass). */
-@@ -3295,12 +3457,23 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+@@ -3295,12 +3460,23 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
          ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_DMON1) : 0,
          seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
          ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
@@ -246,7 +249,7 @@
      last_otg = otg;
      last_mac2 = mac2;
      last_ext = ext;
-@@ -3996,6 +4169,7 @@ ruby_usb_probe(void)
+@@ -3996,6 +4172,7 @@ ruby_usb_probe(void)
      int probe = 0;
      int ep2log = 1;
      int usbirq = 0;
@@ -254,7 +257,7 @@
      vm_offset_t ippc, mac, phy, gpio, ifrao;
      uint32_t c0, c2, u3, u2, rst;
      uint32_t s1, s2, v;
-@@ -4004,13 +4178,18 @@ ruby_usb_probe(void)
+@@ -4004,13 +4181,18 @@ ruby_usb_probe(void)
      PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
      PE_parse_boot_argn("rubyep2log", &ep2log, sizeof(ep2log));
      PE_parse_boot_argn("rubyusbirq", &usbirq, sizeof(usbirq));
@@ -273,7 +276,7 @@
      if (enable != 1) {
          printf("RUBY USB: disabled (rubyusb=%d)\n", enable);
          return;
-@@ -4167,11 +4346,28 @@ ruby_usb_probe(void)
+@@ -4167,11 +4349,29 @@ ruby_usb_probe(void)
          if (ruby_usb_irq_prepare() != 0) {
              printf("RUBY USB: irq service absent, staying on polling\n");
              ruby_irq_mode = 0;
@@ -288,22 +291,23 @@
 +                 * 0197: the QMU group joins the enable set together with
 +                 * its full service (drain-all action + workloop data
 +                 * plane, an enabled group is never left without a live
-+                 * consumer).  QIER mirrors the routed bits; if silicon
-+                 * aggregates sub-statuses regardless of QIER (the F1
-+                 * shape) these writes are inert, not harmful.
++                 * consumer).  F6: QIER0/1 direct writes do not hold on
++                 * this silicon (readback 0, the F5 0x2418 no-op shape) --
++                 * the enables are set through QIESR0/1, mirroring the
++                 * LV1IESR pattern.
 +                 */
 +                ruby_wr32(mac, LV1IESR_OFF,
 +                    RUBY_IRQ_LV1_SET | LV1_QMU_INTR);
-+                ruby_wr32(mac, QIER0_OFF,
++                ruby_wr32(mac, QIESR0_OFF,
 +                    RUBY_QMU_TX_DONE | QMU_RX_DONE_BIT);
-+                ruby_wr32(mac, QIER1_OFF, RUBY_QMU_QIER1_SET);
++                ruby_wr32(mac, QIESR1_OFF, RUBY_QMU_QIER1_SET);
 +            } else {
 +                ruby_wr32(mac, LV1IESR_OFF, RUBY_IRQ_LV1_SET);
 +            }
              v = ruby_rd32(mac, MAC2_INTR_ENABLE_OFF);
              ruby_wr32(mac, MAC2_INTR_ENABLE_OFF,
                  v | MAC2_INTR_RESET | MAC2_INTR_RESUME |
-@@ -4180,6 +4376,7 @@ ruby_usb_probe(void)
+@@ -4180,14 +4380,17 @@ ruby_usb_probe(void)
                  printf("RUBY USB: irq activate failed, staying on "
                      "polling\n");
                  ruby_irq_mode = 0;
@@ -311,6 +315,18 @@
                  ruby_wr32(mac, LV1IECR - MTU3_PA, ~0u);
                  ruby_wr32(mac, EPIECR_OFF, ~0u);
              } else {
+                 printf("RUBY USB: irq service live (lv1ier=%08x "
+-                    "epier=%08x mac2en=%08x)\n",
++                    "epier=%08x mac2en=%08x qier0=%08x qier1=%08x)\n",
+                     ruby_rd32(mac, LV1IER_OFF),
+                     ruby_rd32(mac, EPIER_OFF),
+-                    ruby_rd32(mac, MAC2_INTR_ENABLE_OFF));
++                    ruby_rd32(mac, MAC2_INTR_ENABLE_OFF),
++                    ruby_rd32(mac, QIER0_OFF),
++                    ruby_rd32(mac, QIER1_OFF));
+             }
+         }
+     }
 --- a/iokit/Kernel/arm/RubyUSBIntService.cpp
 +++ b/iokit/Kernel/arm/RubyUSBIntService.cpp
 @@ -21,6 +21,7 @@
