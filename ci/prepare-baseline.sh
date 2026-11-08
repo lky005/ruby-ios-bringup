@@ -187,6 +187,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0201-ruby-usb-gpd-stride16-apmixed.patch" \
     "$ROOT/patches/0202-ruby-usb-frame-watchdog.patch" \
     "$ROOT/patches/0203-ruby-usb-tphy-coldcycle.patch" \
+    "$ROOT/patches/0204-ruby-usb-gpd-uc.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
