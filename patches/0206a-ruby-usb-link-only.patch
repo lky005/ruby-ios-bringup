@@ -1,0 +1,98 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -106,6 +106,8 @@
+ #define USB20_OP     (MTU3_PA + 0x2460)
+ #define BUS_PERFORMANCE (MTU3_PA + 0x2420)
+ #define BUS_PERF_NOISE_STILL_TR (1u << 21)
++#define LINK_RESET_INFO (MTU3_PA + 0x2424)
++#define WTCHRP_MSK (0xfu << 16)
+ #define LV1IECR      (MTU3_PA + 0x000c)
+ 
+ /* PHY banks relative to PHY_PA (U2 COM +0x300; U3 +0x700..) */
+@@ -1970,8 +1972,12 @@
+     ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
+ 
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 2));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 2));
++    printf("RUBY USB: EP2 QCR0=0x%08x tx_cs=%u rx_cs=%u\n",
++        ruby_rd32(mac, QCR0_OFF),
++        !!(ruby_rd32(mac, QCR0_OFF) & (1u << 2)),
++        !!(ruby_rd32(mac, QCR0_OFF) & (1u << 18)));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 18) | (1u << 2));
+ 
+@@ -2186,7 +2192,7 @@
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     ruby_dma_mb();
+ 
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 2));
+     /*
+      * The verified P9 TX path only ever sent short packets.  Keep each
+      * frame one byte below wMaxPacketSize so every GPD ends on a short
+@@ -2195,6 +2201,10 @@
+      * GPD ZLP flag stays off, so 511-byte short packets are unchanged.
+      */
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 2));
++    printf("RUBY USB: EP2 QCR0=0x%08x tx_cs=%u rx_cs=%u\n",
++        ruby_rd32(mac, QCR0_OFF),
++        !!(ruby_rd32(mac, QCR0_OFF) & (1u << 2)),
++        !!(ruby_rd32(mac, QCR0_OFF) & (1u << 18)));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 18) | (1u << 2));
+     ruby_wr32(mac, TQSAR2_OFF, (uint32_t)ruby_ring_pa);
+@@ -2788,7 +2798,10 @@
+     ruby_wr32(mac, RX2CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX2CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     ruby_wr32(mac, QCR0_OFF,
+-        ruby_rd32(mac, QCR0_OFF) | QMU_RX_CS_EN_BIT);
++        ruby_rd32(mac, QCR0_OFF) & ~QMU_RX_CS_EN_BIT);
++    printf("RUBY USB: EP2 RX QCR0=0x%08x rx_cs=%u\n",
++        ruby_rd32(mac, QCR0_OFF),
++        !!(ruby_rd32(mac, QCR0_OFF) & QMU_RX_CS_EN_BIT));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -2834,7 +2847,10 @@
+     ruby_wr32(mac, RX2CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX2CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     ruby_wr32(mac, QCR0_OFF,
+-        ruby_rd32(mac, QCR0_OFF) | QMU_RX_CS_EN_BIT);
++        ruby_rd32(mac, QCR0_OFF) & ~QMU_RX_CS_EN_BIT);
++    printf("RUBY USB: EP2 RX QCR0=0x%08x rx_cs=%u\n",
++        ruby_rd32(mac, QCR0_OFF),
++        !!(ruby_rd32(mac, QCR0_OFF) & QMU_RX_CS_EN_BIT));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -4597,12 +4613,24 @@
+         (v | (1u << 5)) & ~((1u << 6) | (1u << 0)));
+     ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 0);
+ 
+-    /* 0185: vendor ruby quirk: keep transfers going under line noise. */
++    /*
++     * 0206A: align the MAC link timing with the vendor slave.  The
++     * NOISE_STILL_TRANSFER bit is a host-side debug aid; the vendor
++     * device leaves it clear.  mtu3_regs_init also clears WTCHRP_MSK.
++     */
+     v = ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA);
+     ruby_wr32(mac, BUS_PERFORMANCE - MTU3_PA,
+-        v | BUS_PERF_NOISE_STILL_TR);
+-    printf("RUBY USB: bus perf 0x%08x\n",
+-        ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA));
++        v & ~BUS_PERF_NOISE_STILL_TR);
++    printf("RUBY USB: bus perf 0x%08x noise=%u\n",
++        ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA),
++        !!(ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA) &
++            BUS_PERF_NOISE_STILL_TR));
++
++    v = ruby_rd32(mac, LINK_RESET_INFO - MTU3_PA);
++    ruby_wr32(mac, LINK_RESET_INFO - MTU3_PA, v & ~WTCHRP_MSK);
++    printf("RUBY USB: link reset info 0x%08x wtchrp=0x%x\n",
++        ruby_rd32(mac, LINK_RESET_INFO - MTU3_PA),
++        ruby_rd32(mac, LINK_RESET_INFO - MTU3_PA) & WTCHRP_MSK);
+ 
+     v = ruby_rd32(ippc, 0x50);
+     ruby_wr32(ippc, 0x50, v & ~U2_OTG_SEL);
