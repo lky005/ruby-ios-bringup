@@ -1,0 +1,159 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -50,6 +50,7 @@
+ #include <sys/systm.h>
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
++#include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+ 
+ #include "ruby_probe.h"
+@@ -1663,12 +1664,7 @@
+ #define RUBY_PAD_TEXT   (RUBY_LOG_CHUNK - RUBY_HDR_LEN_V2)
+ #define RUBY_PAD_MAGIC  0x25u    /* 6-bit format tag, hdr[4] bits 15:10 */
+ 
+-/*
+- * 0204: full-page array so the uncached alias (rubydmauc) never
+- * shares its page with any other BSS object.  RUBY_GPD_RING_SZ
+- * (1 KB) is still the logical ring size; the rest is padding.
+- */
+-static uint8_t ruby_gpd_ring[PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
++static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+ static uint8_t ruby_log_buf[RUBY_GPD_NUM][RUBY_LOG_CHUNK]
+     __attribute__((aligned(4096)));
+ static uint32_t ruby_gpd_enq;
+@@ -1690,6 +1686,7 @@
+  */
+ static uint8_t *ruby_gpd_ring_cpu = ruby_gpd_ring;
+ static vm_offset_t ruby_gpd_ring_uc;
++static void *ruby_gpd_ring_alloc;
+ static int ruby_dma_uc;
+ #define RUBY_GPD_SLOT(i) (ruby_gpd_ring_cpu + (i) * RUBY_GPD_STRIDE)
+ static uint32_t ruby_push_seq;
+@@ -2057,22 +2054,80 @@
+         return;
+     }
+     ruby_ep2_host_seen = 0;
+-    ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
+-    if (!ruby_ring_pa || (ruby_ring_pa & 0x3fu) ||
+-        ((ruby_ring_pa & (PAGE_SIZE - 1u)) + RUBY_GPD_RING_SZ >
+-            PAGE_SIZE))
+-        ok = 0;
++
++    /*
++     * 0204b: keep the verified 1 KB ring layout.  The uncached test
++     * uses a dedicated, page-aligned allocation; the cached BSS ring
++     * remains the fallback.
++     */
++    if (ruby_dma_uc && !ruby_gpd_ring_alloc) {
++        vm_offset_t va = 0;
++
++        if (kmem_alloc(kernel_map, &va, PAGE_SIZE,
++            KMA_DATA | KMA_ZERO | KMA_PERMANENT,
++            VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++            printf("RUBY USB: EP2 dma uc alloc failed\n");
++            ruby_dma_uc = 0;
++        } else {
++            ruby_gpd_ring_alloc = (void *)va;
++            ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring_alloc);
++            if (!ruby_ring_pa ||
++                (ruby_ring_pa & (PAGE_SIZE - 1u))) {
++                printf("RUBY USB: EP2 dma uc pa bad "
++                    "0x%llx\n", ruby_ring_pa);
++                kmem_free(kernel_map, va, PAGE_SIZE);
++                ruby_gpd_ring_alloc = NULL;
++                ruby_ring_pa = 0;
++                ruby_dma_uc = 0;
++            } else {
++                ruby_dc_civac(ruby_gpd_ring_alloc,
++                    RUBY_GPD_RING_SZ);
++                ruby_dma_mb();
++                ruby_gpd_ring_uc = ml_io_map(ruby_ring_pa,
++                    PAGE_SIZE);
++                if (!ruby_gpd_ring_uc) {
++                    printf("RUBY USB: EP2 dma uc map "
++                        "failed 0x%llx\n", ruby_ring_pa);
++                    kmem_free(kernel_map, va, PAGE_SIZE);
++                    ruby_gpd_ring_alloc = NULL;
++                    ruby_ring_pa = 0;
++                    ruby_dma_uc = 0;
++                } else {
++                    ruby_gpd_ring_cpu =
++                        (uint8_t *)ruby_gpd_ring_uc;
++                }
++            }
++        }
++    }
++    if (ruby_dma_uc && ruby_gpd_ring_alloc) {
++        for (i = 0; i < RUBY_GPD_NUM; i++)
++            ruby_gpd_pa[i] =
++                ruby_ring_pa + i * RUBY_GPD_STRIDE;
++    } else {
++        ruby_dma_uc = 0;
++        ruby_gpd_ring_cpu = ruby_gpd_ring;
++        ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
++        if (!ruby_ring_pa || (ruby_ring_pa & 0x3fu) ||
++            ((ruby_ring_pa & (PAGE_SIZE - 1u)) +
++                RUBY_GPD_RING_SZ > PAGE_SIZE))
++            ok = 0;
++        for (i = 0; i < RUBY_GPD_NUM; i++) {
++            ruby_gpd_pa[i] = ruby_dma_pa(ruby_gpd_ring +
++                i * RUBY_GPD_STRIDE);
++            if (!ruby_gpd_pa[i] ||
++                (ruby_ring_pa &&
++                 ruby_gpd_pa[i] != ruby_ring_pa +
++                     i * RUBY_GPD_STRIDE)) {
++                ok = 0;
++                bad_i = i;
++            }
++        }
++    }
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         ruby_log_pa[i] = ruby_dma_pa(ruby_log_buf[i]);
+-        ruby_gpd_pa[i] = ruby_dma_pa(ruby_gpd_ring +
+-            i * RUBY_GPD_STRIDE);
+         if (!ruby_log_pa[i] || (ruby_log_pa[i] & 0x3fu) ||
+-            ((ruby_log_pa[i] & (PAGE_SIZE - 1u)) + RUBY_LOG_CHUNK >
+-                PAGE_SIZE) ||
+-            !ruby_gpd_pa[i] ||
+-            (ruby_ring_pa &&
+-                ruby_gpd_pa[i] != ruby_ring_pa +
+-                    i * RUBY_GPD_STRIDE)) {
++            ((ruby_log_pa[i] & (PAGE_SIZE - 1u)) +
++                RUBY_LOG_CHUNK > PAGE_SIZE)) {
+             ok = 0;
+             bad_i = i;
+         }
+@@ -2085,32 +2140,6 @@
+         return;
+     }
+ 
+-    /*
+-     * 0204: optional uncached alias for the 1 KB TX GPD ring.
+-     * Clean the cached BSS alias once, then route every CPU access
+-     * through the uncached mapping; the cached alias must not be
+-     * touched afterwards.  Log payload buffers stay cached (dc
+-     * civac) in this round; they are a separate variable.
+-     */
+-    if (ruby_dma_uc && !ruby_gpd_ring_uc) {
+-        if (ruby_ring_pa & (PAGE_SIZE - 1u)) {
+-            printf("RUBY USB: EP2 dma uc ring misaligned "
+-                "pa=0x%llx\n", ruby_ring_pa);
+-            ruby_dma_uc = 0;
+-        } else {
+-            ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+-            ruby_dma_mb();
+-            ruby_gpd_ring_uc = ml_io_map(ruby_ring_pa, PAGE_SIZE);
+-            if (!ruby_gpd_ring_uc) {
+-                printf("RUBY USB: EP2 dma uc map failed "
+-                    "pa=0x%llx\n", ruby_ring_pa);
+-                ruby_dma_uc = 0;
+-            } else {
+-                ruby_gpd_ring_cpu =
+-                    (uint8_t *)ruby_gpd_ring_uc;
+-            }
+-        }
+-    }
+     printf("RUBY USB: EP2 ring %s pa=0x%llx cpu=0x%llx "
+         "(rubydmauc=%d)\n",
+         ruby_dma_uc ? "uncached" : "cached", ruby_ring_pa,
