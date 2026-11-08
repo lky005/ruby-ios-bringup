@@ -1,0 +1,21 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1975,7 +1975,8 @@
+      */
+     ruby_wr32(mac, TX2CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
+-    ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
++    /* 0209: TX FIFO base 0x0 (vendor EP1 live value); was 0x20 = 512 B. */
++    ruby_wr32(mac, TX2CSR2_OFF, 9u << 16);
+ 
+     /* 0207: QCR0 CS engines stay at the boot default; the vendor never writes QCR0. */
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 2));
+@@ -2197,7 +2198,7 @@
+      * differs from the verified reference.
+      */
+     ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
+-    ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
++    ruby_wr32(mac, TX2CSR2_OFF, 9u << 16);
+     ruby_seq("TXCFG_CR", ruby_rd32(mac, TX2CSR0_OFF),
+         ruby_rd32(mac, TX2CSR2_OFF));
+ 
