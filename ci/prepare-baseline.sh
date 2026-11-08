@@ -193,6 +193,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0207-ruby-usb-qcr0-off.patch" \
     "$ROOT/patches/0211-ruby-usb-ep1.patch" \
     "$ROOT/patches/0212-ruby-usb-ep1-qisar0.patch" \
+    "$ROOT/patches/0213-ruby-usb-ep1-qisar1-fastpath.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

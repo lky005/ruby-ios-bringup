@@ -1,0 +1,38 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2396,6 +2396,19 @@
+     if (freed)
+         ruby_busy_ticks = 0;
+ 
++    /*
++     * 0213: TXQ_EMPTY fast path. The vendor routes this to the QMU ISR
++     * and drains immediately; here we drain right away instead of
++     * waiting for the ~2s busy_ticks stall timer below. The snapshot q1
++     * was taken at push_log entry, so no new register read is needed.
++     */
++    if (!freed && ruby_inflight > 0 && ruby_ep2_host_seen &&
++        (q1 & QISAR1_TXQ_EMPTY)) {
++        freed = ruby_ep2_drain(mac, q0);
++        if (freed)
++            ruby_busy_ticks = 0;
++    }
++
+     if (q0 & RUBY_QMU_TX_DONE) {
+         uint32_t cur;
+ 
+@@ -2455,12 +2468,11 @@
+         }
+     }
+     /*
+-     * QISAR1 is shared with RX.  Clear only the TX aggregate bits so the
+-     * RX poll can still see RXQ_EMPTY/CS/LEN/ZLP.
++     * 0213: QISAR1 is read-update in the vendor and must not be written.
++     * Only the TX aggregate bits are observed; the RX poll keeps its own
++     * copy of the q1 snapshot taken at push_log entry.
+      */
+     txq1 = q1 & (QISAR1_TXQ_EMPTY | QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR);
+-    if (txq1)
+-        ruby_wr32(mac, QISAR1_OFF, txq1);
+     if (err || (txq1 & (QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR))) {
+         if (err)
+             ruby_wr32(mac, TQERRIR0_OFF, err);
