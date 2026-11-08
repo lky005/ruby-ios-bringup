@@ -1,4 +1,4 @@
-name: xnu-0209
+name: xnu-0210
 
 # Builds the ruby kernel without vendoring the upstream tree.
 # ci/prepare-baseline.sh takes a content-pinned 82-file baseline (private
@@ -22,7 +22,7 @@ on:
         default: "16.0"
       hash_config:
         description: config carrying the expected kernel hash (empty expectation = record only)
-        default: "config/0209.env"
+        default: "config/0210.env"
       skip_patches:
         description: patch numbers to drop (prefix match, e.g. 0144) for an older line
         default: ""
@@ -66,7 +66,7 @@ env:
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   RUNNER_IMAGE: ${{ inputs.runner || 'macos-15' }}
   XCODE_VERSION: ${{ inputs.xcode_version || '16.0' }}
-  HASH_CONFIG: ${{ inputs.hash_config || 'config/0209.env' }}
+  HASH_CONFIG: ${{ inputs.hash_config || 'config/0210.env' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
   # ccache: xnu is ~2000 compiles; a patch usually changes a few of them
@@ -157,7 +157,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0209.env', '.github/workflows/xnu.yml') }}
+          key: ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0210.env', '.github/workflows/xnu.yml') }}
           restore-keys: |
             ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
 

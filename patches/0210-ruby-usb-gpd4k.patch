@@ -1,0 +1,12 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1664,7 +1664,8 @@
+ #define RUBY_PAD_TEXT   (RUBY_LOG_CHUNK - RUBY_HDR_LEN_V2)
+ #define RUBY_PAD_MAGIC  0x25u    /* 6-bit format tag, hdr[4] bits 15:10 */
+ 
+-#define RUBY_BULK_FRAMES 32u
++/* 0210: one GPD per 4 KB (8 x 512 B), matching the vendor adb request size. */
++#define RUBY_BULK_FRAMES 8u
+ #define RUBY_BULK_BYTES  (RUBY_LOG_CHUNK * RUBY_BULK_FRAMES)
+ static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+ /*
