@@ -1,0 +1,21 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1974,7 +1974,8 @@
+      * and a 512 B segment serves both 64 and 512 maxpacket.
+      */
+     ruby_wr32(mac, TX2CSR0_OFF, 512u | (1u << 29));
+-    ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
++    /* 0208: whole 4 KB TX pool for EP2 (8 x 512 B); was slot 2 = 1536 B. */
++    ruby_wr32(mac, TX2CSR1_OFF, 7u << 8);
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
+ 
+     /* 0207: QCR0 CS engines stay at the boot default; the vendor never writes QCR0. */
+@@ -2196,7 +2197,7 @@
+      * slot 0 and never restored it.  Bulk type is 0, so only the slot field
+      * differs from the verified reference.
+      */
+-    ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
++    ruby_wr32(mac, TX2CSR1_OFF, 7u << 8);
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
+     ruby_seq("TXCFG_CR", ruby_rd32(mac, TX2CSR0_OFF),
+         ruby_rd32(mac, TX2CSR2_OFF));
