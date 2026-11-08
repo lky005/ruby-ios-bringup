@@ -1,0 +1,37 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1977,7 +1977,7 @@
+     ruby_wr32(mac, TX2CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX2CSR2_OFF, 32u | (9u << 16));
+ 
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
++    /* 0207: QCR0 CS engines stay at the boot default; the vendor never writes QCR0. */
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 2));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 18) | (1u << 2));
+@@ -2215,7 +2215,6 @@
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     ruby_dma_mb();
+ 
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
+     /*
+      * The verified P9 TX path only ever sent short packets.  Keep each
+      * frame one byte below wMaxPacketSize so every GPD ends on a short
+@@ -2814,8 +2813,6 @@
+     ruby_wr32(mac, RX2CSR0_OFF, 64u | RX_DMAREQEN);
+     ruby_wr32(mac, RX2CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX2CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+-    ruby_wr32(mac, QCR0_OFF,
+-        ruby_rd32(mac, QCR0_OFF) | QMU_RX_CS_EN_BIT);
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -2860,8 +2857,6 @@
+     ruby_wr32(mac, RX2CSR0_OFF, 64u | RX_DMAREQEN);
+     ruby_wr32(mac, RX2CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX2CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+-    ruby_wr32(mac, QCR0_OFF,
+-        ruby_rd32(mac, QCR0_OFF) | QMU_RX_CS_EN_BIT);
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
