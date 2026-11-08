@@ -1,0 +1,272 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -306,13 +306,19 @@
+     1, 2, 3, 1
+ };
+ 
+-static const uint8_t ruby_cfg_desc[32] = {
+-    9, 2, 32, 0, 1, 1, 0, 0x80, 50,
+-    9, 4, 0, 0, 2, 0xFF, 0x00, 0x00, 0,
++static const uint8_t ruby_cfg_desc[39] = {
++    9, 2, 39, 0, 1, 1, 0, 0x80, 50,
++    9, 4, 0, 0, 3, 0xFF, 0x00, 0x00, 0,
++    /* 0216: EP1 OUT bulk MPS 64 (0x0040) */
++    7, 5, 0x01, 0x02, 64, 0, 0,
+     7, 5, 0x02, 0x02, 64, 0, 0,
+     /* 0211: EP1 IN bulk MPS 512 (0x0200, little endian: 0, 2). */
+     7, 5, 0x81, 0x02, 0, 2, 0,
+ };
++/* 0216 note: bNumEndpoints in the Interface descriptor must equal
++ * the count (3), else libusb/Windows may prune trailing IN
++ * descriptors from its cached copy. Set to 3 below by patching the
++ * 9,4,0,0,2 byte: bNumEndpoints 2 -> 3. */
+ 
+ static const uint8_t ruby_str_lang[4] = { 4, 3, 0x09, 0x04 };
+ static const uint8_t ruby_str_mfg[10] = {
+@@ -1548,9 +1554,9 @@
+ #define TX1CSR0_OFF     0x0110
+ #define TX1CSR1_OFF     0x0114
+ #define TX1CSR2_OFF     0x0118
+-#define RX2CSR0_OFF     0x0220
+-#define RX2CSR1_OFF     0x0224
+-#define RX2CSR2_OFF     0x0228
++#define RX1CSR0_OFF     0x0210
++#define RX1CSR1_OFF     0x0214
++#define RX1CSR2_OFF     0x0218
+ #define QCR0_OFF        0x0400
+ #define QCR1_OFF        0x0404
+ #define QCR3_OFF        0x040c
+@@ -1558,10 +1564,10 @@
+ #define TQSAR1_OFF      0x0514
+ #define TQCPR1_OFF      0x0518
+ #define TQHIAR1_OFF     0x0484
+-#define RQCSR2_OFF      0x0620
+-#define RQSAR2_OFF      0x0624
+-#define RQCPR2_OFF      0x0628
+-#define RQHIAR2_OFF     0x04c8
++#define RQCSR1_OFF      0x0610
++#define RQSAR1_OFF      0x0614
++#define RQCPR1_OFF      0x0618
++#define RQHIAR1_OFF     0x04c4
+ #define TQERRIESR0_OFF  0x0788
+ #define RQERRIR0_OFF    0x07c0
+ #define RQERRIESR0_OFF  0x07c8
+@@ -1599,6 +1605,7 @@
+ #define QMU_RX_CS_ERR_BIT   (1u << 2)
+ #define QMU_RX_ZLP_ERR_BIT  (1u << 18)
+ #define QMU_RX_DONE_BIT     (1u << 18)
++#define QMU_RX_DONE_BIT_EP1 (1u << 17) /* 0216: BIT(16)<<1 vendor */
+ #define RX_SENDSTALL_BIT    (1u << 21)
+ #define RX_SENTSTALL_BIT    (1u << 22)
+ #define RX_RXPKTRDY_BIT     (1u << 16)
+@@ -1887,10 +1894,10 @@
+ {
+     uint32_t i;
+ 
+-    if (ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE)
+-        ruby_wr32(mac, RQCSR2_OFF, QMU_Q_STOP);
++    if (ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE)
++        ruby_wr32(mac, RQCSR1_OFF, QMU_Q_STOP);
+     for (i = 0; i < RUBY_EP2_STOP_SPINS; i++) {
+-        if (!(ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE))
++        if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
+             return 0;
+         delay(RUBY_EP2_STOP_SPIN_US);
+     }
+@@ -2834,20 +2841,20 @@
+     ruby_cmd_count = 0;
+     ruby_cmd_errors = 0;
+ 
+-    ruby_wr32(mac, RX2CSR0_OFF, 64u | RX_DMAREQEN);
+-    ruby_wr32(mac, RX2CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+-    ruby_wr32(mac, RX2CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
++    ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
++    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
++    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+         QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
+     ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
+         QMU_RX_ZLP_ERR_BIT);
+-    ruby_wr32(mac, RQSAR2_OFF, (uint32_t)ruby_rx_ring_pa);
+-    ruby_wr32(mac, RQHIAR2_OFF, (uint32_t)((ruby_rx_ring_pa >> 32) & 0xfu));
++    ruby_wr32(mac, RQSAR1_OFF, (uint32_t)ruby_rx_ring_pa);
++    ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((ruby_rx_ring_pa >> 32) & 0xfu));
+     for (i = 0; i < RUBY_RX_GPD_NUM; i++)
+         ruby_ep2_rx_arm(i);
+-    ruby_wr32(mac, RQCSR2_OFF, QMU_Q_START);
++    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
+     ruby_rx_ready = 1;
+     ruby_seq("RXCFG_OUT", (uint32_t)ruby_rx_ring_pa, ruby_rx_ready);
+     printf("RUBY USB: EP2 RX ring pa=0x%llx buf=0x%llx/0x%llx/0x%llx/0x%llx\n",
+@@ -2867,28 +2874,28 @@
+         printf("RUBY USB: EP2 RX stop timeout in reset\n");
+         return;
+     }
+-    csr = ruby_rd32(mac, RX2CSR0_OFF) &
++    csr = ruby_rd32(mac, RX1CSR0_OFF) &
+         ~(RX_SENTSTALL_BIT | RX_RXPKTRDY_BIT);
+     csr = (csr & ~RX_SENDSTALL_BIT) | RX_SENTSTALL_BIT | RX_RXPKTRDY_BIT;
+-    ruby_wr32(mac, RX2CSR0_OFF, csr);
++    ruby_wr32(mac, RX1CSR0_OFF, csr);
+     ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
+     ruby_wr32(mac, EP_RST_OFF, 0);
+-    ruby_seq("EPRST_RX", ruby_rd32(mac, RX2CSR0_OFF),
+-        ruby_rd32(mac, RQCSR2_OFF));
++    ruby_seq("EPRST_RX", ruby_rd32(mac, RX1CSR0_OFF),
++        ruby_rd32(mac, RQCSR1_OFF));
+ 
+     /* EP_RST may reset the per-endpoint configuration; restore it before
+      * re-arming the ring so every clean test starts from the same state. */
+-    ruby_wr32(mac, RX2CSR0_OFF, 64u | RX_DMAREQEN);
+-    ruby_wr32(mac, RX2CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+-    ruby_wr32(mac, RX2CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
++    ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
++    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
++    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+         QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
+     ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
+         QMU_RX_ZLP_ERR_BIT);
+-    ruby_wr32(mac, RQSAR2_OFF, (uint32_t)ruby_rx_ring_pa);
+-    ruby_wr32(mac, RQHIAR2_OFF, (uint32_t)((ruby_rx_ring_pa >> 32) & 0xfu));
++    ruby_wr32(mac, RQSAR1_OFF, (uint32_t)ruby_rx_ring_pa);
++    ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((ruby_rx_ring_pa >> 32) & 0xfu));
+ 
+     ruby_rx_ready = 0;
+     ruby_rx_deq = 0;
+@@ -2911,7 +2918,7 @@
+     }
+     for (i = 0; i < RUBY_RX_GPD_NUM; i++)
+         ruby_ep2_rx_arm(i);
+-    ruby_wr32(mac, RQCSR2_OFF, QMU_Q_START);
++    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
+     ruby_rx_ready = 1;
+ }
+ 
+@@ -2939,8 +2946,8 @@
+ static void
+ ruby_ep2_rx_halt_clear(vm_offset_t mac)
+ {
+-    ruby_seq("HALT_RX", ruby_rd32(mac, RX2CSR0_OFF),
+-        ruby_rd32(mac, RQCSR2_OFF));
++    ruby_seq("HALT_RX", ruby_rd32(mac, RX1CSR0_OFF),
++        ruby_rd32(mac, RQCSR1_OFF));
+     ruby_ep2_rx_reset(mac, 0);
+ }
+ 
+@@ -2950,8 +2957,8 @@
+     uint64_t cur_pa;
+     uint32_t rqcpr, rqhiar;
+ 
+-    rqcpr = ruby_rd32(mac, RQCPR2_OFF);
+-    rqhiar = ruby_rd32(mac, RQHIAR2_OFF);
++    rqcpr = ruby_rd32(mac, RQCPR1_OFF);
++    rqhiar = ruby_rd32(mac, RQHIAR1_OFF);
+     cur_pa = ((uint64_t)((rqhiar >> 8) & 0xfu) << 32) | rqcpr;
+     if (cur_pa < ruby_rx_ring_pa ||
+         cur_pa >= ruby_rx_ring_pa + (RUBY_RX_GPD_NUM * 16u))
+@@ -2962,9 +2969,9 @@
+ static void
+ ruby_ep2_rx_resume(vm_offset_t mac)
+ {
+-    ruby_wr32(mac, RQCSR2_OFF, QMU_Q_RESUME);
+-    if (!(ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE))
+-        ruby_wr32(mac, RQCSR2_OFF, QMU_Q_RESUME);
++    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
++    if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
++        ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+ }
+ 
+ static int
+@@ -3320,7 +3327,7 @@
+     if (!ruby_rx_ready)
+         return;
+ 
+-    if (ruby_rd32(mac, RX2CSR0_OFF) & RX_SENTSTALL_BIT)
++    if (ruby_rd32(mac, RX1CSR0_OFF) & RX_SENTSTALL_BIT)
+         ruby_rx_stall_seen = 1;
+ 
+     q1 = ruby_rd32(mac, QISAR1_OFF);
+@@ -3347,8 +3354,8 @@
+     }
+ 
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+-    if (q0 & QMU_RX_DONE_BIT) {
+-        ruby_wr32(mac, QISAR0_OFF, QMU_RX_DONE_BIT);
++    if (q0 & QMU_RX_DONE_BIT_EP1) {
++        ruby_wr32(mac, QISAR0_OFF, QMU_RX_DONE_BIT_EP1);
+         ruby_rx_done_events++;
+     }
+ 
+@@ -3360,7 +3367,7 @@
+      * resume it so the next host OUT is not NAKed forever.
+      */
+     if (ruby_rx_ready &&
+-        !(ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE))
++        !(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
+         ruby_ep2_rx_resume(mac);
+ }
+ 
+@@ -3439,7 +3446,7 @@
+      * inactive; a timeout leaves the endpoint and ring for the next
+      * rearm/config to retry.
+      */
+-    if (was_rx || (ruby_rd32(mac, RQCSR2_OFF) & QMU_Q_ACTIVE)) {
++    if (was_rx || (ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE)) {
+         if (ruby_ep2_rx_qmu_stop(mac) == 0) {
+             ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
+             ruby_wr32(mac, EP_RST_OFF, 0);
+@@ -3447,7 +3454,7 @@
+             printf("RUBY USB: EP2 RX stop timeout in rearm\n");
+         }
+     } else {
+-        ruby_wr32(mac, RQCSR2_OFF, QMU_Q_STOP);
++        ruby_wr32(mac, RQCSR1_OFF, QMU_Q_STOP);
+         ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
+         ruby_wr32(mac, EP_RST_OFF, 0);
+     }
+@@ -3683,7 +3690,7 @@
+         ruby_usb_irq_kick();
+     }
+     if (ruby_rx_ready &&
+-        (ruby_rd32(mac, RX2CSR0_OFF) & RX_SENTSTALL_BIT)) {
++        (ruby_rd32(mac, RX1CSR0_OFF) & RX_SENTSTALL_BIT)) {
+         ruby_qmu_rx_recover_req = 1;
+         ruby_usb_irq_kick();
+     }
+@@ -3886,9 +3893,9 @@
+     v[3] = ruby_rx_zlp;
+     v[4] = ruby_rx_last_len;
+     v[5] = ruby_rx_crc;
+-    v[6] = ruby_rd32(mac, RQCPR2_OFF);
+-    v[7] = ruby_rd32(mac, RQHIAR2_OFF);
+-    v[8] = ruby_rd32(mac, RQCSR2_OFF);
++    v[6] = ruby_rd32(mac, RQCPR1_OFF);
++    v[7] = ruby_rd32(mac, RQHIAR1_OFF);
++    v[8] = ruby_rd32(mac, RQCSR1_OFF);
+     v[9] = ruby_rd32(mac, QISAR0_OFF);
+     v[10] = ruby_rd32(mac, QISAR1_OFF);
+     v[11] = ruby_rd32(mac, RQERRIR0_OFF);
+@@ -3914,12 +3921,12 @@
+         if (ruby_rx_gpd_ring[i * 16] & 1u)
+             hwo |= 1u << i;
+ 
+-    rqcpr = ruby_rd32(mac, RQCPR2_OFF);
+-    rqhiar = ruby_rd32(mac, RQHIAR2_OFF);
+-    rqcsr = ruby_rd32(mac, RQCSR2_OFF);
+-    rx0 = ruby_rd32(mac, RX2CSR0_OFF);
+-    rx1 = ruby_rd32(mac, RX2CSR1_OFF);
+-    rx2 = ruby_rd32(mac, RX2CSR2_OFF);
++    rqcpr = ruby_rd32(mac, RQCPR1_OFF);
++    rqhiar = ruby_rd32(mac, RQHIAR1_OFF);
++    rqcsr = ruby_rd32(mac, RQCSR1_OFF);
++    rx0 = ruby_rd32(mac, RX1CSR0_OFF);
++    rx1 = ruby_rd32(mac, RX1CSR1_OFF);
++    rx2 = ruby_rd32(mac, RX1CSR2_OFF);
+     cur = ruby_ep2_rx_cur_slot(mac);
+ 
+     v[0] = 0x47325045u;         /* "EP2G" */
