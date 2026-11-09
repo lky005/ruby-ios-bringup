@@ -1,0 +1,22 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 9575e94..91dd04c 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -612,9 +612,15 @@ ruby_build_cfg_desc(uint8_t *out)
+         out[off++] = 9; out[off++] = 4; out[off++] = 1; out[off++] = 0;
+         out[off++] = 2; out[off++] = 0x0A; out[off++] = 0; out[off++] = 0; out[off++] = 0;
+         out[off++] = 7; out[off++] = 5; out[off++] = 0x01; out[off++] = 2;
+-        out[off++] = 64; out[off++] = 0; out[off++] = 0;
++        /* 0264: the ACM descriptor must follow ruby_eps like the vendor path;
++         * 0262 changed the endpoint table but left this literal at 64. */
++        out[off++] = (uint8_t)(ruby_eps[1].mps & 0xffu);
++        out[off++] = (uint8_t)((ruby_eps[1].mps >> 8) & 0xffu);
++        out[off++] = 0;
+         out[off++] = 7; out[off++] = 5; out[off++] = 0x81; out[off++] = 2;
+-        out[off++] = 0; out[off++] = 2; out[off++] = 0;
++        out[off++] = (uint8_t)(ruby_eps[3].mps & 0xffu);
++        out[off++] = (uint8_t)((ruby_eps[3].mps >> 8) & 0xffu);
++        out[off++] = 0;
+         out[2] = (uint8_t)(off & 0xffu);
+         out[3] = (uint8_t)((off >> 8) & 0xffu);
+         return off;
