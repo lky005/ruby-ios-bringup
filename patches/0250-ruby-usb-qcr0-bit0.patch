@@ -1,0 +1,61 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 3c4578e..0686b36 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2179,8 +2179,10 @@ ruby_ep2_resume(vm_offset_t mac)
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) |
+-        (1u << 0) | (1u << 1));
++    /* 0250: bit0 is required for QMU operation on this IP (clearing it
++     * kills RX ACK entirely); keep it, drop only EP1 TX CS validation. */
++    ruby_wr32(mac, QCR0_OFF, (ruby_rd32(mac, QCR0_OFF) &
++        ~(1u << 1)) | (1u << 0));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -2359,8 +2361,10 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+      * the 16-byte mode a boot-enabled CS engine validates 32 bytes and
+      * silently skips every GPD.
+      */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) |
+-        (1u << 0) | (1u << 1));
++    /* 0250: bit0 is required for QMU operation on this IP (clearing it
++     * kills RX ACK entirely); keep it, drop only EP1 TX CS validation. */
++    ruby_wr32(mac, QCR0_OFF, (ruby_rd32(mac, QCR0_OFF) &
++        ~(1u << 1)) | (1u << 0));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -2874,8 +2878,10 @@ ruby_ep2_tx_force(vm_offset_t mac)
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) |
+-        (1u << 0) | (1u << 1));
++    /* 0250: bit0 is required for QMU operation on this IP (clearing it
++     * kills RX ACK entirely); keep it, drop only EP1 TX CS validation. */
++    ruby_wr32(mac, QCR0_OFF, (ruby_rd32(mac, QCR0_OFF) &
++        ~(1u << 1)) | (1u << 0));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -3422,7 +3428,7 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 17));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -3468,7 +3474,7 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 17));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
