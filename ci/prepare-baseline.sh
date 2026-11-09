@@ -212,6 +212,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0229-ruby-usb-acm-isolation.patch" \
     "$ROOT/patches/0230-ruby-usb-acm-setup-ack.patch" \
     "$ROOT/patches/0231-ruby-usb-acm-echo.patch" \
+    "$ROOT/patches/0232-ruby-usb-rx-irq.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
