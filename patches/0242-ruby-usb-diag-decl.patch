@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 34b4052..8ec9b04 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1993,6 +1993,9 @@ static uint64_t ruby_bulk_pa[RUBY_GPD_NUM];
+ static void *ruby_bulk_base;
+ static uint32_t ruby_gpd_enq;
+ static uint32_t ruby_gpd_deq;
++/* 0242: restart counters (declared before their first use in resume). */
++static uint32_t ruby_ep2_tx_restarts;
++static uint32_t ruby_ep2_rx_restarts;
+ static uint32_t ruby_inflight;
+ static uint32_t ruby_ep2_host_seen;
+ static volatile uint32_t ruby_tx_busy;
+@@ -2786,8 +2789,6 @@ static uint32_t ruby_acm_echo_drops;
+ static uint32_t ruby_acm_echo_dbg_rx;
+ static uint32_t ruby_acm_echo_dbg_tx;
+ /* 0240: diagnostics only: how often the 20 ms full-restart fired. */
+-static uint32_t ruby_ep2_tx_restarts;
+-static uint32_t ruby_ep2_rx_restarts;
+ 
+ static uint32_t
+ ruby_acm_echo_space(void)
