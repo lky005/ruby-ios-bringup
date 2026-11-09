@@ -1,0 +1,22 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 0aade28..af8e84a 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -3133,8 +3133,16 @@ ruby_ep2_push_log(vm_offset_t mac)
+     }
+ 
+     ruby_tx_busy = (ruby_inflight > 0) ? 1u : 0u;
+-    if (!queued)
++    if (!queued) {
++        /*
++         * 0241: with no fresh data this pass used to return before the
++         * doorbell, so a stalled queue was never retried (console: inf=9,
++         * tq=0).  Keep nudging/restarting while descriptors are pending.
++         */
++        if (ruby_inflight > 0)
++            ruby_ep2_resume(mac);
+         return;
++    }
+ 
+     /*
+      * Do not clear QISAR0 here.  The vendor clears the TX done bit only
