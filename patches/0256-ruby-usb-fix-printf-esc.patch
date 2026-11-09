@@ -1,0 +1,24 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 440577d..71fc3e3 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2866,8 +2866,7 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+     uint32_t i, d;
+ 
+     printf("RUBY USB TXSTALL inf=%u tcsr=%08x qcr0=%08x qcr1=%08x "
+-        "tqcpr=%08x q0=%08x q1=%08x
+-", ruby_inflight,
++        "tqcpr=%08x q0=%08x q1=%08x\n", ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, QCR0_OFF),
+         ruby_rd32(mac, QCR1_OFF), ruby_rd32(mac, TQCPR1_OFF),
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF));
+@@ -2879,8 +2878,7 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+         volatile uint8_t *g = RUBY_GPD_SLOT(sl);
+ 
+         printf("RUBY USB GPD[%02u] f=%02x c=%02x len=%u next=%08x "
+-            "buf=%08x
+-", sl, g[0], g[1],
++            "buf=%08x\n", sl, g[0], g[1],
+             (uint32_t)(*(volatile uint16_t *)(g + 12)),
+             *(volatile uint32_t *)(g + 4),
+             *(volatile uint32_t *)(g + 8));
