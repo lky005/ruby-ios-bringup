@@ -1,0 +1,241 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 91dd04c..eef7942 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1368,6 +1368,8 @@ static void ruby_ep0_vendor_ep0_diag(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
+ static void ruby_ep0_vendor_ep0_bulk(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
++static void ruby_ep0_vendor_txprobe(vm_offset_t mac, uint32_t t,
++    uint32_t wlen);
+ static void ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
+ static void ruby_ep0_vendor_log(vm_offset_t mac, uint32_t t, uint32_t value,
+@@ -1590,6 +1592,8 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_vendor_ep0_diag(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x28)
+         ruby_ep0_vendor_ep0_bulk(mac, t, len);
++    else if (st[0] == 0xc0 && st[1] == 0x29)
++        ruby_ep0_vendor_txprobe(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x2a)
+         ruby_ep0_vendor_log(mac, t, value, index, len);
+     else if (st[0] == 0xc0 && st[1] == 0x2b)
+@@ -2025,6 +2029,36 @@ static uint32_t ruby_ep2_tx_kick_ms;
+ static uint32_t ruby_ep2_rx_kicks;
+ static uint32_t ruby_ep2_rx_active_seen;
+ static uint32_t ruby_ep2_rx_kick_ms;
++
++/* 0265: read-only TX handoff probes (no behavior change). */
++#define RUBY_TX_SRC_PUSH    0u
++#define RUBY_TX_SRC_STALL   1u
++#define RUBY_TX_SRC_RECOVER 2u
++#define RUBY_TX_SRC_OTHER   3u
++#define RUBY_TX_MTR_SLOTS   16u
++enum {
++    RUBY_MTR_TX_PUSH = 1,
++    RUBY_MTR_TX_DONE,
++    RUBY_MTR_TX_KICK,
++    RUBY_MTR_TX_STALL,
++    RUBY_MTR_BULK_DUP,
++};
++struct ruby_tx_mtr {
++    uint32_t t;
++    uint16_t ev;
++    uint16_t a;
++    uint32_t b;
++    uint32_t c;
++};
++static struct ruby_tx_mtr ruby_tx_mtr[RUBY_TX_MTR_SLOTS];
++static volatile uint32_t ruby_tx_mtr_idx;
++static volatile uint32_t ruby_tx_kick_cnt;
++static volatile uint32_t ruby_tx_kick_src;
++static volatile uint32_t ruby_tx_kick_ms;
++static volatile uint32_t ruby_tx_kick_total[4];
++static uint32_t ruby_bulk_dup_cnt;
++static uint32_t ruby_bulk_dup_a;
++static uint32_t ruby_bulk_dup_b;
+ /* 0255: read-only stall diagnostics. */
+ static volatile uint32_t ruby_qmu_diag_req;
+ static uint32_t ruby_qmu_diag_ms;
+@@ -2182,12 +2216,55 @@ ruby_gpd_clear(uint32_t i)
+  * restart proved only a full re-program works); re-program the endpoint
+  * and START from the oldest unprocessed GPD when ACTIVE stays 0.
+  */
++static void
++ruby_tx_mtr_add(uint16_t ev, uint16_t a, uint32_t b, uint32_t c)
++{
++    uint32_t i = __sync_fetch_and_add(&ruby_tx_mtr_idx, 1) &
++        (RUBY_TX_MTR_SLOTS - 1);
++    struct ruby_tx_mtr *e = &ruby_tx_mtr[i];
++
++    e->t = ruby_ms;
++    e->ev = ev;
++    e->a = a;
++    e->b = b;
++    e->c = c;
++}
++
++static void
++ruby_tx_mtr_dump(void)
++{
++    uint32_t i;
++
++    printf("RUBY USB TXMTR idx=%u kicks=%u last_src=%u last_ms=%u "
++        "src=%u/%u/%u/%u dup=%u/%u/%u\n",
++        ruby_tx_mtr_idx, ruby_tx_kick_cnt, ruby_tx_kick_src,
++        ruby_tx_kick_cnt ? (uint32_t)(ruby_ms - ruby_tx_kick_ms) : 0xffffffffu,
++        ruby_tx_kick_total[0], ruby_tx_kick_total[1],
++        ruby_tx_kick_total[2], ruby_tx_kick_total[3],
++        ruby_bulk_dup_cnt, ruby_bulk_dup_a, ruby_bulk_dup_b);
++    for (i = 0; i < RUBY_TX_MTR_SLOTS; i++) {
++        struct ruby_tx_mtr *e = &ruby_tx_mtr[(ruby_tx_mtr_idx + i) &
++            (RUBY_TX_MTR_SLOTS - 1)];
++
++        if (!e->t)
++            continue;
++        printf("RUBY USB TXM[%02u] t=%u ev=%u a=%u b=%08x c=%08x\n",
++            i, e->t, e->ev, e->a, e->b, e->c);
++    }
++}
++
+ static void
+ ruby_ep2_resume(vm_offset_t mac)
+ {
+     static uint32_t restart_ms;
+     uint64_t pa;
+ 
++    ruby_tx_kick_cnt++;
++    ruby_tx_kick_src = RUBY_TX_SRC_STALL;
++    ruby_tx_kick_ms = ruby_ms;
++    ruby_tx_kick_total[RUBY_TX_SRC_STALL]++;
++    ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_STALL,
++        ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+     if (ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE) {
+         ruby_busy_ticks = 0;
+@@ -2581,6 +2658,29 @@ ruby_ep2_config(vm_offset_t mac)
+         return;
+     }
+ 
++    {
++        uint32_t j;
++
++        ruby_bulk_dup_cnt = 0;
++        for (i = 0; i < RUBY_GPD_NUM; i++) {
++            for (j = i + 1; j < RUBY_GPD_NUM; j++) {
++                if (ruby_bulk_pa[i] && ruby_bulk_pa[i] == ruby_bulk_pa[j]) {
++                    ruby_bulk_dup_cnt++;
++                    ruby_bulk_dup_a = i;
++                    ruby_bulk_dup_b = j;
++                    break;
++                }
++            }
++            if (ruby_bulk_dup_cnt)
++                break;
++        }
++        printf("RUBY USB: 0265 bulk pa dup=%u first=%u/%u\n",
++            ruby_bulk_dup_cnt, ruby_bulk_dup_a, ruby_bulk_dup_b);
++        if (ruby_bulk_dup_cnt)
++            ruby_tx_mtr_add(RUBY_MTR_BULK_DUP, (uint16_t)ruby_bulk_dup_a,
++                ruby_bulk_dup_b, 0);
++    }
++
+     printf("RUBY USB: EP2 ring %s pa=0x%llx cpu=0x%llx "
+         "(rubydmauc=%d)\n",
+         ruby_dma_uc ? "uncached" : "cached", ruby_ring_pa,
+@@ -2783,6 +2883,8 @@ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+         }
+         ruby_txdone_count += freed;
+         ruby_ep2_drain_freed_total += freed;
++        ruby_tx_mtr_add(RUBY_MTR_TX_DONE, (uint16_t)freed,
++            cur, ruby_rd32(mac, TQCSR1_OFF));
+         if (freed > ruby_ep2_drain_max)
+             ruby_ep2_drain_max = freed;
+         if (!(q0 & RUBY_QMU_TX_DONE))
+@@ -3078,6 +3180,23 @@ ruby_ep2_push_log(vm_offset_t mac)
+                             ruby_ep2_hwo_gap, ruby_ep2_drain_invariant,
+                             ruby_ep2_drain_max, ruby_ep2_drain_calls);
+                         ruby_ep2_stuck_log_ms = ruby_ms;
++                        ruby_tx_mtr_add(RUBY_MTR_TX_STALL,
++                            (uint16_t)ruby_inflight,
++                            ruby_rd32(mac, TX1CSR0_OFF),
++                            ruby_rd32(mac, TQCSR1_OFF));
++                        printf("RUBY USB TXPROBE tqcsr=%08x tqcpr=%08x "
++                            "tqhiar=%08x tx0=%08x inf=%u enq=%u deq=%u "
++                            "hwo=%llx q0=%08x q1=%08x kicks=%u src=%u\n",
++                            ruby_rd32(mac, TQCSR1_OFF),
++                            ruby_rd32(mac, TQCPR1_OFF),
++                            ruby_rd32(mac, TQHIAR1_OFF),
++                            ruby_rd32(mac, TX1CSR0_OFF), ruby_inflight,
++                            ruby_gpd_enq, ruby_gpd_deq,
++                            (unsigned long long)ruby_ep2_hwo_bits(),
++                            ruby_rd32(mac, QISAR0_OFF),
++                            ruby_rd32(mac, QISAR1_OFF),
++                            ruby_tx_kick_cnt, ruby_tx_kick_src);
++                        ruby_tx_mtr_dump();
+                     }
+                     if (ruby_ep2_inflight_stuck == 1)
+                         ruby_ep2_dump_gpd(mac, 20, 32);
+@@ -3226,6 +3345,8 @@ ruby_ep2_push_log(vm_offset_t mac)
+         ruby_inflight++;
+         hwo |= 1ull << enq;
+         queued++;
++        ruby_tx_mtr_add(RUBY_MTR_TX_PUSH, (uint16_t)enq,
++            actual_len, (uint32_t)log_pa);
+     }
+ 
+     ruby_tx_busy = (ruby_inflight > 0) ? 1u : 0u;
+@@ -3246,6 +3367,12 @@ ruby_ep2_push_log(vm_offset_t mac)
+      * drop a completion that arrives before the next push_log().
+      */
+     ruby_dma_mb();              /* descriptor clean complete before doorbell */
++    ruby_tx_kick_cnt++;
++    ruby_tx_kick_src = RUBY_TX_SRC_PUSH;
++    ruby_tx_kick_ms = ruby_ms;
++    ruby_tx_kick_total[RUBY_TX_SRC_PUSH]++;
++    ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_PUSH,
++        ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+         ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+@@ -4582,6 +4709,32 @@ ruby_ep0_vendor_state(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     ruby_ep0_send(mac, t, 0xc021, (const uint8_t *)v, sizeof(v), wlen);
+ }
+ 
++/* 0265: read-only TX handoff black box (16 words, 0xC0/0x29). */
++static void
++ruby_ep0_vendor_txprobe(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    uint32_t v[16];
++
++    v[0] = 0x35325854u;         /* "TX25" */
++    v[1] = ruby_tx_kick_cnt;
++    v[2] = ruby_tx_kick_src;
++    v[3] = ruby_tx_kick_cnt ?
++        (uint32_t)(ruby_ms - ruby_tx_kick_ms) : 0xffffffffu;
++    v[4] = ruby_rd32(mac, TQCSR1_OFF);
++    v[5] = ruby_rd32(mac, TQCPR1_OFF);
++    v[6] = ruby_rd32(mac, TQHIAR1_OFF);
++    v[7] = ruby_rd32(mac, TX1CSR0_OFF);
++    v[8] = ruby_inflight;
++    v[9] = (ruby_gpd_enq & 0xffu) | ((ruby_gpd_deq & 0xffu) << 8);
++    v[10] = (uint32_t)ruby_ep2_hwo_bits();
++    v[11] = ruby_rd32(mac, QISAR0_OFF);
++    v[12] = ruby_rd32(mac, QISAR1_OFF);
++    v[13] = ruby_bulk_dup_cnt;
++    v[14] = ruby_bulk_dup_a;
++    v[15] = ruby_bulk_dup_b;
++    ruby_ep0_send(mac, t, 0xc029, (const uint8_t *)v, sizeof(v), wlen);
++}
++
+ /* Vendor IN request 0xC0/0x22: read-only queue diagnostics. */
+ static void
+ ruby_ep0_vendor_diag(vm_offset_t mac, uint32_t t, uint32_t wlen)
+@@ -5264,6 +5417,7 @@ ruby_usb_probe(void)
+     ruby_dma_uc = (dmauc == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
++    printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
