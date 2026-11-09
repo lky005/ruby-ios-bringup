@@ -1,0 +1,67 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -545,28 +545,50 @@
+ }
+ 
+ /* Build the composite configuration descriptor from the EP table.
+- * USB 2.0 9.6.5 order: Config (9B) -> Interface (9B) -> Endpoint (7B each).
++ * USB 2.0 9.6.5 order: Config (9B) -> Interface(s) (9B each) -> Endpoint (7B each).
+  * Interface MUST precede endpoints; wTotalLength covers all three.
+- * Returns total length; caller passes a RUBY_DESC_MAX buffer. */
++ * 0224: CDC-ACM takes two interfaces when rubyusbcmd=1 (boot arg):
++ *   Iface0 (Comm, 0x02/0x00/0x00): 1 Interrupt IN 0x81 mps16 int16
++ *   Iface1 (Data, 0x0A/0x00/0x00): Bulk OUT 0x01 mps64 + Bulk IN 0x81 mps512
++ * Vendor mode (default): single vendor 0xFF interface (0223 shape).
++ */
++static int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
+ static uint32_t
+ ruby_build_cfg_desc(uint8_t *out)
+ {
+     uint32_t off = 0;
+     uint8_t n_eps_total = 0;
+     uint32_t i;
+-    /* First pass: count valid non-EP0 endpoints. */
+     for (i = 0; i < RUBY_EP_MAX; i++) {
+         if (!ruby_eps[i].valid || ruby_eps[i].addr == 0x00)
+             continue;
+         n_eps_total++;
+     }
+-    /* Config header (length filled at end) */
++    if (ruby_acm_cmd) {
++        /* CDC-ACM: 2 interfaces, 4 endpoints total (0x83 intr, 0x01/0x02 out, 0x81 in) */
++        out[off++] = 9; out[off++] = 2; out[off++] = 0; out[off++] = 0;
++        out[off++] = 2; out[off++] = 1; out[off++] = 0; out[off++] = 0x80; out[off++] = 50;
++        /* Iface0 Comm */
++        out[off++] = 9; out[off++] = 4; out[off++] = 0; out[off++] = 0;
++        out[off++] = 1; out[off++] = 0x02; out[off++] = 0; out[off++] = 0; out[off++] = 0;
++        out[off++] = 7; out[off++] = 5; out[off++] = 0x83; out[off++] = 3;
++        out[off++] = 16; out[off++] = 0; out[off++] = 16;
++        /* Iface1 Data */
++        out[off++] = 9; out[off++] = 4; out[off++] = 1; out[off++] = 0;
++        out[off++] = 2; out[off++] = 0x0A; out[off++] = 0; out[off++] = 0; out[off++] = 0;
++        out[off++] = 7; out[off++] = 5; out[off++] = 0x01; out[off++] = 2;
++        out[off++] = 64; out[off++] = 0; out[off++] = 0;
++        out[off++] = 7; out[off++] = 5; out[off++] = 0x81; out[off++] = 2;
++        out[off++] = 0; out[off++] = 2; out[off++] = 0;
++        out[2] = (uint8_t)(off & 0xffu);
++        out[3] = (uint8_t)((off >> 8) & 0xffu);
++        return off;
++    }
++    /* Vendor (default) */
+     out[off++] = 9; out[off++] = 2; out[off++] = 0; out[off++] = 0;
+     out[off++] = 1; out[off++] = 1; out[off++] = 0; out[off++] = 0x80; out[off++] = 50;
+-    /* Interface descriptor (bNumEndpoints derived, CDC-ACM ready) */
+     out[off++] = 9; out[off++] = 4; out[off++] = 0; out[off++] = 0;
+     out[off++] = n_eps_total; out[off++] = 0xFF; out[off++] = 0; out[off++] = 0; out[off++] = 0;
+-    /* Endpoint descriptors */
+     for (i = 0; i < RUBY_EP_MAX; i++) {
+         if (!ruby_eps[i].valid || ruby_eps[i].addr == 0x00)
+             continue;
+@@ -4775,6 +4797,7 @@
+     PE_parse_boot_argn("rubyqmuirq", &qmuirq, sizeof(qmuirq));
+     PE_parse_boot_argn("rubypad", &pad, sizeof(pad));
+     PE_parse_boot_argn("rubydmauc", &dmauc, sizeof(dmauc));
++    PE_parse_boot_argn("rubyusbcmd", &ruby_acm_cmd, sizeof(ruby_acm_cmd));
+     ruby_irq_mode = (enable == 1 && usbirq == 1);
+     ruby_qmu_irq_mode = (ruby_irq_mode && qmuirq == 1);
+     ruby_pad_mode = (pad == 1);

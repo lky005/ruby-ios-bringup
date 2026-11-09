@@ -204,6 +204,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0221-ruby-usb-xfer-1to1.patch" \
     "$ROOT/patches/0222-ruby-usb-xfer-workloop.patch" \
     "$ROOT/patches/0223-ruby-usb-func-framework.patch" \
+    "$ROOT/patches/0224-ruby-usb-cdc-acm.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
