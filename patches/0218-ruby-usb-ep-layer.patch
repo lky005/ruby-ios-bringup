@@ -1,0 +1,244 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -49,6 +49,7 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <kern/clock.h>
++#include <kern/locks.h>
+ #include <machine/machine_routines.h>
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+@@ -299,26 +300,14 @@
+ static uint32_t ruby_event_count;
+ static uint32_t ruby_event_overflow;
+ 
+-/* Minimal USB2 device: no interfaces other than the default one. */
++/* Minimal USB2 device: no interfaces other than the default one.
++ * 0218: config descriptor is built from ruby_eps[] (see ruby_build_cfg_desc);
++ * the old static table is retired to avoid bNumEndpoints drift. */
+ static const uint8_t ruby_dev_desc[18] = {
+     18, 1, 0x00, 0x02, 0x00, 0x00, 0x00, 64,
+     0x09, 0x12, 0x02, 0x00, 0x11, 0x02,
+     1, 2, 3, 1
+ };
+-
+-static const uint8_t ruby_cfg_desc[39] = {
+-    9, 2, 39, 0, 1, 1, 0, 0x80, 50,
+-    9, 4, 0, 0, 3, 0xFF, 0x00, 0x00, 0,
+-    /* 0216: EP1 OUT bulk MPS 64 (0x0040) */
+-    7, 5, 0x01, 0x02, 64, 0, 0,
+-    7, 5, 0x02, 0x02, 64, 0, 0,
+-    /* 0211: EP1 IN bulk MPS 512 (0x0200, little endian: 0, 2). */
+-    7, 5, 0x81, 0x02, 0, 2, 0,
+-};
+-/* 0216 note: bNumEndpoints in the Interface descriptor must equal
+- * the count (3), else libusb/Windows may prune trailing IN
+- * descriptors from its cached copy. Set to 3 below by patching the
+- * 9,4,0,0,2 byte: bNumEndpoints 2 -> 3. */
+ 
+ static const uint8_t ruby_str_lang[4] = { 4, 3, 0x09, 0x04 };
+ static const uint8_t ruby_str_mfg[10] = {
+@@ -395,6 +384,167 @@
+ static volatile uint32_t ruby_irq_requeues;
+ static volatile uint32_t ruby_irq_reattach_req;
+ static volatile uint32_t ruby_irq_reattach_done;
++
++/*
++ * 0218: EP array + composite descriptor (Linux usb_function analogue).
++ * RUBY_EP_MAX = 16 (MTU3 hardware limit). Each EP owns its queue under
++ * lck_spin_t: enqueue/release runs under lock; the descriptor blob is
++ * assembled from the EP table instead of a hand-kept static array, so
++ * wTotalLength / bNumEndpoints can no longer desync.
++ */
++#define RUBY_EP_MAX         16u
++#define RUBY_EP_DIR_IN      0u
++#define RUBY_EP_DIR_OUT     1u
++#define RUBY_EP_TYPE_CTRL   0u
++#define RUBY_EP_TYPE_BULK   2u
++#define RUBY_EP_TYPE_INTR   3u
++#define RUBY_DESC_MAX       (9 + 9 * 8 + 7 * RUBY_EP_MAX)  /* cfg+ifs+eps */
++
++struct ruby_ep {
++    int8_t        valid;
++    uint8_t       addr;        /* full bEndpointAddress, 0x81 etc. */
++    uint8_t       dir;         /* RUBY_EP_DIR_* */
++    uint8_t       type;        /* RUBY_EP_TYPE_* */
++    uint8_t       iface;       /* owning interface number */
++    uint16_t      mps;         /* wMaxPacketSize */
++    uint8_t       interval;    /* bInterval (0 for bulk) */
++    lck_spin_t    q_lock;
++    struct ruby_req *q_head;
++    struct ruby_req *q_tail;
++    uint32_t      q_depth;
++};
++
++struct ruby_req {
++    const uint8_t *buf;
++    uint32_t       len;
++    void (*done)(void *ctx, int status);
++    void          *ctx;
++    struct ruby_req *next;
++};
++
++/* Function descriptor fragment: one function may own several interfaces
++ * (e.g. CDC-ACM: Iface0 Comm/IFace1 Data). Desc pointers are to const
++ * bytes inside a single function blob; bNumEndpoints is derived. */
++struct ruby_func_desc {
++    const uint8_t *desc;
++    uint32_t       len;
++    uint8_t        n_iface;
++    uint8_t        n_eps;
++};
++struct ruby_composite {
++    struct ruby_func_desc funcs[4];
++    uint8_t              n_funcs;
++};
++
++static struct ruby_ep ruby_eps[RUBY_EP_MAX];
++static lck_grp_t ruby_usb_lck_grp;
++static volatile uint32_t ruby_usb_lck_init;
++
++static void
++ruby_usb_lck_ensure(void)
++{
++    if (ruby_usb_lck_init == 0) {
++        lck_grp_init(&ruby_usb_lck_grp, "ruby_usb", LCK_GRP_ATTR_NULL);
++        for (uint32_t i = 0; i < RUBY_EP_MAX; i++)
++            lck_spin_init(&ruby_eps[i].q_lock, &ruby_usb_lck_grp, LCK_ATTR_NULL);
++        __atomic_store_n(&ruby_usb_lck_init, 1, __ATOMIC_RELEASE);
++    }
++}
++
++static void
++ruby_ep_init(void)
++{
++    ruby_usb_lck_ensure();
++    for (uint32_t i = 0; i < RUBY_EP_MAX; i++)
++        ruby_eps[i].valid = 0;
++    /* EP0 */
++    ruby_eps[0].valid = 1; ruby_eps[0].addr = 0x00;
++    ruby_eps[0].dir = RUBY_EP_DIR_OUT; ruby_eps[0].type = RUBY_EP_TYPE_CTRL;
++    ruby_eps[0].mps = 64;
++    /* 0216 live wire: EP1 OUT 0x01 MPS 64, EP2 OUT 0x02 MPS 64, EP1 IN 0x81 MPS 512 */
++    ruby_eps[1].valid = 1; ruby_eps[1].addr = 0x01; ruby_eps[1].iface = 0;
++    ruby_eps[1].dir = RUBY_EP_DIR_OUT; ruby_eps[1].type = RUBY_EP_TYPE_BULK; ruby_eps[1].mps = 64;
++    ruby_eps[2].valid = 1; ruby_eps[2].addr = 0x02; ruby_eps[2].iface = 0;
++    ruby_eps[2].dir = RUBY_EP_DIR_OUT; ruby_eps[2].type = RUBY_EP_TYPE_BULK; ruby_eps[2].mps = 64;
++    ruby_eps[3].valid = 1; ruby_eps[3].addr = 0x81; ruby_eps[3].iface = 0;
++    ruby_eps[3].dir = RUBY_EP_DIR_IN;  ruby_eps[3].type = RUBY_EP_TYPE_BULK; ruby_eps[3].mps = 512;
++}
++
++static struct ruby_ep *
++ruby_ep_by_addr(uint8_t addr)
++{
++    for (uint32_t i = 0; i < RUBY_EP_MAX; i++)
++        if (ruby_eps[i].valid && ruby_eps[i].addr == addr)
++            return &ruby_eps[i];
++    return NULL;
++}
++
++/* Lock-held queue ops (q_head/q_tail write must go through these). */
++static int
++ruby_ep_queue(struct ruby_ep *ep, struct ruby_req *req)
++{
++    if (!ep->valid || req->len == 0 || req->len > 16 * 1024)
++        return -1;  /* CL-0219 guard: contiguous PA, 1 req = 1 GPD */
++    lck_spin_lock(&ep->q_lock);
++    req->next = NULL;
++    if (ep->q_tail)
++        ep->q_tail->next = req;
++    else
++        ep->q_head = req;
++    ep->q_tail = req;
++    ep->q_depth++;
++    lck_spin_unlock(&ep->q_lock);
++    return 0;
++}
++
++static void
++ruby_ep_complete(struct ruby_ep *ep, int status)
++{
++    struct ruby_req *req;
++    lck_spin_lock(&ep->q_lock);
++    req = ep->q_head;
++    if (req) {
++        ep->q_head = req->next;
++        if (!ep->q_head)
++            ep->q_tail = NULL;
++        ep->q_depth--;
++    }
++    lck_spin_unlock(&ep->q_lock);
++    if (req && req->done)
++        req->done(req->ctx, status);
++}
++
++/* Build the composite configuration descriptor from the EP table.
++ * Returns total length; caller passes a RUBY_DESC_MAX buffer. */
++static uint32_t
++ruby_build_cfg_desc(uint8_t *out)
++{
++    uint32_t off = 0;
++    uint8_t n_eps_total = 0;
++    /* Config header (length filled at end) */
++    out[off++] = 9; out[off++] = 2; out[off++] = 0; out[off++] = 0;
++    out[off++] = 1; out[off++] = 1; out[off++] = 0; out[off++] = 0x80; out[off++] = 50;
++    for (uint32_t i = 0; i < RUBY_EP_MAX; i++) {
++        if (!ruby_eps[i].valid || ruby_eps[i].addr == 0x00)
++            continue;
++        n_eps_total++;
++        out[off++] = 7; out[off++] = 5; out[off++] = ruby_eps[i].addr;
++        out[off++] = ruby_eps[i].type;
++        out[off++] = (uint8_t)(ruby_eps[i].mps & 0xffu);
++        out[off++] = (uint8_t)((ruby_eps[i].mps >> 8) & 0xffu);
++        out[off++] = ruby_eps[i].interval;
++    }
++    out[2] = (uint8_t)(off & 0xffu);
++    out[3] = (uint8_t)((off >> 8) & 0xffu);
++    /* Interface descriptor (softer: 1 iface for now, bNumEndpoints auto) */
++    out[off++] = 9; out[off++] = 4; out[off++] = 0; out[off++] = 0;
++    out[off++] = n_eps_total; out[off++] = 0xFF; out[off++] = 0; out[off++] = 0; out[off++] = 0;
++    return off;
++}
++
++/* Current live function blob (kept for the multi-interface hole in CL-0221). */
++static uint8_t ruby_cfg_buf[RUBY_DESC_MAX];
++static uint32_t ruby_cfg_buf_len;
+ /*
+  * 0197: QMU group on the IRQ service (rubyqmuirq=1, needs rubyusbirq=1).
+  * The primary pass only W1Cs the sub-statuses nothing else consumes and
+@@ -1081,8 +1231,11 @@
+         *len = sizeof(ruby_dev_desc);
+         return ruby_dev_desc;
+     case 0x0200:
+-        *len = sizeof(ruby_cfg_desc);
+-        return ruby_cfg_desc;
++        /* 0218: build from EP table on first use (composite descriptor). */
++        if (ruby_cfg_buf_len == 0)
++            ruby_cfg_buf_len = ruby_build_cfg_desc(ruby_cfg_buf);
++        *len = ruby_cfg_buf_len;
++        return ruby_cfg_buf;
+     case 0x0300:
+         *len = sizeof(ruby_str_lang);
+         return ruby_str_lang;
+@@ -1854,6 +2007,13 @@
+ }
+ 
+ /*
++ * CLI-0218 hook: lookup EP by its full bEndpointAddress, for the future
++ * CL-0219 queue/complete path. Called from push_log/drain replacement
++ * (not yet wired into the QMU path).
++ */
++static struct ruby_ep *ruby_ep_for_addr(uint8_t addr) { return ruby_ep_by_addr(addr); }
++
++/*
+  * Vendor/mainline stop sequence: STOP, flush the TX FIFO before and after
+  * waiting for ACTIVE to clear.  MT6877 still uses the legacy 16-byte GPD;
+  * only the stop/flush timing is borrowed from mainline 5aba179c34.
+@@ -4570,6 +4730,7 @@
+     }
+     ruby_gpio_base = gpio;
+     ruby_ifrao_base = ifrao;
++    ruby_ep_init();  /* 0218: EP table + lock group + composite buf */
+     /* 0199: clock-audit maps; a failed map just keeps the region closed. */
+     ruby_topckgen_base = ml_io_map(TOPCKGEN_PA, TOPCKGEN_SIZE);
+     ruby_apmixed_base = ml_io_map(APMIXED_PA, APMIXED_SIZE);
