@@ -1,0 +1,174 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index eef7942..a0a7b00 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2059,6 +2059,28 @@ static volatile uint32_t ruby_tx_kick_total[4];
+ static uint32_t ruby_bulk_dup_cnt;
+ static uint32_t ruby_bulk_dup_a;
+ static uint32_t ruby_bulk_dup_b;
++
++/* 0266: read-only RX handoff probes (no behavior change). */
++#define RUBY_RX_MTR_SLOTS   16u
++enum {
++    RUBY_RMR_DONE = 1,
++    RUBY_RMR_RESUME,
++    RUBY_RMR_RESTART,
++    RUBY_RMR_DESYNC,
++};
++struct ruby_rx_mtr {
++    uint32_t t;
++    uint16_t ev;
++    uint16_t a;
++    uint32_t b;
++    uint32_t c;
++};
++static struct ruby_rx_mtr ruby_rx_mtr[RUBY_RX_MTR_SLOTS];
++static volatile uint32_t ruby_rx_mtr_idx;
++static volatile uint32_t ruby_rx_desync_req;
++static volatile uint32_t ruby_rx_desync_cnt;
++static uint32_t ruby_rx_desync_ms;
++static uint32_t ruby_rx_desync_log_ms;
+ /* 0255: read-only stall diagnostics. */
+ static volatile uint32_t ruby_qmu_diag_req;
+ static uint32_t ruby_qmu_diag_ms;
+@@ -3594,6 +3616,8 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     for (i = 0; i < RUBY_RX_GPD_NUM; i++)
+         ruby_ep2_rx_arm(i);
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
++    ruby_rx_mtr_add(RUBY_RMR_RESTART, (uint16_t)ruby_rx_deq,
++        ruby_rd32(mac, RQCSR1_OFF), ruby_rx_packets);
+     ruby_rx_ready = 1;
+     ruby_seq("RXCFG_OUT", (uint32_t)ruby_rx_ring_pa, ruby_rx_ready);
+     printf("RUBY USB: EP2 RX ring pa=0x%llx buf=0x%llx/0x%llx/0x%llx/0x%llx\n",
+@@ -3660,6 +3684,8 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     for (i = 0; i < RUBY_RX_GPD_NUM; i++)
+         ruby_ep2_rx_arm(i);
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
++    ruby_rx_mtr_add(RUBY_RMR_RESTART, (uint16_t)ruby_rx_deq,
++        ruby_rd32(mac, RQCSR1_OFF), ruby_rx_packets);
+     ruby_rx_ready = 1;
+ }
+ 
+@@ -3713,6 +3739,8 @@ ruby_ep2_rx_resume(vm_offset_t mac)
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
+         ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
++    ruby_rx_mtr_add(RUBY_RMR_RESUME, (uint16_t)ruby_rx_deq,
++        ruby_rd32(mac, RQCSR1_OFF), ruby_rx_packets);
+ }
+ 
+ static int
+@@ -4065,6 +4093,7 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+         ruby_rx_deq = (i + 1u) % RUBY_RX_GPD_NUM;
+         hwo |= 1u << i;
+         done++;
++        ruby_rx_mtr_add(RUBY_RMR_DONE, (uint16_t)i, len, ruby_rx_deq);
+     }
+ 
+     if (done) {
+@@ -4115,6 +4144,56 @@ ruby_ep2_rx_stall_dump(vm_offset_t mac)
+     }
+ }
+ 
++static void
++ruby_rx_mtr_add(uint16_t ev, uint16_t a, uint32_t b, uint32_t c)
++{
++    uint32_t i = __sync_fetch_and_add(&ruby_rx_mtr_idx, 1) &
++        (RUBY_RX_MTR_SLOTS - 1);
++    struct ruby_rx_mtr *e = &ruby_rx_mtr[i];
++
++    e->t = ruby_ms;
++    e->ev = ev;
++    e->a = a;
++    e->b = b;
++    e->c = c;
++}
++
++static void
++ruby_rx_mtr_dump(void)
++{
++    uint32_t i;
++
++    printf("RUBY USB RXMTR idx=%u desync=%u\n", ruby_rx_mtr_idx,
++        ruby_rx_desync_cnt);
++    for (i = 0; i < RUBY_RX_MTR_SLOTS; i++) {
++        struct ruby_rx_mtr *e = &ruby_rx_mtr[(ruby_rx_mtr_idx + i) &
++            (RUBY_RX_MTR_SLOTS - 1)];
++
++        if (!e->t)
++            continue;
++        printf("RUBY USB RXM[%02u] t=%u ev=%u a=%u b=%08x c=%08x\n",
++            i, e->t, e->ev, e->a, e->b, e->c);
++    }
++}
++
++static void
++ruby_ep2_rx_desync_dump(vm_offset_t mac)
++{
++    uint32_t cur = ruby_ep2_rx_cur_slot(mac);
++
++    ruby_rx_mtr_add(RUBY_RMR_DESYNC, (uint16_t)ruby_rx_deq,
++        cur, ruby_rd32(mac, RQCPR1_OFF));
++    printf("RUBY USB RXDESYNC n=%u deq=%02x cur=%02x pk=%u done=%u "
++        "err=%u rqcsr=%08x rqcpr=%08x rqhiar=%08x rqerr0=%08x "
++        "rqerr1=%08x\n", ruby_rx_desync_cnt, ruby_rx_deq, cur,
++        ruby_rx_packets, ruby_rx_done_events, ruby_rx_errors,
++        ruby_rd32(mac, RQCSR1_OFF), ruby_rd32(mac, RQCPR1_OFF),
++        ruby_rd32(mac, RQHIAR1_OFF), ruby_rd32(mac, RQERRIR0_OFF),
++        ruby_rd32(mac, RQERRIR1_OFF));
++    ruby_ep2_rx_stall_dump(mac);
++    ruby_rx_mtr_dump();
++}
++
+ static void
+ ruby_ep2_rx_poll(vm_offset_t mac)
+ {
+@@ -4466,6 +4545,10 @@ ruby_usb_irq_service_work(void)
+         ruby_rx_diag_req = 0;
+         ruby_ep2_rx_stall_dump(mac);
+     }
++    if (ruby_rx_desync_req) {
++        ruby_rx_desync_req = 0;
++        ruby_ep2_rx_desync_dump(mac);
++    }
+ }
+ 
+ /* 0197 G7: primary-pass occupancy, sampled by the C++ irqAction wrapper. */
+@@ -4488,6 +4571,29 @@ ruby_usb_irq_lat_sample(uint32_t us)
+ static void
+ ruby_ep2_tick_assist(vm_offset_t mac)
+ {
++    /* 0266: read-only RX ring desync detector (cur vs driver deq). */
++    if (ruby_rx_ready && ruby_rx_packets > 0 &&
++        ruby_rx_desync_cnt < 5) {
++        uint32_t cur = ruby_ep2_rx_cur_slot(mac);
++
++        if (cur != 0xffu && cur != ruby_rx_deq) {
++            if (!ruby_rx_desync_ms)
++                ruby_rx_desync_ms = ruby_ms;
++            else if ((uint32_t)(ruby_ms - ruby_rx_desync_ms) >= 200 &&
++                (uint32_t)(ruby_ms - ruby_rx_desync_log_ms) >= 1000) {
++                ruby_rx_desync_log_ms = ruby_ms;
++                ruby_rx_desync_cnt++;
++                if (ruby_qmu_irq_mode) {
++                    ruby_rx_desync_req = 1;
++                    ruby_usb_irq_kick();
++                } else {
++                    ruby_ep2_rx_desync_dump(mac);
++                }
++            }
++        } else {
++            ruby_rx_desync_ms = 0;
++        }
++    }
+     /* 0255: once per second, ask the workloop for a read-only stall dump. */
+     if (ruby_inflight > 0 &&
+         (uint32_t)(ruby_ms - ruby_qmu_diag_ms) >= 1000) {
+@@ -5418,6 +5524,7 @@ ruby_usb_probe(void)
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
++    printf("RUBY USB: 0266 rx probe ready (read-only)\n");
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
