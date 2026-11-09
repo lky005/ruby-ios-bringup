@@ -219,6 +219,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0236-ruby-usb-qiesr0-rx.patch" \
     "$ROOT/patches/0237-ruby-usb-qiesr0-mask.patch" \
     "$ROOT/patches/0238-ruby-usb-resume-poll.patch" \
+    "$ROOT/patches/0239-ruby-usb-full-restart.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
