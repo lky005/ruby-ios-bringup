@@ -1,0 +1,95 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1533b0c..dfc8755 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2068,6 +2068,7 @@ enum {
+     RUBY_RMR_RESUME,
+     RUBY_RMR_RESTART,
+     RUBY_RMR_DESYNC,
++    RUBY_RMR_SKIP,
+ };
+ struct ruby_rx_mtr {
+     uint32_t t;
+@@ -2082,6 +2083,8 @@ static volatile uint32_t ruby_rx_desync_req;
+ static volatile uint32_t ruby_rx_desync_cnt;
+ static uint32_t ruby_rx_desync_ms;
+ static uint32_t ruby_rx_desync_log_ms;
++static int ruby_rx_skip_en;
++static uint32_t ruby_rx_skip_cnt;
+ /* 0255: read-only stall diagnostics. */
+ static volatile uint32_t ruby_qmu_diag_req;
+ static uint32_t ruby_qmu_diag_ms;
+@@ -4056,8 +4059,32 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+     for (n = 0; n < RUBY_RX_GPD_NUM && ruby_rx_deq != cur; n++) {
+         i = ruby_rx_deq;
+         g = ruby_rx_gpd_ring + i * 16;
+-        if (hwo & (1u << i))
++        if (hwo & (1u << i)) {
++            /*
++             * 0267: the QMU can skip the ring head (its HWO stays set)
++             * and complete later slots.  Advance past the orphaned head
++             * so those completed GPDs are not stranded.  Opt-in and
++             * bounded to one ring lap per drain.
++             */
++            uint32_t dist = (cur + RUBY_RX_GPD_NUM - ruby_rx_deq) %
++                RUBY_RX_GPD_NUM;
++
++            if (ruby_rx_skip_en && dist > 0 &&
++                (ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE)) {
++                ruby_rx_skip_cnt++;
++                ruby_rx_mtr_add(RUBY_RMR_SKIP, (uint16_t)i, dist, hwo);
++                if (ruby_rx_skip_cnt <= 3 ||
++                    (ruby_rx_skip_cnt & 0x3f) == 0)
++                    printf("RUBY USB RXSKIP i=%02x dist=%u hwo=%04x "
++                        "deq=%u cur=%02x pk=%u skips=%u\n", i, dist,
++                        hwo, ruby_rx_deq, cur, ruby_rx_packets,
++                        ruby_rx_skip_cnt);
++                ruby_ep2_rx_arm(i);
++                ruby_rx_deq = (i + 1u) % RUBY_RX_GPD_NUM;
++                continue;
++            }
+             break;
++        }
+ 
+         ruby_dc_civac(ruby_rx_buf[i], RUBY_RX_BUF);
+         len = *(volatile uint16_t *)(g + 12) & 0xffffu;
+@@ -4143,6 +4170,16 @@ ruby_ep2_rx_stall_dump(vm_offset_t mac)
+             *(volatile uint32_t *)(g + 4),
+             *(volatile uint32_t *)(g + 8));
+     }
++    for (i = 0; i < 4; i++) {
++        uint32_t sl = (ruby_rx_deq + i) % RUBY_RX_GPD_NUM;
++        volatile uint8_t *g = ruby_rx_gpd_ring + sl * 16;
++
++        printf("RUBY USB RXGPDQ[%02u] f=%02x c=%02x len=%u next=%08x "
++            "buf=%08x\n", sl, g[0], g[1],
++            (uint32_t)(*(volatile uint16_t *)(g + 12)),
++            *(volatile uint32_t *)(g + 4),
++            *(volatile uint32_t *)(g + 8));
++    }
+ }
+ 
+ static void
+@@ -5506,6 +5543,7 @@ ruby_usb_probe(void)
+     int qmuirq = 0;
+     int pad = 0;
+     int dmauc = 0;
++    int rxskip = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5522,10 +5560,14 @@ ruby_usb_probe(void)
+     ruby_qmu_irq_mode = (ruby_irq_mode && qmuirq == 1);
+     ruby_pad_mode = (pad == 1);
+     ruby_dma_uc = (dmauc == 1);
++    PE_parse_boot_argn("ruby_rxskip", &rxskip, sizeof(rxskip));
++    ruby_rx_skip_en = (rxskip == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+     printf("RUBY USB: 0266 rx probe ready (read-only)\n");
++    printf("RUBY USB: 0267 rx skip=%d (rxskip=1 enables)\n",
++        ruby_rx_skip_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
