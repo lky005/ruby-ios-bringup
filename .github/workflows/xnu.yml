@@ -1,4 +1,4 @@
-name: xnu-0262
+name: xnu-0261
 
 # Builds the ruby kernel without vendoring the upstream tree.
 # ci/prepare-baseline.sh takes a content-pinned 82-file baseline (private
