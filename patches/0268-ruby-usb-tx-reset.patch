@@ -1,8 +1,24 @@
 diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
-index dfc8755..aea85b2 100644
+index dfc8755..8d58aa3 100644
 --- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
-@@ -2043,6 +2043,7 @@ enum {
+@@ -1387,6 +1387,7 @@ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+ static void ruby_ep2_rx_resume(vm_offset_t mac);
+ static void ruby_ep2_rx_poll(vm_offset_t mac);
++static void ruby_tx_recover_poll(vm_offset_t mac);
+ static void ruby_rx_mtr_add(uint16_t ev, uint16_t a, uint32_t b, uint32_t c);
+ static void ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters);
+ static void ruby_ep2_rx_halt_clear(vm_offset_t mac);
+@@ -1869,6 +1870,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+              */
+             ruby_ep2_tick_assist(ruby_mac_base);
+         } else {
++            ruby_tx_recover_poll(ruby_mac_base);
+             ruby_ep2_status_poll(ruby_mac_base);
+             ruby_ep2_push_log(ruby_mac_base);
+             ruby_ep2_rx_poll(ruby_mac_base);
+@@ -2043,6 +2045,7 @@ enum {
      RUBY_MTR_TX_KICK,
      RUBY_MTR_TX_STALL,
      RUBY_MTR_BULK_DUP,
@@ -10,7 +26,7 @@ index dfc8755..aea85b2 100644
  };
  struct ruby_tx_mtr {
      uint32_t t;
-@@ -2060,6 +2061,12 @@ static volatile uint32_t ruby_tx_kick_total[4];
+@@ -2060,6 +2063,13 @@ static volatile uint32_t ruby_tx_kick_total[4];
  static uint32_t ruby_bulk_dup_cnt;
  static uint32_t ruby_bulk_dup_a;
  static uint32_t ruby_bulk_dup_b;
@@ -20,17 +36,19 @@ index dfc8755..aea85b2 100644
 +static uint32_t ruby_tx_reset_tries;
 +static uint32_t ruby_tx_progress_deq;
 +static uint32_t ruby_tx_progress_ms;
++static volatile uint32_t ruby_qmu_txrecover_req;
  
  /* 0266: read-only RX handoff probes (no behavior change). */
  #define RUBY_RX_MTR_SLOTS   16u
-@@ -2517,6 +2524,39 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+@@ -2517,6 +2527,76 @@ ruby_ep2_qmu_start(vm_offset_t mac)
   * 0121: replace the bare EP_RST with the vendor/mainline stop/flush/restart
   * sequence.  The trigger conditions are deliberately unchanged.
   */
 +/*
 + * 0268: bounded TX rebuild for a pseudo-active queue stuck on a full FIFO.
-+ * The normal resume path returns early when the ACTIVE readback is set, so
-+ * a wedged queue needs the vendor stop/flush/reset/start sequence.
++ * Triggered from the 1 ms tick (request + workloop), not from push_log:
++ * with RX idle the push path never runs, so the recovery must not depend
++ * on fresh traffic.
 + */
 +static void
 +ruby_ep2_tx_rebuild(vm_offset_t mac)
@@ -60,10 +78,46 @@ index dfc8755..aea85b2 100644
 +        ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
 +}
 +
++static void
++ruby_tx_reset_fire(vm_offset_t mac)
++{
++    ruby_tx_reset_tries++;
++    ruby_tx_reset_cnt++;
++    ruby_tx_reset_ms = ruby_ms;
++    ruby_tx_mtr_add(RUBY_MTR_TX_RESET, (uint16_t)ruby_gpd_deq,
++        ruby_inflight, ruby_rd32(mac, TX1CSR0_OFF));
++    printf("RUBY USB TXRESET n=%u deq=%u enq=%u inf=%u tx0=%08x "
++        "tqcsr=%08x ep=1 deq_start=1\n", ruby_tx_reset_cnt,
++        ruby_gpd_deq, ruby_gpd_enq, ruby_inflight,
++        ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, TQCSR1_OFF));
++    ruby_ep2_tx_rebuild(mac);
++}
++
++static void
++ruby_tx_recover_poll(vm_offset_t mac)
++{
++    if (!ruby_txreset_en || ruby_inflight == 0)
++        return;
++    if (!(ruby_rd32(mac, TX1CSR0_OFF) & (1u << 25)))
++        return;
++    if ((uint32_t)(ruby_ms - ruby_tx_progress_ms) < 200)
++        return;
++    if ((uint32_t)(ruby_ms - ruby_tx_reset_ms) < 1000)
++        return;
++    if (ruby_tx_reset_tries >= 5)
++        return;
++    if (ruby_qmu_irq_mode) {
++        ruby_qmu_txrecover_req = 1;
++        ruby_usb_irq_kick();
++    } else {
++        ruby_tx_reset_fire(mac);
++    }
++}
++
  static void
  ruby_ep2_recover(vm_offset_t mac)
  {
-@@ -2909,6 +2949,9 @@ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+@@ -2909,6 +2989,9 @@ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
          }
          ruby_txdone_count += freed;
          ruby_ep2_drain_freed_total += freed;
@@ -73,36 +127,26 @@ index dfc8755..aea85b2 100644
          ruby_tx_mtr_add(RUBY_MTR_TX_DONE, (uint16_t)freed,
              cur, ruby_rd32(mac, TQCSR1_OFF));
          if (freed > ruby_ep2_drain_max)
-@@ -3226,7 +3269,27 @@ ruby_ep2_push_log(vm_offset_t mac)
-                     }
-                     if (ruby_ep2_inflight_stuck == 1)
-                         ruby_ep2_dump_gpd(mac, 20, 32);
--                    ruby_ep2_resume(mac);
-+                    if (ruby_txreset_en &&
-+                        (ruby_rd32(mac, TX1CSR0_OFF) & (1u << 25)) &&
-+                        (uint32_t)(ruby_ms - ruby_tx_progress_ms) >= 200 &&
-+                        (uint32_t)(ruby_ms - ruby_tx_reset_ms) >= 1000 &&
-+                        ruby_tx_reset_tries < 5) {
-+                        ruby_tx_reset_tries++;
-+                        ruby_tx_reset_cnt++;
-+                        ruby_tx_reset_ms = ruby_ms;
-+                        ruby_tx_mtr_add(RUBY_MTR_TX_RESET,
-+                            (uint16_t)ruby_gpd_deq, ruby_inflight,
-+                            ruby_rd32(mac, TX1CSR0_OFF));
-+                        printf("RUBY USB TXRESET n=%u deq=%u enq=%u "
-+                            "inf=%u tx0=%08x tqcsr=%08x\n",
-+                            ruby_tx_reset_cnt, ruby_gpd_deq,
-+                            ruby_gpd_enq, ruby_inflight,
-+                            ruby_rd32(mac, TX1CSR0_OFF),
-+                            ruby_rd32(mac, TQCSR1_OFF));
-+                        ruby_ep2_tx_rebuild(mac);
-+                    } else {
-+                        ruby_ep2_resume(mac);
-+                    }
-                 }
-             }
-         }
-@@ -5544,6 +5607,7 @@ ruby_usb_probe(void)
+@@ -4587,6 +4670,10 @@ ruby_usb_irq_service_work(void)
+         ruby_rx_desync_req = 0;
+         ruby_ep2_rx_desync_dump(mac);
+     }
++    if (ruby_qmu_txrecover_req) {
++        ruby_qmu_txrecover_req = 0;
++        ruby_tx_reset_fire(mac);
++    }
+ }
+ 
+ /* 0197 G7: primary-pass occupancy, sampled by the C++ irqAction wrapper. */
+@@ -4609,6 +4696,7 @@ ruby_usb_irq_lat_sample(uint32_t us)
+ static void
+ ruby_ep2_tick_assist(vm_offset_t mac)
+ {
++    ruby_tx_recover_poll(mac);
+     /* 0266: read-only RX ring desync detector (cur vs driver deq). */
+     if (ruby_rx_ready && ruby_rx_packets > 0 &&
+         ruby_rx_desync_cnt < 5) {
+@@ -5544,6 +5632,7 @@ ruby_usb_probe(void)
      int pad = 0;
      int dmauc = 0;
      int rxskip = 0;
@@ -110,7 +154,7 @@ index dfc8755..aea85b2 100644
      vm_offset_t ippc, mac, phy, gpio, ifrao;
      uint32_t c0, c2, u3, u2, rst;
      uint32_t s1, s2, v;
-@@ -5562,12 +5626,16 @@ ruby_usb_probe(void)
+@@ -5562,12 +5651,16 @@ ruby_usb_probe(void)
      ruby_dma_uc = (dmauc == 1);
      PE_parse_boot_argn("ruby_rxskip", &rxskip, sizeof(rxskip));
      ruby_rx_skip_en = (rxskip == 1);
