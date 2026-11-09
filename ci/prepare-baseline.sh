@@ -225,6 +225,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0242-ruby-usb-diag-decl.patch" \
     "$ROOT/patches/0243-ruby-usb-tx-watchdog.patch" \
     "$ROOT/patches/0244-ruby-usb-rx-watchdog.patch" \
+    "$ROOT/patches/0245-ruby-usb-force-restart.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
