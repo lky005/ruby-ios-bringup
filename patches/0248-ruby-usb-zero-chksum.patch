@@ -1,0 +1,27 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 0c438f1..3c4578e 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2126,14 +2126,14 @@ ruby_dma_mb(void)
+ static uint8_t
+ ruby_gpd_chksum(uint8_t *g)
+ {
+-    uint32_t i, sum = 0;
+-
+-    g[1] = 0;
+-    __asm__ volatile("dsb sy" ::: "memory");
+-    for (i = 0; i < 16; i++)
+-        sum += g[i];
+-    sum += 1;
+-    return (uint8_t)(0xffu - (sum & 0xffu));
++    /*
++     * 0248: vendor GPD trace (mtu3_prepare_gpd) shows dw0 byte1 = 0x00 on
++     * every working ep3in/ep2out descriptor: this kernel leaves the
++     * checksum byte zero (validation off).  A non-zero byte made the QMU
++     * silently skip descriptors after the first one.  Match the vendor.
++     */
++    (void)g;
++    return 0;
+ }
+ 
+ static void
