@@ -200,6 +200,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0217-ruby-usb-ep1-backpressure-counters.patch" \
     "$ROOT/patches/0218-ruby-usb-ep-layer.patch" \
     "$ROOT/patches/0219-ruby-usb-desc-order.patch" \
+    "$ROOT/patches/0220-ruby-usb-qmu-init-order.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
