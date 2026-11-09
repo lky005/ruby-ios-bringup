@@ -1,0 +1,46 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -515,19 +515,31 @@
+ }
+ 
+ /* Build the composite configuration descriptor from the EP table.
++ * USB 2.0 9.6.5 order: Config (9B) -> Interface (9B) -> Endpoint (7B each).
++ * Interface MUST precede endpoints; wTotalLength covers all three.
+  * Returns total length; caller passes a RUBY_DESC_MAX buffer. */
+ static uint32_t
+ ruby_build_cfg_desc(uint8_t *out)
+ {
+     uint32_t off = 0;
+     uint8_t n_eps_total = 0;
++    uint32_t i;
++    /* First pass: count valid non-EP0 endpoints. */
++    for (i = 0; i < RUBY_EP_MAX; i++) {
++        if (!ruby_eps[i].valid || ruby_eps[i].addr == 0x00)
++            continue;
++        n_eps_total++;
++    }
+     /* Config header (length filled at end) */
+     out[off++] = 9; out[off++] = 2; out[off++] = 0; out[off++] = 0;
+     out[off++] = 1; out[off++] = 1; out[off++] = 0; out[off++] = 0x80; out[off++] = 50;
+-    for (uint32_t i = 0; i < RUBY_EP_MAX; i++) {
++    /* Interface descriptor (bNumEndpoints derived, CDC-ACM ready) */
++    out[off++] = 9; out[off++] = 4; out[off++] = 0; out[off++] = 0;
++    out[off++] = n_eps_total; out[off++] = 0xFF; out[off++] = 0; out[off++] = 0; out[off++] = 0;
++    /* Endpoint descriptors */
++    for (i = 0; i < RUBY_EP_MAX; i++) {
+         if (!ruby_eps[i].valid || ruby_eps[i].addr == 0x00)
+             continue;
+-        n_eps_total++;
+         out[off++] = 7; out[off++] = 5; out[off++] = ruby_eps[i].addr;
+         out[off++] = ruby_eps[i].type;
+         out[off++] = (uint8_t)(ruby_eps[i].mps & 0xffu);
+@@ -536,9 +548,6 @@
+     }
+     out[2] = (uint8_t)(off & 0xffu);
+     out[3] = (uint8_t)((off >> 8) & 0xffu);
+-    /* Interface descriptor (softer: 1 iface for now, bNumEndpoints auto) */
+-    out[off++] = 9; out[off++] = 4; out[off++] = 0; out[off++] = 0;
+-    out[off++] = n_eps_total; out[off++] = 0xFF; out[off++] = 0; out[off++] = 0; out[off++] = 0;
+     return off;
+ }
+ 
