@@ -1,0 +1,29 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 2ef97b8..e85f7f6 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -178,7 +178,10 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define RUBY_SLEW_COEF     28u
+ #define RUBY_SLEW_CYCLE    1024u
+ /* 0194: live-sweep golden PHY value (SRCTRL=5, bit30 reserved). */
+-#define RUBY_GOLDEN_ACR5   0x40805000u
++/* 0259: TWRP kprobe read the vendor's live U2 COM block (0x11e40300):
++ * ACR5=0x40804000 (SRCTRL=4, the FM-calibration fallback), not the 5 the
++ * 0189C sweep picked on this board.  Vendor adb on the same PHY is clean. */
++#define RUBY_GOLDEN_ACR5   0x40804000u
+ 
+ /* 0185/0187: ruby u2port0 HS eye tuning (board ruby-mt6877.dtsi). */
+ #define PHY_U2_ACR1     0x0304
+@@ -4393,10 +4396,11 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         return;
+     primed = 1;
+     next_ms = ruby_ms + 5000;
+-    printf("RUBY USB HB: t=%u otg=%08x mac2=%08x acr3=%08x "
++    printf("RUBY USB HB: t=%u otg=%08x mac2=%08x acr3=%08x acr5=%08x "
+         "dmon1=%08x batt_seq=%u ext=%d setups=%u cfg=%u busreset=%u "
+         "frame=%u assist=%u\n", ruby_ms, otg, mac2,
+         ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_ACR3) : 0,
++        ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_ACR5) : 0,
+         ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_DMON1) : 0,
+         seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
+         ruby_rd32(mac, FRAME_NUM_OFF) & 0x7ffu,
