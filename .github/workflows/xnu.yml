@@ -28,7 +28,7 @@ on:
         default: ""
       patchset_sha256:
         description: expected patchset hash; must match the patch set actually built
-        default: "e4704d47924fd59fccf8540de2829db298292f9c42d0cec42d029f00dd0dde57"
+        default: "e47907acda8b419c7d5d7145b439a051f74c48b330455ba60790c9a062e9e05b"
       kernel_config:
         description: RELEASE / DEVELOPMENT / DEBUG
         default: DEVELOPMENT
@@ -59,7 +59,7 @@ env:
   # BASELINE_SSH_KEY. The public pin is the manifest root, not a URL.
   BASELINE_MANIFEST_SHA256: 829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910
   BASELINE_FILES: "82"
-  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || 'e4704d47924fd59fccf8540de2829db298292f9c42d0cec42d029f00dd0dde57' }}
+  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || 'e47907acda8b419c7d5d7145b439a051f74c48b330455ba60790c9a062e9e05b' }}
   SKIP_PATCHES: ${{ inputs.skip_patches || '' }}
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549

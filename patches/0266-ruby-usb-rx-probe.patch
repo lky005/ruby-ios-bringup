@@ -1,8 +1,16 @@
 diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
-index eef7942..a0a7b00 100644
+index eef7942..1533b0c 100644
 --- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
-@@ -2059,6 +2059,28 @@ static volatile uint32_t ruby_tx_kick_total[4];
+@@ -1387,6 +1387,7 @@ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+ static void ruby_ep2_rx_resume(vm_offset_t mac);
+ static void ruby_ep2_rx_poll(vm_offset_t mac);
++static void ruby_rx_mtr_add(uint16_t ev, uint16_t a, uint32_t b, uint32_t c);
+ static void ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters);
+ static void ruby_ep2_rx_halt_clear(vm_offset_t mac);
+ static int ruby_usb_reset_check(vm_offset_t mac);
+@@ -2059,6 +2060,28 @@ static volatile uint32_t ruby_tx_kick_total[4];
  static uint32_t ruby_bulk_dup_cnt;
  static uint32_t ruby_bulk_dup_a;
  static uint32_t ruby_bulk_dup_b;
@@ -31,7 +39,7 @@ index eef7942..a0a7b00 100644
  /* 0255: read-only stall diagnostics. */
  static volatile uint32_t ruby_qmu_diag_req;
  static uint32_t ruby_qmu_diag_ms;
-@@ -3594,6 +3616,8 @@ ruby_ep2_rx_config(vm_offset_t mac)
+@@ -3594,6 +3617,8 @@ ruby_ep2_rx_config(vm_offset_t mac)
      for (i = 0; i < RUBY_RX_GPD_NUM; i++)
          ruby_ep2_rx_arm(i);
      ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
@@ -40,7 +48,7 @@ index eef7942..a0a7b00 100644
      ruby_rx_ready = 1;
      ruby_seq("RXCFG_OUT", (uint32_t)ruby_rx_ring_pa, ruby_rx_ready);
      printf("RUBY USB: EP2 RX ring pa=0x%llx buf=0x%llx/0x%llx/0x%llx/0x%llx\n",
-@@ -3660,6 +3684,8 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+@@ -3660,6 +3685,8 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
      for (i = 0; i < RUBY_RX_GPD_NUM; i++)
          ruby_ep2_rx_arm(i);
      ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
@@ -49,7 +57,7 @@ index eef7942..a0a7b00 100644
      ruby_rx_ready = 1;
  }
  
-@@ -3713,6 +3739,8 @@ ruby_ep2_rx_resume(vm_offset_t mac)
+@@ -3713,6 +3740,8 @@ ruby_ep2_rx_resume(vm_offset_t mac)
      ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
      if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
          ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
@@ -58,7 +66,7 @@ index eef7942..a0a7b00 100644
  }
  
  static int
-@@ -4065,6 +4093,7 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+@@ -4065,6 +4094,7 @@ ruby_ep2_rx_drain(vm_offset_t mac)
          ruby_rx_deq = (i + 1u) % RUBY_RX_GPD_NUM;
          hwo |= 1u << i;
          done++;
@@ -66,7 +74,7 @@ index eef7942..a0a7b00 100644
      }
  
      if (done) {
-@@ -4115,6 +4144,56 @@ ruby_ep2_rx_stall_dump(vm_offset_t mac)
+@@ -4115,6 +4145,56 @@ ruby_ep2_rx_stall_dump(vm_offset_t mac)
      }
  }
  
@@ -123,7 +131,7 @@ index eef7942..a0a7b00 100644
  static void
  ruby_ep2_rx_poll(vm_offset_t mac)
  {
-@@ -4466,6 +4545,10 @@ ruby_usb_irq_service_work(void)
+@@ -4466,6 +4546,10 @@ ruby_usb_irq_service_work(void)
          ruby_rx_diag_req = 0;
          ruby_ep2_rx_stall_dump(mac);
      }
@@ -134,7 +142,7 @@ index eef7942..a0a7b00 100644
  }
  
  /* 0197 G7: primary-pass occupancy, sampled by the C++ irqAction wrapper. */
-@@ -4488,6 +4571,29 @@ ruby_usb_irq_lat_sample(uint32_t us)
+@@ -4488,6 +4572,29 @@ ruby_usb_irq_lat_sample(uint32_t us)
  static void
  ruby_ep2_tick_assist(vm_offset_t mac)
  {
@@ -164,7 +172,7 @@ index eef7942..a0a7b00 100644
      /* 0255: once per second, ask the workloop for a read-only stall dump. */
      if (ruby_inflight > 0 &&
          (uint32_t)(ruby_ms - ruby_qmu_diag_ms) >= 1000) {
-@@ -5418,6 +5524,7 @@ ruby_usb_probe(void)
+@@ -5418,6 +5525,7 @@ ruby_usb_probe(void)
      ruby_probe_enabled = (probe == 1);
      ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
      printf("RUBY USB: 0265 tx probe ready (read-only)\n");
