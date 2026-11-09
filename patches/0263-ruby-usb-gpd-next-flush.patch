@@ -1,0 +1,59 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index e01260c..9575e94 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2125,6 +2125,8 @@ ruby_dc_civac(const void *va, uint32_t len)
+     uintptr_t p = (uintptr_t)va & ~(uintptr_t)63;
+     uintptr_t e = (uintptr_t)va + len;
+ 
++    /* 0263: stores must reach the cache before the clean/invalidate. */
++    __asm__ volatile("dsb sy" ::: "memory");
+     for (; p < e; p += 64)
+         __asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
+     __asm__ volatile("dsb sy" ::: "memory");
+@@ -3196,8 +3198,13 @@ ruby_ep2_push_log(vm_offset_t mac)
+             ruby_dma_mb();          /* uncached writes complete */
+         }
+         g[0] = (1u << 0) | (1u << 7);
+-        if (!ruby_dma_uc)
++        if (!ruby_dma_uc) {
+             ruby_dc_civac(g, RUBY_GPD_DESC); /* publish HWO */
++            /* 0263: the QMU reads the next GPD right after this one; make
++             * its cleared state visible too (U-Boot 044d7003a7). */
++            ruby_dc_civac(RUBY_GPD_SLOT((enq + 1u) % RUBY_GPD_NUM),
++                RUBY_GPD_DESC);
++        }
+         /* 0221: 1:1 req:GPD binding. One ruby_req owns this slot; queue
+          * under ep lock, completed by ruby_ep2_drain -> ruby_ep_complete. */
+         {
+@@ -3372,10 +3379,16 @@ ruby_ep2_rx_arm(uint32_t i)
+     g[14] = (uint8_t)(((buf >> 32) & 0xfu) |
+         (((next >> 32) & 0xfu) << 4));
+     g[1] = ruby_gpd_chksum(g);
++    /* 0263: U-Boot 044d7003a7 - all fields must be globally visible
++     * before HWO is published. */
++    ruby_dma_mb();
+     g[0] = (1u << 0) | (1u << 7);
+ 
+     ruby_dc_civac(ruby_rx_buf[i], RUBY_RX_BUF);
+     ruby_dc_civac(g, 16);
++    /* 0263: publish the next GPD the QMU reads after this one. */
++    ruby_dc_civac(ruby_rx_gpd_ring +
++        ((i + 1u) % RUBY_RX_GPD_NUM) * 16, 16);
+ }
+ 
+ static void
+@@ -3921,8 +3934,12 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+         done++;
+     }
+ 
+-    if (done)
++    if (done) {
++        /* 0263: the QMU reads the GPD at cur right after resume; make its
++         * armed state visible before the doorbell (U-Boot 044d7003a7). */
++        ruby_dc_civac(ruby_rx_gpd_ring + cur * 16, 16);
+         ruby_ep2_rx_resume(mac);
++    }
+     /* 0231: hand the echo bytes to the TX ring right away; the QMU workloop
+      * owns both ends, so this is the same-thread producer -> consumer step. */
+     if (ruby_acm_cmd && ruby_acm_echo_head != ruby_acm_echo_tail)
