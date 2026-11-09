@@ -230,7 +230,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0247-ruby-usb-rx-resident.patch" \
     "$ROOT/patches/0248-ruby-usb-zero-chksum.patch" \
     "$ROOT/patches/0249-ruby-usb-cs-off-zero-chk.patch" \
-    "$ROOT/patches/0250-ruby-usb-qcr0-bit0.patch" \
+    "$ROOT/patches/0251-ruby-usb-bit0-only.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

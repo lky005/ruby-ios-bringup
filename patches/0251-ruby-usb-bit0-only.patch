@@ -1,0 +1,37 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 003e073..0256335 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2181,8 +2181,8 @@ ruby_ep2_resume(vm_offset_t mac)
+     ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) &
+-        ~((1u << 0) | (1u << 1)));
++    ruby_wr32(mac, QCR0_OFF, (ruby_rd32(mac, QCR0_OFF) &
++        ~(1u << 1)) | (1u << 0));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -2363,8 +2363,8 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+      */
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) &
+-        ~((1u << 0) | (1u << 1)));
++    ruby_wr32(mac, QCR0_OFF, (ruby_rd32(mac, QCR0_OFF) &
++        ~(1u << 1)) | (1u << 0));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -2880,8 +2880,8 @@ ruby_ep2_tx_force(vm_offset_t mac)
+     ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) &
+-        ~((1u << 0) | (1u << 1)));
++    ruby_wr32(mac, QCR0_OFF, (ruby_rd32(mac, QCR0_OFF) &
++        ~(1u << 1)) | (1u << 0));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
