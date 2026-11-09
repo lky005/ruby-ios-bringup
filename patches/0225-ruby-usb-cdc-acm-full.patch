@@ -1,0 +1,80 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -565,15 +565,27 @@
+         n_eps_total++;
+     }
+     if (ruby_acm_cmd) {
+-        /* CDC-ACM: 2 interfaces, 4 endpoints total (0x83 intr, 0x01/0x02 out, 0x81 in) */
++        /* 0225 CDC-ACM full 75B: Config(9)+IAD(8)+Iface0(9)+CDC(19)+EP83(7)+Iface1(9)+EP01(7)+EP81(7) */
+         out[off++] = 9; out[off++] = 2; out[off++] = 0; out[off++] = 0;
+         out[off++] = 2; out[off++] = 1; out[off++] = 0; out[off++] = 0x80; out[off++] = 50;
+-        /* Iface0 Comm */
++        /* IAD: Interface Association Descriptor (8B) */
++        out[off++] = 8; out[off++] = 0x0B; out[off++] = 0; out[off++] = 2;
++        out[off++] = 0x02; out[off++] = 0x02; out[off++] = 0x00; out[off++] = 0;
++        /* Iface0 Comm (0x02) */
+         out[off++] = 9; out[off++] = 4; out[off++] = 0; out[off++] = 0;
+         out[off++] = 1; out[off++] = 0x02; out[off++] = 0; out[off++] = 0; out[off++] = 0;
++        /* CDC Header functional (5B) */
++        out[off++] = 5; out[off++] = 0x24; out[off++] = 0x00; out[off++] = 0x10; out[off++] = 0x01;
++        /* CDC Call Management (5B) */
++        out[off++] = 5; out[off++] = 0x24; out[off++] = 0x01; out[off++] = 0x00; out[off++] = 1;
++        /* CDC ACM (4B) bmCapabilities=0x06 (self-powered etc) */
++        out[off++] = 4; out[off++] = 0x24; out[off++] = 0x02; out[off++] = 0x06;
++        /* CDC Union (5B) master=0 slave=1 */
++        out[off++] = 5; out[off++] = 0x24; out[off++] = 0x06; out[off++] = 0; out[off++] = 1;
++        /* EP 0x83 Interrupt IN */
+         out[off++] = 7; out[off++] = 5; out[off++] = 0x83; out[off++] = 3;
+         out[off++] = 16; out[off++] = 0; out[off++] = 16;
+-        /* Iface1 Data */
++        /* Iface1 Data (0x0A) */
+         out[off++] = 9; out[off++] = 4; out[off++] = 1; out[off++] = 0;
+         out[off++] = 2; out[off++] = 0x0A; out[off++] = 0; out[off++] = 0; out[off++] = 0;
+         out[off++] = 7; out[off++] = 5; out[off++] = 0x01; out[off++] = 2;
+@@ -1414,6 +1426,14 @@
+         if (ruby_ep2log_on)
+             ruby_ep2_config(mac);
+         ruby_ep2_rx_config(mac);
++        /* 0225: EP3 (0x83) Interrupt IN NAK-enable. TX3 bank, MPS16, FIFO
++         * segment 4 (after TX1 0x20 / RX1 0x40). No QMU — host poll sees
++         * idle NAK, never XactErr/STALL. */
++        if (ruby_acm_cmd) {
++            ruby_wr32(mac, TX3CSR0_OFF, 16u);
++            ruby_wr32(mac, TX3CSR1_OFF, 2u << 8);
++            ruby_wr32(mac, TX3CSR2_OFF, (0x60 >> 4) | (4u << 16));
++        }
+         return;
+     case 8: /* GET_CONFIGURATION */
+         byte = ruby_config;
+@@ -1549,7 +1569,19 @@
+         ruby_ep0_vendor_probe_write(mac, t, value, index, len);
+     else if (st[0] == 0x40 && st[1] == 0x2e)
+         ruby_ep0_vendor_cmd(mac, t, value, index, len);
+-    else
++    else if (st[0] == 0x21 && st[1] == 0x20) {
++        /* CDC SET_LINE_CODING: 7 bytes incoming -> ZLP ACK (length validated by host) */
++        ruby_ep0_ack(mac, t, key, len);
++    } else if (st[0] == 0x21 && st[1] == 0x22) {
++        /* CDC SET_CONTROL_LINE_STATE: DTR/RTS -> ZLP ACK */
++        ruby_ep0_ack(mac, t, key, len);
++    } else if (st[0] == 0xA1 && st[1] == 0x21) {
++        /* CDC GET_LINE_CODING: 115200 8N1 (7B) */
++        static const uint8_t lc[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
++        ruby_ep0_send(mac, t, key, lc, 7, len);
++    } else if (st[0] == 0xA1 && st[1] == 0x20) {
++        ruby_ep0_stall(mac, t, key, len);
++    } else
+         ruby_ep0_stall(mac, t, key, len);
+ }
+ 
+@@ -1792,6 +1824,10 @@
+ #define RQERRIESR0_OFF  0x07c8
+ #define RQERRIR1_OFF    0x07d0
+ #define RQERRIESR1_OFF  0x07d8
++/* 0225: TX3 CSR for EP3 (0x83) NAK-enable — no QMU, endpoint idle NAK */
++#define TX3CSR0_OFF     0x0130
++#define TX3CSR1_OFF     0x0134
++#define TX3CSR2_OFF     0x0138
+ #define QISAR0_OFF      0x0700
+ #define QISAR1_OFF      0x0710
+ #define TQERRIR0_OFF    0x0780
