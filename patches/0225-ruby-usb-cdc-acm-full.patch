@@ -1,6 +1,17 @@
 --- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
-@@ -565,15 +565,27 @@
+@@ -52,6 +52,10 @@
+ #include <kern/locks.h>
+ #include <machine/machine_routines.h>
+ #include <vm/vm_kern.h>
++/* 0225: TX3 CSR forward for EP3 (0x83) NAK-enable */
++#define TX3CSR0_OFF     0x0130
++#define TX3CSR1_OFF     0x0134
++#define TX3CSR2_OFF     0x0138
+ #include <pexpert/pexpert.h>
+ 
+ #include "ruby_probe.h"
+@@ -565,15 +569,27 @@
          n_eps_total++;
      }
      if (ruby_acm_cmd) {
@@ -31,7 +42,7 @@
          out[off++] = 9; out[off++] = 4; out[off++] = 1; out[off++] = 0;
          out[off++] = 2; out[off++] = 0x0A; out[off++] = 0; out[off++] = 0; out[off++] = 0;
          out[off++] = 7; out[off++] = 5; out[off++] = 0x01; out[off++] = 2;
-@@ -1414,6 +1426,14 @@
+@@ -1414,6 +1430,14 @@
          if (ruby_ep2log_on)
              ruby_ep2_config(mac);
          ruby_ep2_rx_config(mac);
@@ -46,7 +57,7 @@
          return;
      case 8: /* GET_CONFIGURATION */
          byte = ruby_config;
-@@ -1549,7 +1569,19 @@
+@@ -1549,7 +1573,19 @@
          ruby_ep0_vendor_probe_write(mac, t, value, index, len);
      else if (st[0] == 0x40 && st[1] == 0x2e)
          ruby_ep0_vendor_cmd(mac, t, value, index, len);
@@ -67,14 +78,3 @@
          ruby_ep0_stall(mac, t, key, len);
  }
  
-@@ -1792,6 +1824,10 @@
- #define RQERRIESR0_OFF  0x07c8
- #define RQERRIR1_OFF    0x07d0
- #define RQERRIESR1_OFF  0x07d8
-+/* 0225: TX3 CSR for EP3 (0x83) NAK-enable — no QMU, endpoint idle NAK */
-+#define TX3CSR0_OFF     0x0130
-+#define TX3CSR1_OFF     0x0134
-+#define TX3CSR2_OFF     0x0138
- #define QISAR0_OFF      0x0700
- #define QISAR1_OFF      0x0710
- #define TQERRIR0_OFF    0x0780
