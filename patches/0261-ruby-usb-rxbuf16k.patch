@@ -1,0 +1,53 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index cf102c7..39e1215 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1948,7 +1948,9 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define EP_RST_RX1_BIT      (1u << 1)  /* EP1 OUT = our RX endpoint */
+ #define EP_RST_TX1_BIT      (1u << 17)  /* 0211: EP_RST(in, 1) = BIT(16) << 1 */
+ #define RUBY_RX_GPD_NUM 16
+-#define RUBY_RX_BUF     64
++/* 0261: vendor RX GPD buffers are 16 KiB (dw0=0x40000080); 64 B buffers
++ * made >64 B OUT transfers span GPDs and stalled the RX queue. */
++#define RUBY_RX_BUF     16384
+ #define RUBY_GPD_NUM    64
+ #define RUBY_GPD_DESC   16
+ /*
+@@ -3356,8 +3358,9 @@ ruby_ep2_rx_arm(uint32_t i)
+     for (k = 0; k < 16; k++)
+         g[k] = 0;
+     g[0] = 1u << 7;             /* IOC; HWO is added after the checksum */
+-    g[2] = (uint8_t)RUBY_RX_BUF;
+-    g[3] = 0;
++    /* 0261: dw0[31:16] holds the 16-bit buffer length. */
++    g[2] = (uint8_t)(RUBY_RX_BUF & 0xffu);
++    g[3] = (uint8_t)((RUBY_RX_BUF >> 8) & 0xffu);
+     *(volatile uint32_t *)(g + 4) = (uint32_t)next;
+     *(volatile uint32_t *)(g + 8) = (uint32_t)buf;
+     g[14] = (uint8_t)(((buf >> 32) & 0xfu) |
+@@ -3934,12 +3937,13 @@ ruby_ep2_rx_stall_dump(vm_offset_t mac)
+     cur = ruby_ep2_rx_cur_slot(mac);
+     printf("RUBY USB RXSTALL pk=%u done=%u deq=%u cur=%02x rqcsr=%08x "
+         "rqhiar=%08x rqcpr=%08x hwo=%04x q0=%08x q1=%08x zlperr=%u "
+-        "rxerr=%u sentstall=%u\n",
++        "rxerr=%u sentstall=%u rqerr0=%08x rqerr1=%08x\n",
+         ruby_rx_packets, ruby_rx_done_events, ruby_rx_deq, cur,
+         ruby_rd32(mac, RQCSR1_OFF), ruby_rd32(mac, RQHIAR1_OFF),
+         ruby_rd32(mac, RQCPR1_OFF), hwo,
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
+-        ruby_rx_zlp_err, ruby_rx_errors, ruby_rx_stall_seen);
++        ruby_rx_zlp_err, ruby_rx_errors, ruby_rx_stall_seen,
++        ruby_rd32(mac, RQERRIR0_OFF), ruby_rd32(mac, RQERRIR1_OFF));
+     if (cur == 0xffu)
+         return;
+     for (i = 0; i < 4; i++) {
+@@ -3969,8 +3973,8 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+     rxq = q1 & (QISAR1_RXQ_EMPTY | QISAR1_RXQ_CSERR |
+         QISAR1_RXQ_LENERR | QISAR1_RXQ_ZLPERR);
+     if (rxq) {
++        ruby_ep2_rx_stall_dump(mac);    /* 0261: snapshot with q1 intact */
+         ruby_wr32(mac, QISAR1_OFF, rxq);
+-        ruby_ep2_rx_stall_dump(mac);    /* 0260: snapshot before recover */
+         if (rxq & QISAR1_RXQ_EMPTY)
+             ruby_rx_empty++;
+         if (rxq & (QISAR1_RXQ_CSERR | QISAR1_RXQ_LENERR)) {
