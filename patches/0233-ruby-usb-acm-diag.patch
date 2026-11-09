@@ -1,0 +1,53 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index de96725..46542e6 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2731,6 +2731,8 @@ static volatile uint32_t ruby_acm_echo_head;
+ static volatile uint32_t ruby_acm_echo_tail;
+ static uint32_t ruby_acm_echo_bytes;
+ static uint32_t ruby_acm_echo_drops;
++static uint32_t ruby_acm_echo_dbg_rx;
++static uint32_t ruby_acm_echo_dbg_tx;
+ 
+ static uint32_t
+ ruby_acm_echo_space(void)
+@@ -2986,6 +2988,11 @@ ruby_ep2_push_log(vm_offset_t mac)
+             n = ruby_acm_echo_dequeue(buf, RUBY_BULK_BYTES);
+             if (!n)
+                 break;
++            if (ruby_acm_echo_dbg_tx < 8) {
++                ruby_acm_echo_dbg_tx++;
++                printf("RUBY USB ACM TX n=%u enq=%u inflight=%u\n",
++                    n, enq, ruby_inflight);
++            }
+             actual_len = n;
+             frames = 1;
+         } else {
+@@ -3742,6 +3749,11 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+         if (ruby_acm_cmd) {
+             /* 0231: ACM data plane echoes; host chars are not commands. */
+             ruby_acm_echo_enqueue(ruby_rx_buf[i], len);
++            if (ruby_acm_echo_dbg_rx < 8) {
++                ruby_acm_echo_dbg_rx++;
++                printf("RUBY USB ACM RX len=%u head=%u tail=%u\n",
++                    len, ruby_acm_echo_head, ruby_acm_echo_tail);
++            }
+         } else {
+             ruby_cmd_consume(mac, ruby_rx_buf[i], len);
+         }
+@@ -4241,6 +4253,15 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
+         ruby_rd32(mac, FRAME_NUM_OFF) & 0x7ffu,
+         ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
++    /* 0233: data-plane state for the ACM echo debug round. */
++    printf("RUBY USB ACM: ready=%u rx=%u echo=%u/%u drop=%u enq=%u deq=%u "
++        "inf=%u rxpk=%u rxdone=%u q0=%08x q1=%08x tq=%08x rq=%08x\n",
++        ruby_ep_ready, ruby_rx_ready,
++        ruby_acm_echo_head, ruby_acm_echo_tail, ruby_acm_echo_drops,
++        ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
++        ruby_rx_packets, ruby_rx_done_events,
++        ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
++        ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
+     if (ruby_irq_mode) {
+         if (ruby_qmu_irq_mode)
+             printf("RUBY USB IRQ: pass=%u mac2=%u bmu=%u qmu=%u "
