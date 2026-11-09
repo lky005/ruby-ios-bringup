@@ -1,0 +1,65 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 82275da..b5ee833 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2882,11 +2882,22 @@ ruby_ep2_tx_force(vm_offset_t mac)
+     uint64_t pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
+     uint32_t i;
+ 
++    /* 0254: vendor stop order -- STOP, FLUSHFIFO, wait ACTIVE clear,
++     * FLUSHFIFO again, wait FIFOEMPTY; only then touch the endpoint. */
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_STOP);
+-    for (i = 0; i < 200; i++) {
++    ruby_wr32(mac, TX1CSR0_OFF,
++        ruby_rd32(mac, TX1CSR0_OFF) | TX_FLUSHFIFO);
++    for (i = 0; i < 500; i++) {
+         if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+             break;
+-        delay(10);
++        delay(100);
++    }
++    ruby_wr32(mac, TX1CSR0_OFF,
++        ruby_rd32(mac, TX1CSR0_OFF) | TX_FLUSHFIFO);
++    for (i = 0; i < 100; i++) {
++        if (ruby_rd32(mac, TX1CSR0_OFF) & TX_FIFOEMPTY)
++            break;
++        delay(100);
+     }
+     ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
+     ruby_wr32(mac, EP_RST_OFF, 0);
+@@ -2901,7 +2912,6 @@ ruby_ep2_tx_force(vm_offset_t mac)
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+-    ruby_ep2_tx_fifo_drain(mac);
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
+     ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+@@ -2919,7 +2929,9 @@ ruby_ep2_tx_watchdog(vm_offset_t mac)
+         return;
+     ruby_ep2_tx_kick_ms = ruby_ms;
+     if (ruby_inflight == 0) {
+-        ruby_ep2_tx_fifo_drain(mac);
++        /* 0254: FLUSHFIFO without STOP is ignored while the QMU owns the
++         * FIFO; use the full stop/flush/start sequence instead. */
++        ruby_ep2_tx_force(mac);
+         ruby_ep2_tx_kicks++;
+         return;
+     }
+@@ -4445,7 +4457,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+     printf("RUBY USB ACM: ready=%u rx=%u echo=%u/%u drop=%u enq=%u deq=%u "
+         "inf=%u rxpk=%u rxdone=%u rxerr=%u zlp=%u "
+         "txr=%u rxr=%u act=%u kick=%u rxact=%u rxkick=%u "
+-        "tqerr=%08x tcsr=%08x "
++        "tqerr=%08x tcsr=%08x qcr0=%08x "
+         "q0=%08x q1=%08x tq=%08x rq=%08x\n",
+         ruby_ep_ready, ruby_rx_ready,
+         ruby_acm_echo_head, ruby_acm_echo_tail, ruby_acm_echo_drops,
+@@ -4456,6 +4468,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_ep2_active_seen, ruby_ep2_tx_kicks,
+         ruby_ep2_rx_active_seen, ruby_ep2_rx_kicks,
+         ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, TX1CSR0_OFF),
++        ruby_rd32(mac, QCR0_OFF),
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
+     if (ruby_irq_mode) {
