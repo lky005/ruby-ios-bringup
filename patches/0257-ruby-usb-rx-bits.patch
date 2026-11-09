@@ -1,0 +1,68 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 71fc3e3..8db376c 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1908,11 +1908,13 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define RX_FIFOADDR(x)  ((x) & 0x1fffu)
+ #define RX_FIFOSEGSIZE(x) (((x) & 0xfu) << 16)
+ #define QMU_RX_CS_EN_BIT    (1u << 18)
+-#define QMU_RX_ZLP_BIT      (1u << 2)
+-#define QMU_RX_COZ_BIT      (1u << 18)
+-#define QMU_RX_LEN_ERR_BIT  (1u << 18)
+-#define QMU_RX_CS_ERR_BIT   (1u << 2)
+-#define QMU_RX_ZLP_ERR_BIT  (1u << 18)
++/* 0257: these were EP2 positions copied onto the EP1 RX endpoint
++ * (QMU_RX_COZ(1)=BIT(16)<<1, ZLP(1)=BIT(0)<<1). */
++#define QMU_RX_ZLP_BIT      (1u << 1)
++#define QMU_RX_COZ_BIT      (1u << 17)
++#define QMU_RX_LEN_ERR_BIT  (1u << 17)
++#define QMU_RX_CS_ERR_BIT   (1u << 1)
++#define QMU_RX_ZLP_ERR_BIT  (1u << 17)
+ #define QMU_RX_DONE_BIT     (1u << 18)
+ #define QMU_RX_DONE_BIT_EP1 (1u << 17) /* 0216: BIT(16)<<1 vendor */
+ #define RX_SENDSTALL_BIT    (1u << 21)
+@@ -2183,7 +2185,7 @@ ruby_ep2_resume(vm_offset_t mac)
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+     ruby_wr32(mac, QCR0_OFF, 1u);
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
+@@ -2364,7 +2366,7 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+     ruby_wr32(mac, QCR0_OFF, 1u);
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+ 
+@@ -2622,7 +2624,7 @@ ruby_ep2_config(vm_offset_t mac)
+      */
+     ruby_wr32(mac, QIESR0_OFF,
+         RUBY_QMU_TX_DONE | QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1);
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)ruby_ring_pa);
+@@ -3404,7 +3406,7 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+     ruby_wr32(mac, QCR0_OFF, 1u);
+     ruby_wr32(mac, QCR3_OFF,
+-        (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
++        (ruby_rd32(mac, QCR3_OFF) & ~0x00000007u) | 0x00060000u);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+         QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
+     ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
+@@ -3450,7 +3452,7 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+     ruby_wr32(mac, QCR0_OFF, 1u);
+     ruby_wr32(mac, QCR3_OFF,
+-        (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
++        (ruby_rd32(mac, QCR3_OFF) & ~0x00000007u) | 0x00060000u);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+         QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
+     ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
