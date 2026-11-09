@@ -234,6 +234,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0252-ruby-usb-dir-cs.patch" \
     "$ROOT/patches/0253-ruby-usb-fifo-flush.patch" \
     "$ROOT/patches/0254-ruby-usb-fifo-full-force.patch" \
+    "$ROOT/patches/0255-ruby-usb-vendor-zero-force.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
