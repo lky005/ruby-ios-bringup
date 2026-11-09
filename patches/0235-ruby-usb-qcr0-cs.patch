@@ -1,0 +1,54 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 46542e6..90aaf1f 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2303,7 +2303,15 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+     ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
+ 
+-    /* 0207: QCR0 CS engines stay at the boot default; the vendor never writes QCR0. */
++    /*
++     * 0235: the vendor core init enables QMU_CS16B_EN (QCR0 bit0) and
++     * mtu3_qmu_start enables the per-EP checksum engines (TX bit1, RX
++     * bit17).  The old note "vendor never writes QCR0" was wrong; without
++     * the 16-byte mode a boot-enabled CS engine validates 32 bytes and
++     * silently skips every GPD.
++     */
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) |
++        (1u << 0) | (1u << 1));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -3290,6 +3298,8 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
++    /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -3334,6 +3344,8 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
++    /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -4255,11 +4267,13 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
+     /* 0233: data-plane state for the ACM echo debug round. */
+     printf("RUBY USB ACM: ready=%u rx=%u echo=%u/%u drop=%u enq=%u deq=%u "
+-        "inf=%u rxpk=%u rxdone=%u q0=%08x q1=%08x tq=%08x rq=%08x\n",
++        "inf=%u rxpk=%u rxdone=%u rxerr=%u zlp=%u "
++        "q0=%08x q1=%08x tq=%08x rq=%08x\n",
+         ruby_ep_ready, ruby_rx_ready,
+         ruby_acm_echo_head, ruby_acm_echo_tail, ruby_acm_echo_drops,
+         ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+         ruby_rx_packets, ruby_rx_done_events,
++        ruby_rx_errors, ruby_rx_zlp_err,
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
+     if (ruby_irq_mode) {
