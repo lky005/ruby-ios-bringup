@@ -1,0 +1,29 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 9e76918..2387181 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1584,12 +1584,19 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+     else if (st[0] == 0x40 && st[1] == 0x2e)
+         ruby_ep0_vendor_cmd(mac, t, value, index, len);
+     else if (st[0] == 0x21 && st[1] == 0x20) {
+-        /* 0228 A-route: begin OUT data stage. Data arrives later on the
+-         * RX path (ruby_ep0_service EP0_RXPKTRDY), which is the
+-         * verified branch the probe_wr/cmd paths already use.
+-         * Just arm the pending flag here; do not read FIFO in setup stage. */
++        /* 0230: ACK the SETUP without DATAEND so the 7B OUT data stage can
++         * arrive -- same 0131b rule as vendor probe_write/cmd.  Without it
++         * the host stalls the transfer before ruby_ep0_service() sees
++         * EP0_RXPKTRDY (0229 left the setup unacknowledged: SetCommState
++         * ended in USBD_STATUS_XACT_ERROR, WinError 31).
++         * ruby_ep0_service completes status with RXPKTRDY|DATAEND. */
+         acm_ep0_rx.state = EP0_STATE_WAIT_LINE_CODING;
+-        /* No ACK yet: the OUT data stage completes in ruby_ep0_service (0229) */
++        {
++            uint32_t csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
++
++            csr |= EP0_SETUPPKTRDY;
++            ruby_wr32(mac, EP0CSR_OFF, csr);
++        }
+     } else if (st[0] == 0x21 && st[1] == 0x22) {
+         /* CDC SET_CONTROL_LINE_STATE: store DTR/RTS from wValue */
+         ruby_acm_control_state = (uint16_t)value;
