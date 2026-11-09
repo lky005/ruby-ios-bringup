@@ -1,0 +1,31 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2518,8 +2518,26 @@
+     if (freed) {
+         struct ruby_ep *txep = ruby_ep_for_addr(0x81);
+         if (txep) {
+-            for (uint32_t ci = 0; ci < freed; ci++)
+-                ruby_ep_complete(txep, 0);
++            /* 0222: dequeue the burst under one lock hold, run the
++             * completes AFTER the lock drops (they are currently
++             * NULL, but the discipline generalizes to consumers). */
++            struct ruby_req *done_reqs[64];
++            uint32_t done_n = 0;
++            lck_spin_lock(&txep->q_lock);
++            while (txep->q_head && done_n < 64) {
++                struct ruby_req *r = txep->q_head;
++                txep->q_head = r->next;
++                if (!txep->q_head)
++                    txep->q_tail = NULL;
++                txep->q_depth--;
++                done_reqs[done_n++] = r;
++            }
++            lck_spin_unlock(&txep->q_lock);
++            for (uint32_t ci = 0; ci < done_n; ci++) {
++                struct ruby_req *r = done_reqs[ci];
++                if (r->done)
++                    r->done(r->ctx, 0);
++            }
+         }
+         ruby_txdone_count += freed;
+         ruby_ep2_drain_freed_total += freed;
