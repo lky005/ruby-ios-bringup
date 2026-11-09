@@ -1,0 +1,56 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 0256335..34640de 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2126,14 +2126,14 @@ ruby_dma_mb(void)
+ static uint8_t
+ ruby_gpd_chksum(uint8_t *g)
+ {
+-    /*
+-     * 0248: vendor GPD trace (mtu3_prepare_gpd) shows dw0 byte1 = 0x00 on
+-     * every working ep3in/ep2out descriptor: this kernel leaves the
+-     * checksum byte zero (validation off).  A non-zero byte made the QMU
+-     * silently skip descriptors after the first one.  Match the vendor.
+-     */
+-    (void)g;
+-    return 0;
++    uint32_t i, sum = 0;
++
++    g[1] = 0;
++    __asm__ volatile("dsb sy" ::: "memory");
++    for (i = 0; i < 16; i++)
++        sum += g[i];
++    sum += 1;
++    return (uint8_t)(0xffu - (sum & 0xffu));
+ }
+ 
+ static void
+@@ -3180,7 +3180,9 @@ ruby_ep2_push_log(vm_offset_t mac)
+          * vendor GPD_EXT_FLAG_ZLP for the ext flag (old IP path). */
+         *(volatile uint32_t *)(g + 12) =
+             (actual_len) | (((actual_len % RUBY_LOG_CHUNK) == 0) ? (1u << 29) : 0);
+-        g[1] = ruby_gpd_chksum(g);
++        /* 0252: TX uses the vendor's zero checksum byte (its CS engine is
++         * off); RX keeps a computed checksum. */
++        g[1] = 0;
+         /* Payload is cached: one clean covers all 32 frames. */
+         ruby_dc_civac(buf, RUBY_BULK_BYTES);
+         if (!ruby_dma_uc) {
+@@ -3428,7 +3430,7 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 17));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -3474,7 +3476,7 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 17));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
