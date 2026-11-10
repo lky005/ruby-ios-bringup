@@ -56,10 +56,10 @@ jobs:
         run: |
           if [ -n "$PUBLIC_DENYLIST" ]; then
             printf '%s' "$PUBLIC_DENYLIST" | base64 -d > "$RUNNER_TEMP/denylist.txt"
-            python3 scripts/verify-local.py --ci-config config/0276.env --denylist "$RUNNER_TEMP/denylist.txt"
+            python3 scripts/verify-local.py --ci-config config/0277.env --denylist "$RUNNER_TEMP/denylist.txt"
             rm -f "$RUNNER_TEMP/denylist.txt"
           else
-            python3 scripts/verify-local.py --ci-config config/0276.env
+            python3 scripts/verify-local.py --ci-config config/0277.env
           fi
 
       - name: Build TWRP tools
