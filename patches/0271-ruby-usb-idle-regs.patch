@@ -1,0 +1,26 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 9575e94..37990a3 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -4524,6 +4524,21 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
++    /* 0271: short register line so the console does not truncate it; the
++     * values are diffed against the vendor oracle in docs/106 20.3. */
++    printf("RUBY USB REG: busperf=%08x eprst=%08x qcr3=%08x "
++        "tx1csr1=%08x tx1csr2=%08x rx1csr0=%08x rx1csr1=%08x rx1csr2=%08x "
++        "tq=%08x tqsar1=%08x tqcpr=%08x tqhiar1=%08x "
++        "rq=%08x rqcpr=%08x q0=%08x q1=%08x\n",
++        ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA), ruby_rd32(mac, EP_RST_OFF),
++        ruby_rd32(mac, QCR3_OFF),
++        ruby_rd32(mac, TX1CSR1_OFF), ruby_rd32(mac, TX1CSR2_OFF),
++        ruby_rd32(mac, RX1CSR0_OFF), ruby_rd32(mac, RX1CSR1_OFF),
++        ruby_rd32(mac, RX1CSR2_OFF),
++        ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, TQSAR1_OFF),
++        ruby_rd32(mac, TQCPR1_OFF), ruby_rd32(mac, TQHIAR1_OFF),
++        ruby_rd32(mac, RQCSR1_OFF), ruby_rd32(mac, RQCPR1_OFF),
++        ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF));
+     if (ruby_irq_mode) {
+         if (ruby_qmu_irq_mode)
+             printf("RUBY USB IRQ: pass=%u mac2=%u bmu=%u qmu=%u "
