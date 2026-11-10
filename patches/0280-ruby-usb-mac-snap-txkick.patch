@@ -1,0 +1,85 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index c28c73f..8655355 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2074,6 +2074,8 @@ static uint32_t ruby_txrdy_kicks;
+ static uint32_t ruby_txrdy_ms;
+ static int ruby_txreplay_en = 1;    /* 0277: replay preserved TX payloads */
+ static int ruby_txdone_en = 1;      /* 0279: per-TX-done register snapshot */
++static int ruby_tx_kick_en;         /* 0280: faithful per-done send kick */
++static uint32_t ruby_tx_k2_kicks;
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+ static uint32_t ruby_tx_replay_bytes;
+@@ -3221,6 +3223,15 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+         ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+         ruby_rd32(mac, RQCSR1_OFF), ruby_txkick_starts,
+         ruby_txrdy_kicks);
++    /* 0280: MAC-level registers not covered by the 0271 REG line. */
++    printf("RUBY USB MAC: devconf=%08x usb3c=%08x pm=%08x misc=%08x "
++        "lv1=%08x usb2op=%08x txcnt=%u\n",
++        ruby_rd32(mac, DEVICE_CONF - MTU3_PA),
++        ruby_rd32(mac, USB3_CONFIG - MTU3_PA),
++        ruby_rd32(mac, PM_CTRL - MTU3_PA),
++        ruby_rd32(mac, MISC_CTRL - MTU3_PA),
++        ruby_rd32(mac, LV1IECR - MTU3_PA),
++        ruby_rd32(mac, USB20_OP - MTU3_PA), ruby_tx_k2_kicks);
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+@@ -3272,6 +3283,30 @@ ruby_ep2_push_log(vm_offset_t mac)
+                 ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, TQCPR1_OFF),
+                 ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+                 (unsigned long long)ruby_ep2_hwo_bits(), q0, q1);
++        /* 0280: opt-in, faithful vendor ZLP-style send kick.  Stop the QMU
++         * DMA, wait for the FIFO to stop reporting full, assert TXPKTRDY,
++         * re-enable DMA and resume the queue. */
++        if (ruby_tx_kick_en) {
++            uint32_t t0 = ruby_rd32(mac, TX1CSR0_OFF);
++
++            if (!(t0 & (1u << 24))) {
++                uint32_t v = t0 & ~(1u << 29);
++                uint32_t spins = 0;
++
++                ruby_wr32(mac, TX1CSR0_OFF, v);
++                while ((ruby_rd32(mac, TX1CSR0_OFF) & (1u << 25)) &&
++                    spins++ < 1000)
++                    ;
++                ruby_wr32(mac, TX1CSR0_OFF, v | (1u << 16));
++                ruby_dma_mb();
++                ruby_wr32(mac, TX1CSR0_OFF,
++                    v | (1u << 16) | (1u << 29));
++                ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++                if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
++                    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++                ruby_tx_k2_kicks++;
++            }
++        }
+     }
+ 
+     freed = 0;
+@@ -5799,6 +5834,7 @@ ruby_usb_probe(void)
+     int txrdy = 1;
+     int txreplay = 1;
+     int txdone = 1;
++    int txkick2 = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5833,6 +5869,8 @@ ruby_usb_probe(void)
+     ruby_txreplay_en = (txreplay == 1);
+     PE_parse_boot_argn("ruby_txdone", &txdone, sizeof(txdone));
+     ruby_txdone_en = (txdone == 1);
++    PE_parse_boot_argn("ruby_tx_kick", &txkick2, sizeof(txkick2));
++    ruby_tx_kick_en = (txkick2 == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5847,6 +5885,7 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0274 txrdy kick=%d\n", ruby_txrdy_en);
+     printf("RUBY USB: 0277 tx replay=%d\n", ruby_txreplay_en);
+     printf("RUBY USB: 0279 txdone snap=%d\n", ruby_txdone_en);
++    printf("RUBY USB: 0280 tx_kick=%d\n", ruby_tx_kick_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

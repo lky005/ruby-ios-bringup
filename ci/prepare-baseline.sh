@@ -257,6 +257,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0277-ruby-usb-tx-replay.patch" \
     "$ROOT/patches/0278-ruby-usb-txrecover-gate.patch" \
     "$ROOT/patches/0279-ruby-usb-txdone-snap.patch" \
+    "$ROOT/patches/0280-ruby-usb-mac-snap-txkick.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
