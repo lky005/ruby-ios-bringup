@@ -1,0 +1,54 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index ea4a207..c28c73f 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2073,6 +2073,7 @@ static int ruby_txrdy_en = 1;   /* 0274: TXPKTRDY kick on a full FIFO */
+ static uint32_t ruby_txrdy_kicks;
+ static uint32_t ruby_txrdy_ms;
+ static int ruby_txreplay_en = 1;    /* 0277: replay preserved TX payloads */
++static int ruby_txdone_en = 1;      /* 0279: per-TX-done register snapshot */
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+ static uint32_t ruby_tx_replay_bytes;
+@@ -3261,6 +3262,16 @@ ruby_ep2_push_log(vm_offset_t mac)
+         ruby_ep2_host_seen = 1;
+         ruby_ep2_last_in_ms = ruby_ms;
+         ruby_ep2_q0_seen++;
++        /* 0279: per-TX-done register snapshot, bounded (first 16 and every
++         * 64th) to compare our inter-packet state with the vendor. */
++        if (ruby_txdone_en &&
++            (ruby_ep2_q0_seen <= 16 || (ruby_ep2_q0_seen & 0x3fu) == 0))
++            printf("RUBY USB TXDONE n=%u tx0=%08x tqcsr=%08x tqcpr=%08x "
++                "enq=%u deq=%u inf=%u hwo=%llx q0=%08x q1=%08x\n",
++                ruby_ep2_q0_seen, ruby_rd32(mac, TX1CSR0_OFF),
++                ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, TQCPR1_OFF),
++                ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
++                (unsigned long long)ruby_ep2_hwo_bits(), q0, q1);
+     }
+ 
+     freed = 0;
+@@ -5787,6 +5798,7 @@ ruby_usb_probe(void)
+     int txkick = 1;
+     int txrdy = 1;
+     int txreplay = 1;
++    int txdone = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5819,6 +5831,8 @@ ruby_usb_probe(void)
+     ruby_txrdy_en = (txrdy == 1);
+     PE_parse_boot_argn("ruby_txreplay", &txreplay, sizeof(txreplay));
+     ruby_txreplay_en = (txreplay == 1);
++    PE_parse_boot_argn("ruby_txdone", &txdone, sizeof(txdone));
++    ruby_txdone_en = (txdone == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5832,6 +5846,7 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0273 tx kick start=%d\n", ruby_txkick_en);
+     printf("RUBY USB: 0274 txrdy kick=%d\n", ruby_txrdy_en);
+     printf("RUBY USB: 0277 tx replay=%d\n", ruby_txreplay_en);
++    printf("RUBY USB: 0279 txdone snap=%d\n", ruby_txdone_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
