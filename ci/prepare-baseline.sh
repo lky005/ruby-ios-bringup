@@ -249,6 +249,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0267-ruby-usb-rx-skip.patch" \
     "$ROOT/patches/0269-ruby-usb-tx-recover-layers.patch" \
     "$ROOT/patches/0271-ruby-usb-idle-regs.patch" \
+    "$ROOT/patches/0272-ruby-usb-noise-off.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
