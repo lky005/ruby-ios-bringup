@@ -1,0 +1,22 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index fa35420..ea4a207 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2672,9 +2672,15 @@ ruby_tx_recover_poll(vm_offset_t mac)
+         ruby_txrdy_kicks++;
+     }
+ 
+-    if (!ruby_txreset_en || ruby_inflight == 0)
++    if (!ruby_txreset_en)
+         return;
+-    if (!(ruby_rd32(mac, TX1CSR0_OFF) & (1u << 25)))
++    /* 0278: the stuck FIFO is usually "non-empty, not full" with inflight 0
++     * (the QMU already fetched the GPDs) and TXPKTRDY reads back 0, so the
++     * old FIFOFULL/inflight gate never armed.  A healthy pending packet
++     * has TXPKTRDY set; use "FIFO not empty && TXPKTRDY clear" instead. */
++    if (tx0 & (1u << 24))
++        return;
++    if (tx0 & (1u << 16))
+         return;
+     if ((uint32_t)(ruby_ms - ruby_tx_progress_ms) < 200)
+         return;
