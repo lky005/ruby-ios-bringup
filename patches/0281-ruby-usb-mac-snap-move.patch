@@ -1,0 +1,39 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 8655355..0ac1d51 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -3223,15 +3223,6 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+         ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+         ruby_rd32(mac, RQCSR1_OFF), ruby_txkick_starts,
+         ruby_txrdy_kicks);
+-    /* 0280: MAC-level registers not covered by the 0271 REG line. */
+-    printf("RUBY USB MAC: devconf=%08x usb3c=%08x pm=%08x misc=%08x "
+-        "lv1=%08x usb2op=%08x txcnt=%u\n",
+-        ruby_rd32(mac, DEVICE_CONF - MTU3_PA),
+-        ruby_rd32(mac, USB3_CONFIG - MTU3_PA),
+-        ruby_rd32(mac, PM_CTRL - MTU3_PA),
+-        ruby_rd32(mac, MISC_CTRL - MTU3_PA),
+-        ruby_rd32(mac, LV1IECR - MTU3_PA),
+-        ruby_rd32(mac, USB20_OP - MTU3_PA), ruby_tx_k2_kicks);
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+@@ -3283,6 +3274,18 @@ ruby_ep2_push_log(vm_offset_t mac)
+                 ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, TQCPR1_OFF),
+                 ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+                 (unsigned long long)ruby_ep2_hwo_bits(), q0, q1);
++        /* 0281: the jam leaves inflight 0, so the stall dump never fires;
++         * print the MAC-level registers with the bounded TXDONE snapshot. */
++        if (ruby_txdone_en &&
++            (ruby_ep2_q0_seen <= 16 || (ruby_ep2_q0_seen & 0x3fu) == 0))
++            printf("RUBY USB MAC: devconf=%08x usb3c=%08x pm=%08x "
++                "misc=%08x lv1=%08x usb2op=%08x txcnt=%u\n",
++                ruby_rd32(mac, DEVICE_CONF - MTU3_PA),
++                ruby_rd32(mac, USB3_CONFIG - MTU3_PA),
++                ruby_rd32(mac, PM_CTRL - MTU3_PA),
++                ruby_rd32(mac, MISC_CTRL - MTU3_PA),
++                ruby_rd32(mac, LV1IECR - MTU3_PA),
++                ruby_rd32(mac, USB20_OP - MTU3_PA), ruby_tx_k2_kicks);
+         /* 0280: opt-in, faithful vendor ZLP-style send kick.  Stop the QMU
+          * DMA, wait for the FIFO to stop reporting full, assert TXPKTRDY,
+          * re-enable DMA and resume the queue. */
