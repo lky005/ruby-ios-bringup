@@ -1,0 +1,79 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index f953fff..ea639e1 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2067,6 +2067,8 @@ static int ruby_txreset_en;
+ static int ruby_txeprst_en;
+ static int ruby_txdeq_en;
+ static int ruby_noise_en;   /* 0272: 0185 noise quirk, default off */
++static int ruby_txkick_en;  /* 0273: Q_START when the TX queue is stopped */
++static uint32_t ruby_txkick_starts;
+ static uint32_t ruby_tx_reset_cnt;
+ static uint32_t ruby_tx_reset_ms;
+ static uint32_t ruby_tx_reset_tries;
+@@ -3135,7 +3137,7 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+     printf("RUBY USB TXSTALL inf=%u tcsr=%08x qcr0=%08x qcr1=%08x "
+         "qcr2=%08x qcr3=%08x tqcpr=%08x rqcpr=%08x q0=%08x q1=%08x "
+         "speed=%u tx1csr1=%08x tx1csr2=%08x rx1csr1=%08x rx1csr2=%08x "
+-        "rq=%08x\n", ruby_inflight,
++        "rq=%08x tkstarts=%u\n", ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, QCR0_OFF),
+         ruby_rd32(mac, QCR1_OFF), ruby_rd32(mac, QCR2_OFF),
+         ruby_rd32(mac, QCR3_OFF), ruby_rd32(mac, TQCPR1_OFF),
+@@ -3144,7 +3146,7 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+         ruby_rd32(mac, DEVICE_CONF - MTU3_PA) & 0x7u,
+         ruby_rd32(mac, TX1CSR1_OFF), ruby_rd32(mac, TX1CSR2_OFF),
+         ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+-        ruby_rd32(mac, RQCSR1_OFF));
++        ruby_rd32(mac, RQCSR1_OFF), ruby_txkick_starts);
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+@@ -3508,8 +3510,20 @@ ruby_ep2_push_log(vm_offset_t mac)
+     ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_PUSH,
+         ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)) {
++        /* 0273: RESUME is a no-op on a stopped queue; the vendor restarts
++         * with Q_START from the oldest pending GPD instead. */
++        uint64_t kpa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
++
++        if (ruby_txkick_en) {
++            ruby_wr32(mac, TQSAR1_OFF, (uint32_t)kpa);
++            ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((kpa >> 32) & 0xfu));
++            ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++            ruby_txkick_starts++;
++        } else {
++            ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++        }
++    }
+ 
+     if (ruby_rd32(mac, QISAR0_OFF) & RUBY_QMU_TX_DONE) {
+         ruby_ep2_q0_after_kick++;
+@@ -5676,6 +5690,7 @@ ruby_usb_probe(void)
+     int txeprst = 0;
+     int txdeq = 0;
+     int noise = 0;
++    int txkick = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5702,6 +5717,8 @@ ruby_usb_probe(void)
+     ruby_txdeq_en = (txdeq == 1);
+     PE_parse_boot_argn("ruby_noise", &noise, sizeof(noise));
+     ruby_noise_en = (noise == 1);
++    PE_parse_boot_argn("ruby_txkick", &txkick, sizeof(txkick));
++    ruby_txkick_en = (txkick == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5712,6 +5729,7 @@ ruby_usb_probe(void)
+         ruby_txreset_en, ruby_txeprst_en, ruby_txdeq_en);
+     printf("RUBY USB: 0272 noise quirk=%d (ruby_noise=1 restores 0185)\n",
+         ruby_noise_en);
++    printf("RUBY USB: 0273 tx kick start=%d\n", ruby_txkick_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
