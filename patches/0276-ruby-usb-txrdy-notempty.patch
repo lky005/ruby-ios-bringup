@@ -1,0 +1,25 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 825066c..3f7bc75 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2611,13 +2611,14 @@ ruby_tx_recover_poll(vm_offset_t mac)
+ {
+     uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+ 
+-    /* 0274/0275: vendor ZLP-recovery style.  A FIFO holding data with
+-     * TXPKTRDY clear never reaches the bus (console: tcsr=22000200,
+-     * FIFOFULL, TXPKTRDY=0).  The QMU consumes the GPDs immediately
+-     * (inflight 0), so gate on the FIFO state only: stop the QMU DMA,
+-     * assert TXPKTRDY, resume the DMA, at most once per 200 ms. */
++    /* 0274/0275/0276: vendor ZLP-recovery style.  A TX FIFO holding data
++     * with TXPKTRDY clear never reaches the bus (console: tcsr=22000200
++     * FIFOFULL or 20000200 non-empty, TXPKTRDY=0).  The QMU consumes the
++     * GPDs immediately (inflight 0) and the FIFO is not always "full", so
++     * gate on "FIFO not empty": stop the QMU DMA, assert TXPKTRDY, resume
++     * the DMA, at most once per 200 ms. */
+     if (ruby_txrdy_en &&
+-        (tx0 & (1u << 25)) && !(tx0 & (1u << 16)) &&
++        !(tx0 & (1u << 24)) && !(tx0 & (1u << 16)) &&
+         (uint32_t)(ruby_ms - ruby_tx_progress_ms) >= 200 &&
+         (uint32_t)(ruby_ms - ruby_txrdy_ms) >= 200) {
+         uint32_t v = tx0 & ~(1u << 29);
