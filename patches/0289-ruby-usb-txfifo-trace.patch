@@ -1,0 +1,90 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index e5aab40..18654fd 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2080,6 +2080,20 @@ static int ruby_usb2parity_en = 1;  /* 0285: vendor USB2 init parity */
+ static int ruby_usbintr_en = 1;     /* 0285: vendor suspend intr parity */
+ static int ruby_lpmmask_en = 1;     /* 0287: vendor LPM mask / U3 exit parity */
+ static int ruby_txslot = 2;         /* 0288: EP1 IN TX FIFO slot (A/B) */
++static int ruby_txfifo_en = 1;      /* 0289: per-GPD TX FIFO trace */
++static uint32_t ruby_txfifo_lines;
++static uint32_t ruby_flushfifo_cnt;
++
++static void
++ruby_txfifo_log(vm_offset_t mac, const char *kind, uint32_t n)
++{
++    if (!ruby_txfifo_en || ruby_txfifo_lines >= 96)
++        return;
++    ruby_txfifo_lines++;
++    printf("RUBY USB TXFIFO %s n=%u tqcpr=%08x csr0=%08x tqcsr=%08x flush=%u\n",
++        kind, n, ruby_rd32(mac, TQCPR1_OFF), ruby_rd32(mac, TX1CSR0_OFF),
++        ruby_rd32(mac, TQCSR1_OFF), ruby_flushfifo_cnt);
++}
+ static uint32_t ruby_tx_k2_kicks;
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+@@ -2392,6 +2406,7 @@ ruby_ep2_qmu_stop(vm_offset_t mac)
+ 
+     if (v & QMU_Q_ACTIVE) {
+         ruby_wr32(mac, TQCSR1_OFF, QMU_Q_STOP);
++        ruby_flushfifo_cnt++;
+         ruby_wr32(mac, TX1CSR0_OFF,
+             ruby_rd32(mac, TX1CSR0_OFF) | TX_FLUSHFIFO);
+     }
+@@ -2409,6 +2424,7 @@ ruby_ep2_qmu_stop(vm_offset_t mac)
+         return -1;
+     }
+ 
++    ruby_flushfifo_cnt++;
+     ruby_wr32(mac, TX1CSR0_OFF,
+         ruby_rd32(mac, TX1CSR0_OFF) | TX_FLUSHFIFO);
+     return 0;
+@@ -2483,6 +2499,7 @@ ruby_ep2_state_reset(vm_offset_t mac)
+             ruby_ep2_stop_spins_last, ruby_ep2_stop_timeouts);
+     ruby_ep2_ring_reset(mac);
+     v = ruby_rd32(mac, TX1CSR0_OFF);
++    ruby_flushfifo_cnt++;
+     ruby_wr32(mac, TX1CSR0_OFF, v | TX_FLUSHFIFO);
+     for (i = 0; i < 100; i++) {
+         spins = i;
+@@ -3269,6 +3286,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+         ruby_ep2_host_seen = 1;
+         ruby_ep2_last_in_ms = ruby_ms;
+         ruby_ep2_q0_seen++;
++        ruby_txfifo_log(mac, "done", ruby_ep2_q0_seen);
+         /* 0279: per-TX-done register snapshot, bounded (first 16 and every
+          * 64th) to compare our inter-packet state with the vendor. */
+         if (ruby_txdone_en &&
+@@ -3614,6 +3632,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+         }
+         /* 0221: 1:1 req:GPD binding. One ruby_req owns this slot; queue
+          * under ep lock, completed by ruby_ep2_drain -> ruby_ep_complete. */
++        ruby_txfifo_log(mac, "enq", enq);
+         {
+             struct ruby_ep *txep = ruby_ep_for_addr(0x81);
+             struct ruby_req *rq = &ruby_xfer_reqs[enq];
+@@ -5875,6 +5894,7 @@ ruby_usb_probe(void)
+     int usbintr = 1;
+     int lpmmask = 1;
+     int txslot = 2;
++    int txfifo = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+@@ -5925,6 +5945,8 @@ ruby_usb_probe(void)
+     if (txslot > 0x3f)
+         txslot = 0x3f;
+     ruby_txslot = txslot;
++    PE_parse_boot_argn("ruby_txfifo", &txfifo, sizeof(txfifo));
++    ruby_txfifo_en = (txfifo == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5945,6 +5967,7 @@ ruby_usb_probe(void)
+         ruby_usb2parity_en, ruby_usbintr_en);
+     printf("RUBY USB: 0287 lpmmask=%d\n", ruby_lpmmask_en);
+     printf("RUBY USB: 0288 tx_slot=%d\n", ruby_txslot);
++    printf("RUBY USB: 0289 txfifo=%d\n", ruby_txfifo_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
