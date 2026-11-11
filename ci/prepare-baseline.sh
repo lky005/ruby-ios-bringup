@@ -262,6 +262,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0283-ruby-usb-lpmhrwe.patch" \
     "$ROOT/patches/0285-ruby-usb-usb2-parity.patch" \
     "$ROOT/patches/0286-ruby-usb-epctl-slice.patch" \
+    "$ROOT/patches/0287-ruby-usb-lpm-mask.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
