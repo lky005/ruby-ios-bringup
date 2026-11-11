@@ -1,0 +1,77 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1f58e6a..e5aab40 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2079,6 +2079,7 @@ static int ruby_lpmhrwe_en = 1;     /* 0283: vendor LPM_HRWE parity */
+ static int ruby_usb2parity_en = 1;  /* 0285: vendor USB2 init parity */
+ static int ruby_usbintr_en = 1;     /* 0285: vendor suspend intr parity */
+ static int ruby_lpmmask_en = 1;     /* 0287: vendor LPM mask / U3 exit parity */
++static int ruby_txslot = 2;         /* 0288: EP1 IN TX FIFO slot (A/B) */
+ static uint32_t ruby_tx_k2_kicks;
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+@@ -2337,7 +2338,7 @@ ruby_ep2_resume(vm_offset_t mac)
+     ruby_wr32(mac, EP_RST_OFF, 0);
+     (void)ruby_rd32(mac, EP_RST_OFF);
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+-    ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
++    ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
+     ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+@@ -2510,7 +2511,7 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+      * and a 512 B segment serves both 64 and 512 maxpacket.
+      */
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+-    ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
++    ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
+     ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+ 
+     /*
+@@ -2573,7 +2574,7 @@ ruby_ep2_tx_rebuild(vm_offset_t mac)
+         /* Keep the ring; restart from the oldest pending GPD.  The stop
+          * above already flushed bytes the MAC had not sent. */
+         ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+-        ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
++        ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
+         ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+         ruby_wr32(mac, QCR0_OFF, 1u);
+         ruby_wr32(mac, QCR1_OFF,
+@@ -2920,7 +2921,7 @@ ruby_ep2_config(vm_offset_t mac)
+      * slot 0 and never restored it.  Bulk type is 0, so only the slot field
+      * differs from the verified reference.
+      */
+-    ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
++    ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
+     /*
+      * 0258: vendor programs FIFOADDR=0 for EP1 IN (TWRP readback
+      * 0x00090000).  P9's 0x200 is a legal mainline slot but not the
+@@ -5873,6 +5874,7 @@ ruby_usb_probe(void)
+     int usb2parity = 1;
+     int usbintr = 1;
+     int lpmmask = 1;
++    int txslot = 2;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+@@ -5917,6 +5919,12 @@ ruby_usb_probe(void)
+     ruby_usbintr_en = (usbintr == 1);
+     PE_parse_boot_argn("ruby_lpmmask", &lpmmask, sizeof(lpmmask));
+     ruby_lpmmask_en = (lpmmask == 1);
++    PE_parse_boot_argn("ruby_txslot", &txslot, sizeof(txslot));
++    if (txslot < 0)
++        txslot = 0;
++    if (txslot > 0x3f)
++        txslot = 0x3f;
++    ruby_txslot = txslot;
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5936,6 +5944,7 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0285 usb2 parity=%d intr=%d\n",
+         ruby_usb2parity_en, ruby_usbintr_en);
+     printf("RUBY USB: 0287 lpmmask=%d\n", ruby_lpmmask_en);
++    printf("RUBY USB: 0288 tx_slot=%d\n", ruby_txslot);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
