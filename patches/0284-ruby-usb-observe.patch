@@ -1,0 +1,57 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index a5dfae3..1ca2180 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -3287,6 +3287,16 @@ ruby_ep2_push_log(vm_offset_t mac)
+                 ruby_rd32(mac, MISC_CTRL - MTU3_PA),
+                 ruby_rd32(mac, LV1IECR - MTU3_PA),
+                 ruby_rd32(mac, USB20_OP - MTU3_PA), ruby_tx_k2_kicks);
++        /* 0284: read-only per-packet TX endpoint snapshot. */
++        if (ruby_txdone_en &&
++            (ruby_ep2_q0_seen <= 16 || (ruby_ep2_q0_seen & 0x3fu) == 0))
++            printf("RUBY USB TXREG n=%u tx0=%08x tx1=%08x tx2=%08x "
++                "tq=%08x cpr=%08x hi=%08x q0=%08x q1=%08x\n",
++                ruby_ep2_q0_seen, ruby_rd32(mac, TX1CSR0_OFF),
++                ruby_rd32(mac, TX1CSR1_OFF), ruby_rd32(mac, TX1CSR2_OFF),
++                ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, TQCPR1_OFF),
++                ruby_rd32(mac, TQHIAR1_OFF),
++                ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF));
+         /* 0280: opt-in, faithful vendor ZLP-style send kick.  Stop the QMU
+          * DMA, wait for the FIFO to stop reporting full, assert TXPKTRDY,
+          * re-enable DMA and resume the queue. */
+@@ -5842,7 +5852,7 @@ ruby_usb_probe(void)
+     int lpmhrwe = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+-    uint32_t s1, s2, v;
++    uint32_t s1, s2, v, off;
+ 
+     PE_parse_boot_argn("rubyusb", &enable, sizeof(enable));
+     PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
+@@ -5894,6 +5904,7 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0279 txdone snap=%d\n", ruby_txdone_en);
+     printf("RUBY USB: 0280 tx_kick=%d\n", ruby_tx_kick_en);
+     printf("RUBY USB: 0283 lpm_hrwe=%d\n", ruby_lpmhrwe_en);
++    printf("RUBY USB: 0284 observe (read-only)\n");
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+@@ -6030,6 +6041,18 @@ ruby_usb_probe(void)
+             ruby_rd32(mac, PM_CTRL - MTU3_PA));
+     }
+ 
++    /* 0284: read-only static snapshot for the vendor 0x2400-0x2470 diff. */
++    for (off = 0x2400; off <= 0x2470; off += 0x10)
++        printf("RUBY USB USB2 %04x: %08x %08x %08x %08x\n",
++            off, ruby_rd32(mac, off), ruby_rd32(mac, off + 4),
++            ruby_rd32(mac, off + 8), ruby_rd32(mac, off + 0xc));
++    printf("RUBY USB TXCFG: tx1=%08x/%08x/%08x tx2=%08x/%08x/%08x "
++        "tx3=%08x/%08x/%08x tq3=%08x/%08x\n",
++        ruby_rd32(mac, 0x110), ruby_rd32(mac, 0x114), ruby_rd32(mac, 0x118),
++        ruby_rd32(mac, 0x120), ruby_rd32(mac, 0x124), ruby_rd32(mac, 0x128),
++        ruby_rd32(mac, 0x130), ruby_rd32(mac, 0x134), ruby_rd32(mac, 0x138),
++        ruby_rd32(mac, 0x530), ruby_rd32(mac, 0x538));
++
+     /* 0185/0272: the vendor runs with bit21 clear; the old noise quirk
+      * stays behind ruby_noise=1 for A/B. */
+     v = ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA);
