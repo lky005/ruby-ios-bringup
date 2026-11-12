@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
-index 18654fd..4bc81e8 100644
+index 18654fd..890806a 100644
 --- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
 @@ -566,6 +566,9 @@ ruby_ep_complete(struct ruby_ep *ep, int status)
@@ -30,7 +30,7 @@ index 18654fd..4bc81e8 100644
 +        if (ruby_cfgrst_mode == 2 && (ruby_ep2log_on || ruby_acm_cmd) &&
 +            !ruby_ep_ready) {
 +            ruby_ep2_eprst_tx(mac);
-+            ruby_seq("EPRST_PRE", ruby_rd32(mac, TX1CSR0_OFF), 0);
++            ruby_seq("EPRST_PRE", ruby_cfgrst_mode, ruby_cfg_seen);
 +        }
          ruby_ep0_ack(mac, t, key, wlen);
          /*
