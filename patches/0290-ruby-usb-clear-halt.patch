@@ -1,0 +1,163 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 18654fd..4bc81e8 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -566,6 +566,9 @@ ruby_ep_complete(struct ruby_ep *ep, int status)
+  * Vendor mode (default): single vendor 0xFF interface (0223 shape).
+  */
+ static int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
++static int ruby_clrhalt_mode;       /* 0290: 0 legacy, 1 vendor-light, 2 heavy */
++static int ruby_cfgrst_mode = 1;    /* 0290: 0 none, 1 after ACK, 2 before ACK */
++static volatile uint32_t ruby_ep_ready;
+ /* 0226: real ACM state — EP0 OUT 7B stored, GET returns stored value */
+ static uint8_t ruby_acm_line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
+ static uint16_t ruby_acm_control_state;
+@@ -1383,6 +1386,8 @@ static void ruby_ep0_vendor_cmd(vm_offset_t mac, uint32_t t,
+ static void ruby_cmd_submit(uint32_t seq, const char *line);
+ static void ruby_cmd_tick(vm_offset_t mac);
+ static void ruby_ep2_halt_clear(vm_offset_t mac);
++static void ruby_ep2_eprst_tx(vm_offset_t mac);
++static void ruby_ep1in_halt_clear_light(vm_offset_t mac);
+ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+ static void ruby_ep2_rx_resume(vm_offset_t mac);
+@@ -1449,6 +1454,13 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+         ruby_config = value & 0xff;
+         ruby_cfg_seen = 1;
+         ruby_trace(t, RUBY_TR_CFG, ruby_config, 0, 0, 0);
++        /* 0290: mode 2 pulses EP_RST before the status ACK, i.e. before the
++         * host is told to reset its own IN toggle. */
++        if (ruby_cfgrst_mode == 2 && (ruby_ep2log_on || ruby_acm_cmd) &&
++            !ruby_ep_ready) {
++            ruby_ep2_eprst_tx(mac);
++            ruby_seq("EPRST_PRE", ruby_rd32(mac, TX1CSR0_OFF), 0);
++        }
+         ruby_ep0_ack(mac, t, key, wlen);
+         /*
+          * 0146a: the probe path reads the console over EP0 0x2A, so the
+@@ -1485,7 +1497,16 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+         ruby_ep0_ack(mac, t, key, wlen);
+         return;
+     case 1: /* CLEAR_FEATURE */
+-        if (wlen == 0 && value == 0 && index == 0x82)
++        /* 0290: the ACM bulk IN is EP1 (0x81); this dispatch still checked
++         * the EP2-era 0x82, so host halt clears were ACKed without a toggle
++         * reset.  Defaults keep the old behavior until the arg is set. */
++        if (wlen == 0 && value == 0 &&
++            (index == 0x81 || index == 0x82) && ruby_clrhalt_mode != 0) {
++            if (ruby_clrhalt_mode == 1)
++                ruby_ep1in_halt_clear_light(mac);
++            else
++                ruby_ep2_halt_clear(mac);
++        } else if (wlen == 0 && value == 0 && index == 0x82)
+             ruby_ep2_halt_clear(mac);
+         else if (wlen == 0 && value == 0 && index == 0x02)
+             ruby_ep2_rx_halt_clear(mac);
+@@ -2083,6 +2104,7 @@ static int ruby_txslot = 2;         /* 0288: EP1 IN TX FIFO slot (A/B) */
+ static int ruby_txfifo_en = 1;      /* 0289: per-GPD TX FIFO trace */
+ static uint32_t ruby_txfifo_lines;
+ static uint32_t ruby_flushfifo_cnt;
++static uint32_t ruby_clr81_cnt;
+ 
+ static void
+ ruby_txfifo_log(vm_offset_t mac, const char *kind, uint32_t n)
+@@ -2136,7 +2158,6 @@ static uint32_t ruby_qmu_diag_ms;
+ static uint32_t ruby_inflight;
+ static uint32_t ruby_ep2_host_seen;
+ static volatile uint32_t ruby_tx_busy;
+-static volatile uint32_t ruby_ep_ready;
+ static uint64_t ruby_log_pos;
+ static uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
+ static uint64_t ruby_ring_pa;
+@@ -2761,6 +2782,16 @@ ruby_ep2_recover(vm_offset_t mac)
+         ruby_ep2_stop_spins_last, ruby_ep2_stop_spins_max);
+ }
+ 
++static void
++ruby_ep2_eprst_tx(vm_offset_t mac)
++{
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++    (void)ruby_rd32(mac, EP_RST_OFF);
++    ruby_seq("EPRST_TX", ruby_rd32(mac, TX1CSR0_OFF),
++        ruby_rd32(mac, TX1CSR2_OFF));
++}
++
+ static void
+ ruby_ep2_config(vm_offset_t mac)
+ {
+@@ -2922,12 +2953,11 @@ ruby_ep2_config(vm_offset_t mac)
+      * way to clear the U2 data toggle / U3 SeqN / flow-control state; the
+      * mainline and U-Boot deconfig paths pulse it, and without it a host
+      * reset/reconfigure can leave the IN toggle out of sync.
++     * 0290: mode 0 skips the pulse (vendor parity), mode 2 pulses before the
++     * SET_CONFIGURATION status ACK instead.
+      */
+-    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
+-    ruby_wr32(mac, EP_RST_OFF, 0);
+-    (void)ruby_rd32(mac, EP_RST_OFF);
+-    ruby_seq("EPRST_TX", ruby_rd32(mac, TX1CSR0_OFF),
+-        ruby_rd32(mac, TX1CSR2_OFF));
++    if (ruby_cfgrst_mode == 1)
++        ruby_ep2_eprst_tx(mac);
+     /* 0188: a re-enumeration re-arms EP2; drop the stale ring state. */
+     ruby_ep2_state_reset(mac);
+ 
+@@ -3734,6 +3764,24 @@ ruby_ep2_status_poll(vm_offset_t mac)
+     }
+ }
+ 
++/*
++ * 0290: vendor parity for CLEAR_FEATURE.  The vendor clears the stall bits
++ * and pulses EP_RST (data toggle reset) without flushing the ring or
++ * restarting QMU.
++ */
++static void
++ruby_ep1in_halt_clear_light(vm_offset_t mac)
++{
++    uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
++
++    ruby_wr32(mac, TX1CSR0_OFF,
++        (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
++    ruby_ep2_eprst_tx(mac);
++    ruby_clr81_cnt++;
++    if (ruby_clr81_cnt <= 8 || (ruby_clr81_cnt & 0xffu) == 0)
++        ruby_seq("CLR81", tx0, ruby_rd32(mac, TX1CSR0_OFF));
++}
++
+ static void
+ ruby_ep2_halt_clear(vm_offset_t mac)
+ {
+@@ -5895,6 +5943,8 @@ ruby_usb_probe(void)
+     int lpmmask = 1;
+     int txslot = 2;
+     int txfifo = 1;
++    int clrhalt = 0;
++    int cfgrst = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+@@ -5947,6 +5997,14 @@ ruby_usb_probe(void)
+     ruby_txslot = txslot;
+     PE_parse_boot_argn("ruby_txfifo", &txfifo, sizeof(txfifo));
+     ruby_txfifo_en = (txfifo == 1);
++    PE_parse_boot_argn("ruby_clrhalt", &clrhalt, sizeof(clrhalt));
++    if (clrhalt < 0 || clrhalt > 2)
++        clrhalt = 0;
++    ruby_clrhalt_mode = clrhalt;
++    PE_parse_boot_argn("ruby_cfgrst", &cfgrst, sizeof(cfgrst));
++    if (cfgrst < 0 || cfgrst > 2)
++        cfgrst = 1;
++    ruby_cfgrst_mode = cfgrst;
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5968,6 +6026,8 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0287 lpmmask=%d\n", ruby_lpmmask_en);
+     printf("RUBY USB: 0288 tx_slot=%d\n", ruby_txslot);
+     printf("RUBY USB: 0289 txfifo=%d\n", ruby_txfifo_en);
++    printf("RUBY USB: 0290 clrhalt=%d cfgrst=%d\n",
++        ruby_clrhalt_mode, ruby_cfgrst_mode);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
