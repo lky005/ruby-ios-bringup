@@ -1,0 +1,145 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 890806a..033e775 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -567,7 +567,9 @@ ruby_ep_complete(struct ruby_ep *ep, int status)
+  */
+ static int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
+ static int ruby_clrhalt_mode;       /* 0290: 0 legacy, 1 vendor-light, 2 heavy */
+-static int ruby_cfgrst_mode = 1;    /* 0290: 0 none, 1 after ACK, 2 before ACK */
++static int ruby_cfgrst_mode = 0;    /* 0291: default no config EP_RST */
++static int ruby_qcr0cs_en;          /* 0291: QCR0 |= TX_CS_EN(EP1) */
++static int ruby_qcr1zlp_en;         /* 0291: QCR1 |= TX_ZLP(EP1) */
+ static volatile uint32_t ruby_ep_ready;
+ /* 0226: real ACM state — EP0 OUT 7B stored, GET returns stored value */
+ static uint8_t ruby_acm_line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
+@@ -2116,6 +2118,34 @@ ruby_txfifo_log(vm_offset_t mac, const char *kind, uint32_t n)
+         kind, n, ruby_rd32(mac, TQCPR1_OFF), ruby_rd32(mac, TX1CSR0_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_flushfifo_cnt);
+ }
++
++/*
++ * 0291: single owner for the shared QCR0/QCR1 programming so a later RX
++ * init cannot clear the TX per-EP enables.  Both helpers keep the 0249
++ * default (CS engine off) unless their boot-arg is set.
++ */
++static void
++ruby_qcr0_program(vm_offset_t mac)
++{
++    uint32_t v = 1u;
++
++    if (ruby_qcr0cs_en)
++        v |= (1u << 1);     /* QMU_TX_CS_EN(EP1), vendor qmu_start parity */
++    ruby_wr32(mac, QCR0_OFF, v);
++    ruby_seq("QCR0P", v, ruby_rd32(mac, QCR0_OFF));
++}
++
++static void
++ruby_qcr1_program(vm_offset_t mac)
++{
++    uint32_t v = ruby_rd32(mac, QCR1_OFF) | 0x0006000eu;
++
++    if (ruby_qcr1zlp_en)
++        v |= 0x1u;          /* QMU_TX_ZLP(EP1) */
++    ruby_wr32(mac, QCR1_OFF, v);
++    ruby_seq("QCR1P", v, ruby_rd32(mac, QCR1_OFF));
++}
++
+ static uint32_t ruby_tx_k2_kicks;
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+@@ -2377,8 +2407,8 @@ ruby_ep2_resume(vm_offset_t mac)
+     ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+-    ruby_wr32(mac, QCR0_OFF, 1u);
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
++    ruby_qcr0_program(mac);
++    ruby_qcr1_program(mac);
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
+@@ -2561,8 +2591,8 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+      */
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+-    ruby_wr32(mac, QCR0_OFF, 1u);
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
++    ruby_qcr0_program(mac);
++    ruby_qcr1_program(mac);
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+ 
+@@ -2614,9 +2644,8 @@ ruby_ep2_tx_rebuild(vm_offset_t mac)
+         ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+         ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
+         ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+-        ruby_wr32(mac, QCR0_OFF, 1u);
+-        ruby_wr32(mac, QCR1_OFF,
+-            ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
++        ruby_qcr0_program(mac);
++        ruby_qcr1_program(mac);
+         ruby_wr32(mac, TQERRIESR0_OFF,
+             ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+         ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
+@@ -3013,7 +3042,7 @@ ruby_ep2_config(vm_offset_t mac)
+      */
+     ruby_wr32(mac, QIESR0_OFF,
+         RUBY_QMU_TX_DONE | QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1);
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
++    ruby_qcr1_program(mac);
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)ruby_ring_pa);
+@@ -3943,7 +3972,7 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     /* 0258: vendor RX FIFOADDR=0 (TWRP 0x00090000); 0x40 is not a 512 B unit. */
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+-    ruby_wr32(mac, QCR0_OFF, 1u);
++    ruby_qcr0_program(mac);
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~0x00000007u) | 0x00060000u);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -3991,7 +4020,7 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+-    ruby_wr32(mac, QCR0_OFF, 1u);
++    ruby_qcr0_program(mac);
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~0x00000007u) | 0x00060000u);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -5944,7 +5973,9 @@ ruby_usb_probe(void)
+     int txslot = 2;
+     int txfifo = 1;
+     int clrhalt = 0;
+-    int cfgrst = 1;
++    int cfgrst = 0;
++    int qcr0cs = 0;
++    int qcr1zlp = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+@@ -6003,8 +6034,12 @@ ruby_usb_probe(void)
+     ruby_clrhalt_mode = clrhalt;
+     PE_parse_boot_argn("ruby_cfgrst", &cfgrst, sizeof(cfgrst));
+     if (cfgrst < 0 || cfgrst > 2)
+-        cfgrst = 1;
++        cfgrst = 0;
+     ruby_cfgrst_mode = cfgrst;
++    PE_parse_boot_argn("ruby_qcr0cs", &qcr0cs, sizeof(qcr0cs));
++    ruby_qcr0cs_en = (qcr0cs == 1);
++    PE_parse_boot_argn("ruby_qcr1zlp", &qcr1zlp, sizeof(qcr1zlp));
++    ruby_qcr1zlp_en = (qcr1zlp == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -6028,6 +6063,8 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0289 txfifo=%d\n", ruby_txfifo_en);
+     printf("RUBY USB: 0290 clrhalt=%d cfgrst=%d\n",
+         ruby_clrhalt_mode, ruby_cfgrst_mode);
++    printf("RUBY USB: 0291 qcr0cs=%d qcr1zlp=%d cfgrst=%d\n",
++        ruby_qcr0cs_en, ruby_qcr1zlp_en, ruby_cfgrst_mode);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
