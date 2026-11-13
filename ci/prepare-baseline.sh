@@ -270,6 +270,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0292-ruby-usb-txpio.patch" \
     "$ROOT/patches/0293-ruby-usb-audit-switches.patch" \
     "$ROOT/patches/0295-ruby-usb-pio-qstart.patch" \
+    "$ROOT/patches/0296-ruby-usb-pio-qstart-post.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
