@@ -1,0 +1,423 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index b302d4e..b5376cf 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -472,6 +472,8 @@ static void ruby_func_register(const char *name,
+ #endif
+ static struct ruby_req ruby_xfer_reqs[RUBY_GPD_NUM];
+ static lck_grp_t ruby_usb_lck_grp;
++static lck_spin_t ruby_qmu_lock;
++static int ruby_qmu_lock_inited;
+ static volatile uint32_t ruby_usb_lck_init;
+ 
+ static void
+@@ -481,6 +483,9 @@ ruby_usb_lck_ensure(void)
+         lck_grp_init(&ruby_usb_lck_grp, "ruby_usb", LCK_GRP_ATTR_NULL);
+         for (uint32_t i = 0; i < RUBY_EP_MAX; i++)
+             lck_spin_init(&ruby_eps[i].q_lock, &ruby_usb_lck_grp, LCK_ATTR_NULL);
++        /* 0294: optional QMU/GPD lock (ruby_lock=2). */
++        lck_spin_init(&ruby_qmu_lock, &ruby_usb_lck_grp, LCK_ATTR_NULL);
++        ruby_qmu_lock_inited = 1;
+         __atomic_store_n(&ruby_usb_lck_init, 1, __ATOMIC_RELEASE);
+     }
+ }
+@@ -583,7 +588,89 @@ static uint32_t ruby_resume_vendor_cnt;
+ static uint32_t ruby_recover_suppressed[3];
+ static uint32_t ruby_txpio_tail_cnt;
+ static uint32_t ruby_push_start_fail;
++/* 0294: ownership probes, RX watchdog and QMU lock modes.  Everything is
++ * opt-in; the default path is the 0293 data plane unchanged. */
++static int ruby_owner_en;
++static int ruby_scan_off;
++static int ruby_screen_on;
++static int ruby_rxwd_mode;
++static int ruby_lock_mode;
++static volatile uint32_t ruby_crit_depth;
++static volatile uint32_t ruby_reenter_cnt;
++static volatile uint32_t ruby_scan_active;
++static volatile uint32_t ruby_scan_mutate_x;
++static volatile uint32_t ruby_scan_skipped;
++static uint32_t ruby_lock_waits;
++static uint32_t ruby_rxwd_kicks;
++static uint32_t ruby_rxwd_restarts;
++static uint32_t ruby_rx_last_progress_pk;
++static uint32_t ruby_rx_last_progress_ms;
++static uint32_t ruby_rx_seen_traffic;
++static uint32_t ruby_rxwd_last_ms;
++static uint32_t ruby_rxwd_tries;
++static volatile uint32_t ruby_qmu_rxwd_req;
++static volatile uint32_t ruby_qmu_rx_restart_req;
+ static volatile uint32_t ruby_ep_ready;
++/* 0294: ownership probes and optional QMU critical section.  The probes
++ * are counters only; ruby_lock=1/2 adds interrupts-off or a spinlock at
++ * the GPD publish / ring reset sites (never across delay()). */
++static void
++ruby_crit_enter(void)
++{
++    uint32_t prev = __sync_fetch_and_add(&ruby_crit_depth, 1);
++
++    if (prev != 0)
++        __sync_fetch_and_add(&ruby_reenter_cnt, 1);
++    if (ruby_scan_active)
++        __sync_fetch_and_add(&ruby_scan_mutate_x, 1);
++}
++
++static void
++ruby_crit_exit(void)
++{
++    __sync_fetch_and_sub(&ruby_crit_depth, 1);
++}
++
++static void
++ruby_scan_enter(void)
++{
++    if (ruby_crit_depth)
++        __sync_fetch_and_add(&ruby_scan_mutate_x, 1);
++    __sync_lock_test_and_set(&ruby_scan_active, 1);
++}
++
++static void
++ruby_scan_exit(void)
++{
++    __sync_lock_release(&ruby_scan_active);
++}
++
++static boolean_t
++ruby_qmu_enter(void)
++{
++    boolean_t irq = FALSE;
++
++    if (ruby_lock_mode == 1)
++        irq = ml_set_interrupts_enabled(FALSE);
++    else if (ruby_lock_mode == 2 && ruby_qmu_lock_inited) {
++        lck_spin_lock(&ruby_qmu_lock);
++        ruby_lock_waits++;
++    }
++    if (ruby_owner_en)
++        ruby_crit_enter();
++    return irq;
++}
++
++static void
++ruby_qmu_exit(boolean_t irq)
++{
++    if (ruby_owner_en)
++        ruby_crit_exit();
++    if (ruby_lock_mode == 1)
++        ml_set_interrupts_enabled(irq);
++    else if (ruby_lock_mode == 2 && ruby_qmu_lock_inited)
++        lck_spin_unlock(&ruby_qmu_lock);
++}
+ /* 0226: real ACM state — EP0 OUT 7B stored, GET returns stored value */
+ static uint8_t ruby_acm_line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
+ static uint16_t ruby_acm_control_state;
+@@ -1390,6 +1477,8 @@ static void ruby_ep0_vendor_txprobe(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
+ static void ruby_ep0_vendor_audit(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
++static void ruby_ep0_vendor_owner(vm_offset_t mac, uint32_t t,
++    uint32_t wlen);
+ static void ruby_ep0_vendor_log_info(vm_offset_t mac, uint32_t t,
+     uint32_t wlen);
+ static void ruby_ep0_vendor_log(vm_offset_t mac, uint32_t t, uint32_t value,
+@@ -1411,6 +1500,7 @@ static void ruby_ep2_rx_config(vm_offset_t mac);
+ static void ruby_ep2_rx_resume(vm_offset_t mac);
+ static void ruby_ep2_rx_poll(vm_offset_t mac);
+ static void ruby_tx_recover_poll(vm_offset_t mac);
++static void ruby_rxwd_act(vm_offset_t mac);
+ static void ruby_rx_mtr_add(uint16_t ev, uint16_t a, uint32_t b, uint32_t c);
+ static void ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters);
+ static void ruby_ep2_rx_halt_clear(vm_offset_t mac);
+@@ -1663,6 +1753,8 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_vendor_txprobe(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x30)
+         ruby_ep0_vendor_audit(mac, t, len);
++    else if (st[0] == 0xc0 && st[1] == 0x31)
++        ruby_ep0_vendor_owner(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x2a)
+         ruby_ep0_vendor_log(mac, t, value, index, len);
+     else if (st[0] == 0xc0 && st[1] == 0x2b)
+@@ -1673,6 +1765,12 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_vendor_probe_write(mac, t, value, index, len);
+     else if (st[0] == 0x40 && st[1] == 0x2e)
+         ruby_ep0_vendor_cmd(mac, t, value, index, len);
++    else if (st[0] == 0x40 && st[1] == 0x2f && ruby_rxwd_mode != 0) {
++        /* 0294: host-triggered RX stop/reset for the stall ladder. */
++        ruby_qmu_rx_restart_req = 1;
++        ruby_usb_irq_kick();
++        ruby_ep0_ack(mac, t, key, len);
++    }
+     else if (st[0] == 0x21 && st[1] == 0x20) {
+         /* 0230: ACK the SETUP without DATAEND so the 7B OUT data stage can
+          * arrive -- same 0131b rule as vendor probe_write/cmd.  Without it
+@@ -2553,6 +2651,7 @@ static void
+ ruby_ep2_ring_reset(vm_offset_t mac)
+ {
+     uint32_t i;
++    boolean_t irq = ruby_qmu_enter();
+ 
+     (void)mac;
+     ruby_inflight = 0;
+@@ -2574,6 +2673,7 @@ ruby_ep2_ring_reset(vm_offset_t mac)
+     }
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++    ruby_qmu_exit(irq);
+ }
+ 
+ /*
+@@ -3514,6 +3614,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+     uint8_t *g, *buf;
+     uint32_t n, queued = 0, freed = 0;
+     uint32_t actual_len = 0;
++    boolean_t irq;
+     /* 0217: obs-only backpressure counters (see ruby_0x21 diag) */
+ 
+     if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_acm_cmd))
+@@ -3845,6 +3946,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+             }
+         }
+ 
++        irq = ruby_qmu_enter();
+         np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
+         /* 0214: vendor prepare_tx_gpd step 4 - clear next slot's HWO
+          * before publishing current. QMU follows next_gpd; at the
+@@ -3897,6 +3999,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+         ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+         ruby_inflight++;
+         hwo |= 1ull << enq;
++        ruby_qmu_exit(irq);
+         queued++;
+         ruby_tx_mtr_add(RUBY_MTR_TX_PUSH, (uint16_t)enq,
+             actual_len, (uint32_t)log_pa);
+@@ -4108,6 +4211,7 @@ ruby_ep2_rx_arm(uint32_t i)
+     uint64_t next = ruby_rx_gpd_pa[(i + 1u) % RUBY_RX_GPD_NUM];
+     uint64_t buf = ruby_rx_buf_pa[i];
+     uint32_t k;
++    boolean_t irq = ruby_qmu_enter();
+ 
+     for (k = 0; k < 16; k++)
+         g[k] = 0;
+@@ -4130,6 +4234,12 @@ ruby_ep2_rx_arm(uint32_t i)
+     /* 0263: publish the next GPD the QMU reads after this one. */
+     ruby_dc_civac(ruby_rx_gpd_ring +
+         ((i + 1u) % RUBY_RX_GPD_NUM) * 16, 16);
++    ruby_qmu_exit(irq);
++    /* 0294 ruby_rxwd=2: RESUME after every re-arm. */
++    if (ruby_rxwd_mode == 2) {
++        ruby_rxwd_kicks++;
++        ruby_ep2_rx_resume(ruby_mac_base);
++    }
+ }
+ 
+ static void
+@@ -5144,6 +5254,15 @@ ruby_usb_irq_service_work(void)
+         else
+             ruby_recover_suppressed[2]++;
+     }
++    if (ruby_qmu_rx_restart_req) {
++        ruby_qmu_rx_restart_req = 0;
++        printf("RUBY USB: 0294 host rx restart\n");
++        ruby_ep2_rx_reset(mac, 0);
++    }
++    if (ruby_qmu_rxwd_req) {
++        ruby_qmu_rxwd_req = 0;
++        ruby_rxwd_act(mac);
++    }
+     if (ruby_qmu_stall_req) {
+         ruby_qmu_stall_req = 0;
+         ruby_ep2_status_poll(mac);
+@@ -5195,10 +5314,74 @@ ruby_usb_irq_lat_sample(uint32_t us)
+  * events cannot see -- log text arriving while the ring is empty and the
+  * queue idle (no GPD to complete, TXQ_EMPTY already consumed).
+  */
++static void
++ruby_rxwd_act(vm_offset_t mac)
++{
++    uint32_t rq = ruby_rd32(mac, RQCSR1_OFF);
++
++    if (ruby_rxwd_mode == 1) {
++        if (!(rq & QMU_Q_ACTIVE)) {
++            ruby_rxwd_kicks++;
++            ruby_ep2_rx_resume(mac);
++        }
++        return;
++    }
++    if (ruby_rxwd_mode != 3)
++        return;
++    if ((uint32_t)(ruby_ms - ruby_rxwd_last_ms) < 1000 ||
++        ruby_rxwd_tries >= 5)
++        return;
++    ruby_rxwd_last_ms = ruby_ms;
++    ruby_rxwd_tries++;
++    ruby_rxwd_restarts++;
++    printf("RUBY USB: 0294 rxwd restart n=%u rxpk=%u deq=%u rq=%08x\n",
++        ruby_rxwd_restarts, ruby_rx_packets, ruby_rx_deq,
++        ruby_rd32(mac, RQCSR1_OFF));
++    ruby_ep2_rx_reset(mac, 0);
++}
++
++/*
++ * 0294: RX watchdog.  Traffic-gated (200 ms of no new packet), never on
++ * an idle endpoint; mode 3 is rate-limited to 1 s and 5 tries.
++ */
++static void
++ruby_rx_watchdog(vm_offset_t mac)
++{
++    if (!ruby_rx_ready || ruby_rxwd_mode == 0)
++        return;
++    if (ruby_rx_packets != ruby_rx_last_progress_pk) {
++        ruby_rx_last_progress_pk = ruby_rx_packets;
++        ruby_rx_last_progress_ms = ruby_ms;
++        ruby_rx_seen_traffic = 1;
++        ruby_rxwd_tries = 0;
++        return;
++    }
++    if (!ruby_rx_seen_traffic ||
++        (uint32_t)(ruby_ms - ruby_rx_last_progress_ms) < 200)
++        return;
++    if (ruby_qmu_irq_mode) {
++        static uint32_t req_ms;
++
++        if ((uint32_t)(ruby_ms - req_ms) >= 200) {
++            req_ms = ruby_ms;
++            ruby_qmu_rxwd_req = 1;
++            ruby_usb_irq_kick();
++        }
++        return;
++    }
++    ruby_rxwd_act(mac);
++}
++
+ static void
+ ruby_ep2_tick_assist(vm_offset_t mac)
+ {
+     ruby_tx_recover_poll(mac);
++    if (ruby_qmu_rx_restart_req && !ruby_qmu_irq_mode) {
++        ruby_qmu_rx_restart_req = 0;
++        printf("RUBY USB: 0294 host rx restart\n");
++        ruby_ep2_rx_reset(mac, 0);
++    }
++    ruby_rx_watchdog(mac);
+     /* 0266: read-only RX ring desync detector (cur vs driver deq). */
+     if (ruby_rx_ready && ruby_rx_packets > 0 &&
+         ruby_rx_desync_cnt < 5) {
+@@ -5358,12 +5541,21 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
+         ruby_rd32(mac, FRAME_NUM_OFF) & 0x7ffu,
+         ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
+-    /* 0260: read-only RX stall snapshot folded into the 5 s line. */
++    /* 0260: read-only RX stall snapshot folded into the 5 s line. 0294:
++     * ruby_scan_off=1 skips the civac+scan (H2 single variable). */
+     if (ruby_rx_ready) {
+-        ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
+-        for (ri = 0; ri < RUBY_RX_GPD_NUM; ri++)
+-            if (ruby_rx_gpd_ring[ri * 16] & 1u)
+-                rxhwo |= 1u << ri;
++        if (ruby_scan_off) {
++            ruby_scan_skipped++;
++        } else {
++            if (ruby_owner_en)
++                ruby_scan_enter();
++            ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++            for (ri = 0; ri < RUBY_RX_GPD_NUM; ri++)
++                if (ruby_rx_gpd_ring[ri * 16] & 1u)
++                    rxhwo |= 1u << ri;
++            if (ruby_owner_en)
++                ruby_scan_exit();
++        }
+         rxcur = ruby_ep2_rx_cur_slot(mac);
+     }
+     /* 0233: data-plane state for the ACM echo debug round. */
+@@ -5396,6 +5588,16 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
++    /* 0294 ruby_screen=1: repeat the register tail on its own line so the
++     * console truncation at qcr2 cannot hide tq/rq. */
++    if (ruby_screen_on)
++        printf("RUBY USB ACM2: tqerr=%08x tcsr=%08x qcr0=%08x qcr1=%08x "
++            "qcr2=%08x qcr3=%08x tqcpr=%08x rqcpr=%08x tq=%08x rq=%08x\n",
++            ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, TX1CSR0_OFF),
++            ruby_rd32(mac, QCR0_OFF), ruby_rd32(mac, QCR1_OFF),
++            ruby_rd32(mac, QCR2_OFF), ruby_rd32(mac, QCR3_OFF),
++            ruby_rd32(mac, TQCPR1_OFF), ruby_rd32(mac, RQCPR1_OFF),
++            ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
+     /* 0271: short register line so the console does not truncate it; the
+      * values are diffed against the vendor oracle in docs/106 20.3. */
+     printf("RUBY USB REG: busperf=%08x eprst=%08x qcr3=%08x "
+@@ -5541,6 +5743,31 @@ ruby_ep0_vendor_audit(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     ruby_ep0_send(mac, t, 0xc030, (const uint8_t *)v, sizeof(v), wlen);
+ }
+ 
++/* 0294: ownership / RX watchdog counters (16 words, 0xC0/0x31). */
++static void
++ruby_ep0_vendor_owner(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    uint32_t v[16];
++
++    v[0] = 0x34323930u;         /* "0294" */
++    v[1] = ruby_crit_depth;
++    v[2] = ruby_reenter_cnt;
++    v[3] = ruby_scan_active;
++    v[4] = ruby_scan_mutate_x;
++    v[5] = ruby_scan_skipped;
++    v[6] = ruby_lock_waits;
++    v[7] = ruby_rxwd_kicks;
++    v[8] = ruby_rxwd_restarts;
++    v[9] = ruby_rx_last_progress_pk;
++    v[10] = (uint32_t)(ruby_ms - ruby_rx_last_progress_ms);
++    v[11] = ruby_rd32(mac, RQCSR1_OFF);
++    v[12] = ruby_rd32(mac, RQCPR1_OFF);
++    v[13] = ruby_ep2_rx_cur_slot(mac);
++    v[14] = ruby_rx_packets;
++    v[15] = ruby_rx_deq;
++    ruby_ep0_send(mac, t, 0xc031, (const uint8_t *)v, sizeof(v), wlen);
++}
++
+ /* Vendor IN request 0xC0/0x22: read-only queue diagnostics. */
+ static void
+ ruby_ep0_vendor_diag(vm_offset_t mac, uint32_t t, uint32_t wlen)
+@@ -6230,6 +6457,11 @@ ruby_usb_probe(void)
+     int txpiotail = 0;
+     int lpmfc = 0;
+     int devrstpre = 0;
++    int owner = 0;
++    int scanoff = 0;
++    int screen = 0;
++    int rxwd = 0;
++    int lock = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+@@ -6308,6 +6540,20 @@ ruby_usb_probe(void)
+     ruby_lpm_fc_en = (lpmfc == 1);
+     PE_parse_boot_argn("ruby_devrst_pre", &devrstpre, sizeof(devrstpre));
+     ruby_devrst_pre_en = (devrstpre == 1);
++    PE_parse_boot_argn("ruby_owner", &owner, sizeof(owner));
++    ruby_owner_en = (owner == 1);
++    PE_parse_boot_argn("ruby_scan_off", &scanoff, sizeof(scanoff));
++    ruby_scan_off = (scanoff == 1);
++    PE_parse_boot_argn("ruby_screen", &screen, sizeof(screen));
++    ruby_screen_on = (screen == 1);
++    PE_parse_boot_argn("ruby_rxwd", &rxwd, sizeof(rxwd));
++    if (rxwd < 0 || rxwd > 3)
++        rxwd = 0;
++    ruby_rxwd_mode = rxwd;
++    PE_parse_boot_argn("ruby_lock", &lock, sizeof(lock));
++    if (lock < 0 || lock > 2)
++        lock = 0;
++    ruby_lock_mode = lock;
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -6338,6 +6584,9 @@ ruby_usb_probe(void)
+         ruby_txpiotail_en, ruby_lpm_fc_en, ruby_devrst_pre_en);
+     printf("RUBY USB: 0293b clrhalt=%d txeprst=%d txpio=%d\n",
+         ruby_clrhalt_mode, ruby_txeprst_en, ruby_txpio_en);
++    printf("RUBY USB: 0294 owner=%d scan_off=%d screen=%d rxwd=%d "
++        "lock=%d\n", ruby_owner_en, ruby_scan_off, ruby_screen_on,
++        ruby_rxwd_mode, ruby_lock_mode);
+     if (ruby_txpio_en && !ruby_acm_cmd)
+         printf("RUBY USB: 0292 txpio needs rubyusbcmd=1\n");
+     printf("RUBY USB: probe writes %s\n",
