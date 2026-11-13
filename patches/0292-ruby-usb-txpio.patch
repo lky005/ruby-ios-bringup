@@ -1,0 +1,221 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 91ff30e..7866d22 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1938,6 +1938,13 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define TX_SENTSTALL    (1u << 22)
+ #define TX_FLUSHFIFO    (1u << 20)
+ #define TX_FIFOEMPTY    (1u << 24)
++#define TX_FIFOFULL     (1u << 25)
++#define TX_TXPKTRDY     (1u << 16)
++#define TX_DMAREQEN     (1u << 29)
++#define TX_MPSZ_MSK     0x7ffu
++/* 0292: CPU PIO window for EP1 IN (U3D_FIFO0 + 0x10, auto-increment). */
++#define RUBY_TX_FIFO_OFF 0x0310
++#define RUBY_TX_MPS     512u
+ 
+ #define QMU_Q_START     1u
+ #define QMU_Q_STOP      4u
+@@ -2105,6 +2112,10 @@ static int ruby_txfifo_en = 1;      /* 0289: per-GPD TX FIFO trace */
+ static uint32_t ruby_txfifo_lines;
+ static uint32_t ruby_flushfifo_cnt;
+ static uint32_t ruby_clr81_cnt;
++static int ruby_txpio_en;           /* 0292: CPU PIO TX, no QMU TX */
++static uint32_t ruby_txpio_pkts;
++static uint32_t ruby_txpio_bytes;
++static uint32_t ruby_txpio_timeouts;
+ 
+ static void
+ ruby_txfifo_log(vm_offset_t mac, const char *kind, uint32_t n)
+@@ -2351,6 +2362,9 @@ ruby_ep2_resume(vm_offset_t mac)
+     static uint32_t restart_ms;
+     uint64_t pa;
+ 
++    if (ruby_txpio_en)
++        return;
++
+     ruby_tx_kick_cnt++;
+     ruby_tx_kick_src = RUBY_TX_SRC_STALL;
+     ruby_tx_kick_ms = ruby_ms;
+@@ -2538,6 +2552,8 @@ ruby_ep2_state_reset(vm_offset_t mac)
+ static int
+ ruby_ep2_qmu_start(vm_offset_t mac)
+ {
++    if (ruby_txpio_en)
++        return 0;
+     if (!ruby_ring_pa) {
+         ruby_ep2_start_failures++;
+         return -1;
+@@ -2599,6 +2615,8 @@ ruby_ep2_tx_rebuild(vm_offset_t mac)
+     struct ruby_ep *txep;
+     uint64_t pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
+ 
++    if (ruby_txpio_en)
++        return;
+     if (ruby_ep2_qmu_stop(mac) != 0) {
+         printf("RUBY USB TXRESET stop timeout\n");
+         return;
+@@ -2747,6 +2765,8 @@ ruby_ep2_recover(vm_offset_t mac)
+ {
+     uint32_t q0, q1, err, tqcsr, tx0;
+ 
++    if (ruby_txpio_en)
++        return;
+     if ((int32_t)(ruby_ms - ruby_ep2_recover_hold_until) < 0) {
+         ruby_ep2_recover_skipped++;
+         return;
+@@ -2961,8 +2981,17 @@ ruby_ep2_config(vm_offset_t mac)
+     /* 0188: a re-enumeration re-arms EP2; drop the stale ring state. */
+     ruby_ep2_state_reset(mac);
+ 
+-    /* 0142: same 512 MPS on the reset/rearm path. */
+-    ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
++    /*
++     * 0142: same 512 MPS on the reset/rearm path.
++     * 0292: ruby_txpio=1 keeps TX_DMAREQEN clear and flushes the FIFO
++     * once; the CPU feeds the FIFO and rings TXPKTRDY per packet.
++     */
++    if (ruby_txpio_en) {
++        ruby_wr32(mac, TX1CSR0_OFF, RUBY_TX_MPS | TX_FLUSHFIFO);
++        ruby_wr32(mac, TX1CSR0_OFF, RUBY_TX_MPS);
++    } else {
++        ruby_wr32(mac, TX1CSR0_OFF, RUBY_TX_MPS | TX_DMAREQEN);
++    }
+     /*
+      * P9 runs the same bulk endpoint with TX_SLOT(2); 0102 changed this to
+      * slot 0 and never restored it.  Bulk type is 0, so only the slot field
+@@ -3014,6 +3043,14 @@ ruby_ep2_config(vm_offset_t mac)
+     ruby_wr32(mac, QIESR0_OFF,
+         RUBY_QMU_TX_DONE | QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1);
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
++    if (ruby_txpio_en) {
++        /* 0292: no QMU TX start; RX QMU above/below is unchanged. */
++        ruby_ep_ready = 1;
++        ruby_seq("TXCFG_PIO", ruby_ep_ready, RUBY_TX_FIFO_OFF);
++        printf("RUBY USB: 0292 txpio=1 fifo=0x%x mps=%u (QMU TX off)\n",
++            RUBY_TX_FIFO_OFF, RUBY_TX_MPS);
++        return;
++    }
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)ruby_ring_pa);
+@@ -3250,6 +3287,81 @@ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
+     return n;
+ }
+ 
++/*
++ * 0292: CPU PIO TX for EP1 IN.  The FIFO window auto-increments, so every
++ * access uses the same address; 4/2/1-byte stores cover any length.  When
++ * ruby_txpio=1 the TX QMU is never started.
++ */
++static void
++ruby_txpio_send(vm_offset_t mac, const uint8_t *buf, uint32_t len)
++{
++    uint32_t off = 0;
++
++    while (off < len) {
++        uint32_t chunk = len - off;
++        uint32_t i = 0;
++        uint32_t spins, v;
++
++        if (chunk > RUBY_TX_MPS)
++            chunk = RUBY_TX_MPS;
++        while (i + 4u <= chunk) {
++            v = (uint32_t)buf[off + i] |
++                ((uint32_t)buf[off + i + 1u] << 8) |
++                ((uint32_t)buf[off + i + 2u] << 16) |
++                ((uint32_t)buf[off + i + 3u] << 24);
++            *(volatile uint32_t *)(mac + RUBY_TX_FIFO_OFF) = v;
++            i += 4u;
++        }
++        if (chunk - i >= 2u) {
++            *(volatile uint16_t *)(mac + RUBY_TX_FIFO_OFF) =
++                (uint16_t)((uint32_t)buf[off + i] |
++                ((uint32_t)buf[off + i + 1u] << 8));
++            i += 2u;
++        }
++        if (i < chunk)
++            *(volatile uint8_t *)(mac + RUBY_TX_FIFO_OFF) = buf[off + i];
++        ruby_dma_mb();
++        v = ruby_rd32(mac, TX1CSR0_OFF);
++        v &= ~(TX_DMAREQEN | TX_MPSZ_MSK);
++        v |= RUBY_TX_MPS | TX_TXPKTRDY;
++        ruby_wr32(mac, TX1CSR0_OFF, v);
++        /*
++         * TXPKTRDY self-clears when the MAC accepts the packet; FIFOFULL
++         * clears when the packet is fetched.  Bounded wait, then move on.
++         */
++        spins = 0;
++        while (spins++ < 20000u) {
++            v = ruby_rd32(mac, TX1CSR0_OFF);
++            if (!(v & TX_TXPKTRDY) && !(v & TX_FIFOFULL))
++                break;
++        }
++        if (spins > 20000u) {
++            ruby_txpio_timeouts++;
++            if (ruby_txpio_timeouts <= 4 ||
++                (ruby_txpio_timeouts & 0x3fu) == 0)
++                printf("RUBY USB: 0292 txpio timeout n=%u tx0=%08x "
++                    "len=%u\n", ruby_txpio_timeouts,
++                    ruby_rd32(mac, TX1CSR0_OFF), chunk);
++        }
++        ruby_txpio_pkts++;
++        ruby_txpio_bytes += chunk;
++        off += chunk;
++    }
++}
++
++static void
++ruby_txpio_pump(vm_offset_t mac)
++{
++    uint32_t n;
++
++    if (!ruby_acm_cmd || !ruby_bulk_buf[0])
++        return;
++    n = ruby_acm_echo_dequeue(ruby_bulk_buf[0], RUBY_TX_MPS);
++    if (!n)
++        return;
++    ruby_txpio_send(mac, ruby_bulk_buf[0], n);
++}
++
+ /*
+  * 0245: forced STOP + full re-program.  RESUME is a no-op while the
+  * readback still claims ACTIVE (console: act == kick, inf stuck), so a
+@@ -3304,6 +3416,10 @@ ruby_ep2_push_log(vm_offset_t mac)
+     if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_acm_cmd))
+         return;
+     ruby_push_tries++;
++    if (ruby_txpio_en) {
++        ruby_txpio_pump(mac);
++        return;
++    }
+ 
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+     q1 = ruby_rd32(mac, QISAR1_OFF);
+@@ -5945,6 +6061,7 @@ ruby_usb_probe(void)
+     int txfifo = 1;
+     int clrhalt = 0;
+     int cfgrst = 0;
++    int txpio = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+@@ -6005,6 +6122,8 @@ ruby_usb_probe(void)
+     if (cfgrst < 0 || cfgrst > 2)
+         cfgrst = 0;
+     ruby_cfgrst_mode = cfgrst;
++    PE_parse_boot_argn("ruby_txpio", &txpio, sizeof(txpio));
++    ruby_txpio_en = (txpio == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -6028,6 +6147,9 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0289 txfifo=%d\n", ruby_txfifo_en);
+     printf("RUBY USB: 0290 clrhalt=%d cfgrst=%d\n",
+         ruby_clrhalt_mode, ruby_cfgrst_mode);
++    printf("RUBY USB: 0292 txpio=%d\n", ruby_txpio_en);
++    if (ruby_txpio_en && !ruby_acm_cmd)
++        printf("RUBY USB: 0292 txpio needs rubyusbcmd=1\n");
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

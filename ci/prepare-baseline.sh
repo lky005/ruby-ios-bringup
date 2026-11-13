@@ -267,6 +267,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0289-ruby-usb-txfifo-trace.patch" \
     "$ROOT/patches/0290-ruby-usb-clear-halt.patch" \
     "$ROOT/patches/0291-ruby-usb-cfgrst-default.patch" \
+    "$ROOT/patches/0292-ruby-usb-txpio.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

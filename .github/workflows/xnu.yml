@@ -1,4 +1,4 @@
-name: xnu-0291
+name: xnu-0292
 
 # Builds the ruby kernel without vendoring the upstream tree.
 # ci/prepare-baseline.sh takes a content-pinned 82-file baseline (private
@@ -22,13 +22,13 @@ on:
         default: "16.0"
       hash_config:
         description: config carrying the expected kernel hash (empty expectation = record only)
-        default: "config/0291.env"
+        default: "config/0292.env"
       skip_patches:
         description: patch numbers to drop (prefix match, e.g. 0144) for an older line
         default: ""
       patchset_sha256:
         description: expected patchset hash; must match the patch set actually built
-        default: "4a33b190049d8753c2bfdec7694796cf9d8cba2041dd01109d63201503d6a48c"
+        default: "a126f39ae630cef67a9a9c7fb9c64c00428d63f71cc19f30851a38c281fbca83"
       kernel_config:
         description: RELEASE / DEVELOPMENT / DEBUG
         default: DEVELOPMENT
@@ -59,14 +59,14 @@ env:
   # BASELINE_SSH_KEY. The public pin is the manifest root, not a URL.
   BASELINE_MANIFEST_SHA256: 829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910
   BASELINE_FILES: "82"
-  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || '4a33b190049d8753c2bfdec7694796cf9d8cba2041dd01109d63201503d6a48c' }}
+  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || 'a126f39ae630cef67a9a9c7fb9c64c00428d63f71cc19f30851a38c281fbca83' }}
   SKIP_PATCHES: ${{ inputs.skip_patches || '' }}
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   RUNNER_IMAGE: ${{ inputs.runner || 'macos-15' }}
   XCODE_VERSION: ${{ inputs.xcode_version || '16.0' }}
-  HASH_CONFIG: ${{ inputs.hash_config || 'config/0291.env' }}
+  HASH_CONFIG: ${{ inputs.hash_config || 'config/0292.env' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
   # ccache: xnu is ~2000 compiles; a patch usually changes a few of them
@@ -157,7 +157,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0291.env', '.github/workflows/xnu.yml') }}
+          key: ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('ci/**', 'patches/**', 'config/0292.env', '.github/workflows/xnu.yml') }}
           restore-keys: |
             ccache-${{ env.XCODE_VERSION }}-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
 
