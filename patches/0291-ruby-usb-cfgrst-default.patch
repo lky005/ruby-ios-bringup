@@ -1,0 +1,31 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 890806a..91ff30e 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -567,7 +567,7 @@ ruby_ep_complete(struct ruby_ep *ep, int status)
+  */
+ static int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
+ static int ruby_clrhalt_mode;       /* 0290: 0 legacy, 1 vendor-light, 2 heavy */
+-static int ruby_cfgrst_mode = 1;    /* 0290: 0 none, 1 after ACK, 2 before ACK */
++static int ruby_cfgrst_mode = 0;    /* 0291: default no config EP_RST */
+ static volatile uint32_t ruby_ep_ready;
+ /* 0226: real ACM state — EP0 OUT 7B stored, GET returns stored value */
+ static uint8_t ruby_acm_line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
+@@ -5944,7 +5944,7 @@ ruby_usb_probe(void)
+     int txslot = 2;
+     int txfifo = 1;
+     int clrhalt = 0;
+-    int cfgrst = 1;
++    int cfgrst = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+@@ -6003,7 +6003,7 @@ ruby_usb_probe(void)
+     ruby_clrhalt_mode = clrhalt;
+     PE_parse_boot_argn("ruby_cfgrst", &cfgrst, sizeof(cfgrst));
+     if (cfgrst < 0 || cfgrst > 2)
+-        cfgrst = 1;
++        cfgrst = 0;
+     ruby_cfgrst_mode = cfgrst;
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
