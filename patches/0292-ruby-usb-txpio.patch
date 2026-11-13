@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
-index 91ff30e..e576e45 100644
+index 91ff30e..bb179c8 100644
 --- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
 @@ -1938,6 +1938,13 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
@@ -104,7 +104,7 @@ index 91ff30e..e576e45 100644
      ruby_ep_ready = 1;
      ruby_seq("TXCFG_OUT", (uint32_t)ruby_ring_pa, ruby_ep_ready);
      printf("RUBY USB: EP2 QMU ring pa=0x%llx gpd[0]=0x%llx gpd[%u]=0x%llx "
-@@ -3250,6 +3292,81 @@ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
+@@ -3250,6 +3292,102 @@ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
      return n;
  }
  
@@ -125,6 +125,27 @@ index 91ff30e..e576e45 100644
 +
 +        if (chunk > RUBY_TX_MPS)
 +            chunk = RUBY_TX_MPS;
++        /*
++         * 0292: the verified sequence clears TX_DMAREQEN and waits for the
++         * previous packet to leave the FIFO before the CPU writes it.
++         */
++        v = ruby_rd32(mac, TX1CSR0_OFF);
++        v &= ~(TX_DMAREQEN | TX_MPSZ_MSK);
++        v |= RUBY_TX_MPS;
++        ruby_wr32(mac, TX1CSR0_OFF, v);
++        spins = 0;
++        while ((ruby_rd32(mac, TX1CSR0_OFF) & TX_FIFOFULL) &&
++            spins++ < 20000u)
++            ;
++        if (spins > 20000u) {
++            ruby_txpio_timeouts++;
++            if (ruby_txpio_timeouts <= 4 ||
++                (ruby_txpio_timeouts & 0x3fu) == 0)
++                printf("RUBY USB: 0292 txpio busy n=%u tx0=%08x\n",
++                    ruby_txpio_timeouts, ruby_rd32(mac, TX1CSR0_OFF));
++            break;
++        }
++        ruby_dma_mb();
 +        while (i + 4u <= chunk) {
 +            v = (uint32_t)buf[off + i] |
 +                ((uint32_t)buf[off + i + 1u] << 8) |
@@ -186,7 +207,7 @@ index 91ff30e..e576e45 100644
  /*
   * 0245: forced STOP + full re-program.  RESUME is a no-op while the
   * readback still claims ACTIVE (console: act == kick, inf stuck), so a
-@@ -3304,6 +3421,10 @@ ruby_ep2_push_log(vm_offset_t mac)
+@@ -3304,6 +3442,10 @@ ruby_ep2_push_log(vm_offset_t mac)
      if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_acm_cmd))
          return;
      ruby_push_tries++;
@@ -197,7 +218,7 @@ index 91ff30e..e576e45 100644
  
      q0 = ruby_rd32(mac, QISAR0_OFF);
      q1 = ruby_rd32(mac, QISAR1_OFF);
-@@ -5945,6 +6066,7 @@ ruby_usb_probe(void)
+@@ -5945,6 +6087,7 @@ ruby_usb_probe(void)
      int txfifo = 1;
      int clrhalt = 0;
      int cfgrst = 0;
@@ -205,7 +226,7 @@ index 91ff30e..e576e45 100644
      vm_offset_t ippc, mac, phy, gpio, ifrao;
      uint32_t c0, c2, u3, u2, rst;
      uint32_t s1, s2, v, off;
-@@ -6005,6 +6127,8 @@ ruby_usb_probe(void)
+@@ -6005,6 +6148,8 @@ ruby_usb_probe(void)
      if (cfgrst < 0 || cfgrst > 2)
          cfgrst = 0;
      ruby_cfgrst_mode = cfgrst;
@@ -214,7 +235,7 @@ index 91ff30e..e576e45 100644
      ruby_probe_enabled = (probe == 1);
      ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
      printf("RUBY USB: 0265 tx probe ready (read-only)\n");
-@@ -6028,6 +6152,9 @@ ruby_usb_probe(void)
+@@ -6028,6 +6173,9 @@ ruby_usb_probe(void)
      printf("RUBY USB: 0289 txfifo=%d\n", ruby_txfifo_en);
      printf("RUBY USB: 0290 clrhalt=%d cfgrst=%d\n",
          ruby_clrhalt_mode, ruby_cfgrst_mode);
