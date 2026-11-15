@@ -1,0 +1,191 @@
+diff --git a/xnu/bsd/dev/ruby_usb.c b/xnu/bsd/dev/ruby_usb.c
+index 45b75d5..e02bbc9 100644
+--- a/xnu/bsd/dev/ruby_usb.c
++++ b/xnu/bsd/dev/ruby_usb.c
+@@ -585,6 +585,8 @@ static uint32_t ruby_txpio_tail_cnt;
+ static uint32_t ruby_txpio_start_cnt;
+ /* 0297: deferred PIO Q_START and write-busy guard. */
+ static int ruby_qstart_ms = 1;
++/* 0299: pure-workloop-Q_START switch (tail skipped, pending still set). */
++static int ruby_qstart_only_en;
+ static volatile uint32_t ruby_txpio_qstart_pending;
+ static volatile uint32_t ruby_txpio_write_busy;
+ static uint32_t ruby_txpio_qstart_due_ms;
+@@ -2064,9 +2066,19 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define EP_RST_RX1_BIT      (1u << 1)  /* EP1 OUT = our RX endpoint */
+ #define EP_RST_TX1_BIT      (1u << 17)  /* 0211: EP_RST(in, 1) = BIT(16) << 1 */
+ #define RUBY_RX_GPD_NUM 16
+-/* 0261: vendor RX GPD buffers are 16 KiB (dw0=0x40000080); 64 B buffers
+- * made >64 B OUT transfers span GPDs and stalled the RX queue. */
+-#define RUBY_RX_BUF     16384
++/*
++ * 0299: RX GPD declared buflen is runtime (ruby_rx_buf_size, boot-arg
++ * ruby_rxbuf, default 512 = wMaxPacketSize).  docs/113 pinned the
++ * full-packet choke: a transfer of exactly one MPS (no short tail) never
++ * settles a 16384-declared GPD (neither short-packet nor bytes==buflen),
++ * so the RX queue wedged into the undocumented rqcsr=0x00078500 state.
++ * 512 makes the full-packet case settle on the buflen condition; larger
++ * transfers span GPDs at 512-byte granularity — vendor mtu3_qmu.c:300
++ * declares buflen = req->length the same way.  Physical slot storage
++ * stays 16 KiB so ruby_rxbuf=16384 restores the 0261 behaviour for A/B.
++ */
++#define RUBY_RX_BUF_MAX 16384
++static uint32_t ruby_rx_buf_size = 512;
+ #define RUBY_GPD_NUM    64
+ #define RUBY_GPD_DESC   16
+ /*
+@@ -2290,7 +2302,7 @@ static uint32_t ruby_txdone_count;
+ 
+ static uint8_t ruby_rx_gpd_ring[RUBY_RX_GPD_NUM * 16]
+     __attribute__((aligned(4096)));
+-static uint8_t ruby_rx_buf[RUBY_RX_GPD_NUM][RUBY_RX_BUF]
++static uint8_t ruby_rx_buf[RUBY_RX_GPD_NUM][RUBY_RX_BUF_MAX]
+     __attribute__((aligned(4096)));
+ static uint64_t ruby_rx_gpd_pa[RUBY_RX_GPD_NUM];
+ static uint64_t ruby_rx_buf_pa[RUBY_RX_GPD_NUM];
+@@ -2313,6 +2325,9 @@ static uint32_t ruby_rx_stall_seen;
+ static uint32_t ruby_rx_last_pkt_ms;
+ static uint32_t ruby_rx_diag_ms;
+ static volatile uint32_t ruby_rx_diag_req;
++/* 0299: full-packet choke latch + settle-moment dump request. */
++static uint32_t ruby_rx_choke_latched;
++static volatile uint32_t ruby_rx_stall_dump_req;
+ 
+ #define RUBY_FNV_OFFSET 2166136261u
+ 
+@@ -3478,7 +3493,15 @@ ruby_txpio_send(vm_offset_t mac, const uint8_t *buf, uint32_t len)
+                     "len=%u\n", ruby_txpio_timeouts,
+                     ruby_rd32(mac, TX1CSR0_OFF), chunk);
+         }
+-        if (ruby_txpiotail_en >= 2) {
++        /*
++         * 0299: ruby_qstart_only=1 admits the deferred-Q_START block with
++         * the tail disabled, so "pure workloop Q_START" becomes a real
++         * single variable (docs/113 finding 3: with txpiotail=0 alone the
++         * pending flag below is unreachable and the 0292 pure-PIO dead
++         * state comes back).  Tail modes 2/3 keep their original gates so
++         * the baseline behaviour is unchanged.
++         */
++        if (ruby_txpiotail_en >= 2 || ruby_qstart_only_en) {
+             /*
+              * 0296: mode 2 restarts a stopped QMU immediately after the
+              * TXPKTRDY wait.
+@@ -3488,7 +3511,7 @@ ruby_txpio_send(vm_offset_t mac, const uint8_t *buf, uint32_t len)
+              */
+             v = ruby_rd32(mac, TX1CSR0_OFF);
+             if (!(v & TX_FIFOEMPTY)) {
+-                if (ruby_txpiotail_en >= 3) {
++                if (ruby_txpiotail_en >= 3 || ruby_qstart_only_en) {
+                     ruby_txpio_qstart_pending = 1;
+                     ruby_txpio_qstart_due_ms =
+                         ruby_ms + (uint32_t)ruby_qstart_ms;
+@@ -4248,8 +4271,9 @@ ruby_ep2_rx_arm(uint32_t i)
+         g[k] = 0;
+     g[0] = 1u << 7;             /* IOC; HWO is added after the checksum */
+     /* 0261: dw0[31:16] holds the 16-bit buffer length. */
+-    g[2] = (uint8_t)(RUBY_RX_BUF & 0xffu);
+-    g[3] = (uint8_t)((RUBY_RX_BUF >> 8) & 0xffu);
++    /* 0299: declare the runtime GPD buflen (ruby_rxbuf, default 512). */
++    g[2] = (uint8_t)(ruby_rx_buf_size & 0xffu);
++    g[3] = (uint8_t)((ruby_rx_buf_size >> 8) & 0xffu);
+     *(volatile uint32_t *)(g + 4) = (uint32_t)next;
+     *(volatile uint32_t *)(g + 8) = (uint32_t)buf;
+     g[14] = (uint8_t)(((buf >> 32) & 0xfu) |
+@@ -4260,7 +4284,7 @@ ruby_ep2_rx_arm(uint32_t i)
+     ruby_dma_mb();
+     g[0] = (1u << 0) | (1u << 7);
+ 
+-    ruby_dc_civac(ruby_rx_buf[i], RUBY_RX_BUF);
++    ruby_dc_civac(ruby_rx_buf[i], RUBY_RX_BUF_MAX);
+     ruby_dc_civac(g, 16);
+     /* 0263: publish the next GPD the QMU reads after this one. */
+     ruby_dc_civac(ruby_rx_gpd_ring +
+@@ -4803,10 +4827,10 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+             break;
+         }
+ 
+-        ruby_dc_civac(ruby_rx_buf[i], RUBY_RX_BUF);
++    ruby_dc_civac(ruby_rx_buf[i], RUBY_RX_BUF_MAX);
+         len = *(volatile uint16_t *)(g + 12) & 0xffffu;
+-        if (len > RUBY_RX_BUF)
+-            len = RUBY_RX_BUF;
++        if (len > RUBY_RX_BUF_MAX)
++            len = RUBY_RX_BUF_MAX;
+ 
+         ruby_rx_packets++;
+         ruby_rx_last_pkt_ms = ruby_ms;   /* 0260: stall window anchor */
+@@ -4960,6 +4984,29 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+     if (ruby_rd32(mac, RX1CSR0_OFF) & RX_SENTSTALL_BIT)
+         ruby_rx_stall_seen = 1;
+ 
++    /*
++     * 0299: choke latch.  docs/113: the full-packet wedge leaves every
++     * standard error/status register at zero and only flips RXQCSR1 away
++     * from 0x8000 (ACTIVE-only).  Poll for that shape and freeze the RXGPD
++     * scene once (bounded prints) so the settle-moment evidence is in the
++     * ring without needing a second host probe round.
++     */
++    {
++        uint32_t rq = ruby_rd32(mac, RQCSR1_OFF);
++
++        if (rq != 0x8000u && (rq & QMU_Q_ACTIVE)) {
++            if (!ruby_rx_choke_latched) {
++                ruby_rx_choke_latched++;
++                if (ruby_rx_choke_latched <= 3)
++                    printf("RUBY USB: 0299 rx choke rq=%08x (full-packet "
++                        "settle watch)\n", rq);
++                ruby_rx_stall_dump_req = 1;
++            }
++        } else if (rq == 0x8000u) {
++            ruby_rx_choke_latched = 0;   /* queue healthy again */
++        }
++    }
++
+     q1 = ruby_rd32(mac, QISAR1_OFF);
+     rxq = q1 & (QISAR1_RXQ_EMPTY | QISAR1_RXQ_CSERR |
+         QISAR1_RXQ_LENERR | QISAR1_RXQ_ZLPERR);
+@@ -5315,6 +5362,11 @@ ruby_usb_irq_service_work(void)
+         ruby_rx_diag_req = 0;
+         ruby_ep2_rx_stall_dump(mac);
+     }
++    /* 0299: settle-moment RXGPD dump for the full-packet choke watch. */
++    if (ruby_rx_stall_dump_req) {
++        ruby_rx_stall_dump_req = 0;
++        ruby_ep2_rx_stall_dump(mac);
++    }
+     if (ruby_rx_desync_req) {
+         ruby_rx_desync_req = 0;
+         ruby_ep2_rx_desync_dump(mac);
+@@ -6375,6 +6427,8 @@ ruby_usb_probe(void)
+     int resume = 0;
+     int recover = 0;
+     int txpiotail = 0;
++    int qstartonly = 0;
++    int rxbuf = 512;
+     int lpmfc = 0;
+     int devrstpre = 0;
+     int qstart_ms = 1;
+@@ -6464,6 +6518,14 @@ ruby_usb_probe(void)
+     if (qstart_ms > 100)
+         qstart_ms = 100;
+     ruby_qstart_ms = qstart_ms;
++    PE_parse_boot_argn("ruby_qstart_only", &qstartonly, sizeof(qstartonly));
++    ruby_qstart_only_en = (qstartonly == 1);
++    PE_parse_boot_argn("ruby_rxbuf", &rxbuf, sizeof(rxbuf));
++    if (rxbuf < 64)
++        rxbuf = 64;
++    if (rxbuf > RUBY_RX_BUF_MAX)
++        rxbuf = RUBY_RX_BUF_MAX;
++    ruby_rx_buf_size = (uint32_t)rxbuf;
+     PE_parse_boot_argn("ruby_clr01", &clr01, sizeof(clr01));
+     ruby_clr01_en = (clr01 == 1);
+     PE_parse_boot_argn("ruby_dmareq_pio", &dmareqpio, sizeof(dmareqpio));
+@@ -6511,6 +6573,8 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0298 clr01=%d dmareq_pio=%d qisar1_w=%d "
+         "qisar0_isr=%d\n", ruby_clr01_en, ruby_dmareq_pio_en,
+         ruby_qisar1_w_en, ruby_qisar0_isr_en);
++    printf("RUBY USB: 0299 rxbuf=%u qstart_only=%d\n",
++        ruby_rx_buf_size, ruby_qstart_only_en);
+     if (ruby_txpio_en && !ruby_acm_cmd)
+         printf("RUBY USB: 0292 txpio needs rubyusbcmd=1\n");
+     printf("RUBY USB: probe writes %s\n",
