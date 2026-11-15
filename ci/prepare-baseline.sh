@@ -273,6 +273,8 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0296-ruby-usb-pio-qstart-post.patch" \
     "$ROOT/patches/0297-ruby-usb-pio-qstart-delay.patch" \
     "$ROOT/patches/0298-ruby-usb-clr01-qstart-workloop.patch" \
+    "$ROOT/patches/0299-ruby-usb-rxbuf-qstartonly.patch" \
+    "$ROOT/patches/0300-ruby-usb-pure-qmu.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
