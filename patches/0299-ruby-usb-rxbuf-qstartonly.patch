@@ -1,7 +1,7 @@
-diff --git a/xnu/bsd/dev/ruby_usb.c b/xnu/bsd/dev/ruby_usb.c
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
 index 45b75d5..e02bbc9 100644
---- a/xnu/bsd/dev/ruby_usb.c
-+++ b/xnu/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
 @@ -585,6 +585,8 @@ static uint32_t ruby_txpio_tail_cnt;
  static uint32_t ruby_txpio_start_cnt;
  /* 0297: deferred PIO Q_START and write-busy guard. */
@@ -25,7 +25,7 @@ index 45b75d5..e02bbc9 100644
 + * settles a 16384-declared GPD (neither short-packet nor bytes==buflen),
 + * so the RX queue wedged into the undocumented rqcsr=0x00078500 state.
 + * 512 makes the full-packet case settle on the buflen condition; larger
-+ * transfers span GPDs at 512-byte granularity — vendor mtu3_qmu.c:300
++ * transfers span GPDs at 512-byte granularity ? vendor mtu3_qmu.c:300
 + * declares buflen = req->length the same way.  Physical slot storage
 + * stays 16 KiB so ruby_rxbuf=16384 restores the 0261 behaviour for A/B.
 + */
