@@ -1,0 +1,87 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -310,11 +310,16 @@ static uint32_t ruby_event_overflow;
+ /* Minimal USB2 device: no interfaces other than the default one.
+  * 0218: config descriptor is built from ruby_eps[] (see ruby_build_cfg_desc);
+  * the old static table is retired to avoid bNumEndpoints drift. */
+-static const uint8_t ruby_dev_desc[18] = {
++static const uint8_t ruby_dev_desc_base[18] = {
+     18, 1, 0x00, 0x02, 0x00, 0x00, 0x00, 64,
+     0x09, 0x12, 0x02, 0x00, 0x11, 0x02,
+     1, 2, 3, 1
+ };
++/*
++ * 0301: per-boot copy.  Profile 2 rewrites the class triple to
++ * 0xEF/0x02/0x01 (explicit composite); profiles 0/1 keep 0/0/0.
++ */
++static uint8_t ruby_dev_desc[18];
+ 
+ static const uint8_t ruby_str_lang[4] = { 4, 3, 0x09, 0x04 };
+ static const uint8_t ruby_str_mfg[10] = {
+@@ -566,6 +571,9 @@ ruby_ep_complete(struct ruby_ep *ep, int status)
+  * Vendor mode (default): single vendor 0xFF interface (0223 shape).
+  */
+ static int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
++/* 0301: zero-build enumeration/ZLP axes (cmdline selected). */
++static int ruby_enum_profile = 1;   /* 0 vendor, 1 ACM, 2 ACM-composite */
++static int ruby_zlp_en;             /* 0 = no ACM echo ZLP (0301 default) */
+ static int ruby_cfgrst_mode = 0;    /* 0291: default no config EP_RST */
+ /* 0300: TX ownership is pure QMU DMA.  Only the recovery/injection
+  * switches survive from the 0293 audit set. */
+@@ -3563,7 +3571,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+                     printf("RUBY USB ACM TXREP n=%u left=%u bytes=%u\n",
+                         n, ruby_tx_replay_len, ruby_tx_replay_bytes);
+                 }
+-                acm_zlp = (n == RUBY_TX_MPS &&
++                acm_zlp = (ruby_zlp_en && n == RUBY_TX_MPS &&
+                     ruby_tx_replay_len == 0) ? 1u : 0u;
+                 actual_len = n;
+                 frames = 1;
+@@ -3578,7 +3586,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+                 break;
+             /* The transfer ends exactly on an MPS boundary only when the
+              * dequeue also drained the ring; then this chunk carries ZLP. */
+-            acm_zlp = (n == RUBY_TX_MPS &&
++            acm_zlp = (ruby_zlp_en && n == RUBY_TX_MPS &&
+                 ruby_acm_echo_head == ruby_acm_echo_tail) ? 1u : 0u;
+             if (ruby_acm_echo_dbg_tx < 8) {
+                 ruby_acm_echo_dbg_tx++;
+@@ -6013,6 +6021,27 @@ ruby_usb_probe(void)
+     PE_parse_boot_argn("rubypad", &pad, sizeof(pad));
+     PE_parse_boot_argn("rubydmauc", &dmauc, sizeof(dmauc));
+     PE_parse_boot_argn("rubyusbcmd", &ruby_acm_cmd, sizeof(ruby_acm_cmd));
++    {
++        int enumprof = -1;
++        int zlp = 0;
++
++        PE_parse_boot_argn("ruby_enum", &enumprof, sizeof(enumprof));
++        if (enumprof >= 0 && enumprof <= 2) {
++            ruby_enum_profile = enumprof;
++            ruby_acm_cmd = (enumprof != 0);
++        } else {
++            ruby_enum_profile = ruby_acm_cmd ? 1 : 0;
++        }
++        PE_parse_boot_argn("ruby_zlp", &zlp, sizeof(zlp));
++        ruby_zlp_en = (zlp == 1);
++    }
++    for (uint32_t di = 0; di < sizeof(ruby_dev_desc); di++)
++        ruby_dev_desc[di] = ruby_dev_desc_base[di];
++    if (ruby_enum_profile == 2) {
++        ruby_dev_desc[4] = 0xEF;    /* bDeviceClass: Misc */
++        ruby_dev_desc[5] = 0x02;    /* bDeviceSubClass: Common */
++        ruby_dev_desc[6] = 0x01;    /* bDeviceProtocol: IAD */
++    }
+     ruby_irq_mode = (enable == 1 && usbirq == 1);
+     ruby_qmu_irq_mode = (ruby_irq_mode && qmuirq == 1);
+     ruby_pad_mode = (pad == 1);
+@@ -6094,6 +6123,9 @@ ruby_usb_probe(void)
+     /* 0300 content gate: grep this string in the built kernel. */
+     printf("RUBY USB: 0300 qmu-only txreset=%d txeprst=%d txreplay=%d\n",
+         ruby_txreset_en, ruby_txeprst_en, ruby_txreplay_en);
++    /* 0301 content gate. */
++    printf("RUBY USB: 0301 enum=%d zlp=%d\n",
++        ruby_enum_profile, ruby_zlp_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
