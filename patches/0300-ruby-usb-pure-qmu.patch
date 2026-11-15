@@ -458,7 +458,22 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      ruby_ep_ready = 1;
      ruby_seq("TXCFG_OUT", (uint32_t)ruby_ring_pa, ruby_ep_ready);
      printf("RUBY USB: EP2 QMU ring pa=0x%llx gpd[0]=0x%llx gpd[%u]=0x%llx "
-@@ -3398,209 +3255,6 @@ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
+@@ -3294,6 +3151,14 @@ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+         ruby_tx_progress_deq = ruby_gpd_deq;
+         ruby_tx_progress_ms = ruby_ms;
+         ruby_tx_reset_tries = 0;
++        /*
++         * 0300: once the ring drains, the QMU has no GPD left to fetch and
++         * this MAC parks the queue (0272/0273: RESUME on the parked queue
++         * is a no-op).  Mark the software state unstarted so the next
++         * prepared GPD issues Q_START instead of a dead RESUME.
++         */
++        if (ruby_inflight == 0)
++            ruby_tx_queue_started = 0;
+         ruby_tx_mtr_add(RUBY_MTR_TX_DONE, (uint16_t)freed,
+             cur, ruby_rd32(mac, TQCSR1_OFF));
+         if (freed > ruby_ep2_drain_max)
+@@ -3398,209 +3263,6 @@ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
      return n;
  }
  
@@ -668,7 +683,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
  /*
   * 0245: forced STOP + full re-program.  RESUME is a no-op while the
   * readback still claims ACTIVE (console: act == kick, inf stuck), so a
-@@ -3649,16 +3303,12 @@ ruby_ep2_push_log(vm_offset_t mac)
+@@ -3649,16 +3311,12 @@ ruby_ep2_push_log(vm_offset_t mac)
      uint64_t pos, np, log_pa;
      uint8_t *g, *buf;
      uint32_t n, queued = 0, freed = 0;
@@ -686,7 +701,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
  
      q0 = ruby_rd32(mac, QISAR0_OFF);
      q1 = ruby_rd32(mac, QISAR1_OFF);
-@@ -3687,37 +3337,13 @@ ruby_ep2_push_log(vm_offset_t mac)
+@@ -3687,37 +3345,13 @@ ruby_ep2_push_log(vm_offset_t mac)
          if (ruby_txdone_en &&
              (ruby_ep2_q0_seen <= 16 || (ruby_ep2_q0_seen & 0x3fu) == 0))
              printf("RUBY USB MAC: devconf=%08x usb3c=%08x pm=%08x "
@@ -726,7 +741,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      }
  
      freed = 0;
-@@ -3911,13 +3537,14 @@ ruby_ep2_push_log(vm_offset_t mac)
+@@ -3911,13 +3545,14 @@ ruby_ep2_push_log(vm_offset_t mac)
              ruby_wr32(mac, TX1CSR0_OFF,
                  (csr0 & ~(1u << 22)) | (1u << 22));
          tqcsr = ruby_rd32(mac, TQCSR1_OFF);
@@ -743,7 +758,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
                  memcpy(buf, ruby_tx_replay_buf, n);
                  memmove(ruby_tx_replay_buf, ruby_tx_replay_buf + n,
                      ruby_tx_replay_len - n);
-@@ -3928,16 +3555,27 @@ ruby_ep2_push_log(vm_offset_t mac)
+@@ -3928,16 +3563,27 @@ ruby_ep2_push_log(vm_offset_t mac)
                      printf("RUBY USB ACM TXREP n=%u left=%u bytes=%u\n",
                          n, ruby_tx_replay_len, ruby_tx_replay_bytes);
                  }
@@ -774,7 +789,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
              }
              actual_len = n;
              frames = 1;
-@@ -3997,13 +3635,23 @@ ruby_ep2_push_log(vm_offset_t mac)
+@@ -3997,13 +3643,23 @@ ruby_ep2_push_log(vm_offset_t mac)
           * qcr1 TX_ZLP is already on (0211 L1981); the tail ZLP needs the
           * GPD flag itself. dw3 low 12 bits = byte count, BIT(29) mirrors
           * vendor GPD_EXT_FLAG_ZLP for the ext flag (old IP path). */
@@ -801,7 +816,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
          if (!ruby_dma_uc) {
              ruby_dc_civac(g, RUBY_GPD_DESC);
              ruby_dma_wmb();         /* fields before HWO */
-@@ -4062,31 +3710,22 @@ ruby_ep2_push_log(vm_offset_t mac)
+@@ -4062,31 +3718,22 @@ ruby_ep2_push_log(vm_offset_t mac)
      ruby_tx_kick_total[RUBY_TX_SRC_PUSH]++;
      ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_PUSH,
          ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
@@ -847,7 +862,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      }
  
      if (ruby_rd32(mac, QISAR0_OFF) & RUBY_QMU_TX_DONE) {
-@@ -4137,32 +3776,27 @@ ruby_ep2_status_poll(vm_offset_t mac)
+@@ -4137,32 +3784,27 @@ ruby_ep2_status_poll(vm_offset_t mac)
  }
  
  /*
@@ -861,11 +876,12 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
   */
  static void
 -ruby_ep1in_halt_clear_light(vm_offset_t mac)
--{
--    uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
--
--    ruby_wr32(mac, TX1CSR0_OFF,
--        (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
++ruby_tx_halt_clear(vm_offset_t mac)
+ {
+     uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+ 
+     ruby_wr32(mac, TX1CSR0_OFF,
+         (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
 -    ruby_ep2_eprst_tx(mac);
 -    ruby_clr81_cnt++;
 -    if (ruby_clr81_cnt <= 8 || (ruby_clr81_cnt & 0xffu) == 0)
@@ -874,12 +890,11 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
 -
 -static void
 -ruby_ep1in_halt_status_only(vm_offset_t mac)
-+ruby_tx_halt_clear(vm_offset_t mac)
- {
-     uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
- 
-     ruby_wr32(mac, TX1CSR0_OFF,
-         (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+-{
+-    uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+-
+-    ruby_wr32(mac, TX1CSR0_OFF,
+-        (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
 -    if (ruby_clr81_hits[3] <= 8 || (ruby_clr81_hits[3] & 0xffu) == 0)
 -        ruby_seq("CLR81S", tx0, ruby_rd32(mac, TX1CSR0_OFF));
 +    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
@@ -894,7 +909,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
  }
  
  static void
-@@ -4187,66 +3821,6 @@ ruby_ep2_rx_halt_clear_light(vm_offset_t mac)
+@@ -4187,66 +3829,6 @@ ruby_ep2_rx_halt_clear_light(vm_offset_t mac)
              ruby_rd32(mac, RX1CSR0_OFF), ruby_rd32(mac, RQCSR1_OFF));
  }
  
@@ -961,7 +976,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
  /* ---- EP2 bulk OUT (RX), 0112 Stage A ---- */
  
  static uint32_t
-@@ -5341,11 +4915,6 @@ ruby_usb_irq_service_work(void)
+@@ -5341,11 +4923,6 @@ ruby_usb_irq_service_work(void)
          ruby_qmu_rx_recover_req = 0;
          ruby_ep2_rx_recover(mac);
      }
@@ -973,7 +988,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      if (ruby_qmu_push_req) {
          ruby_qmu_push_req = 0;
          ruby_ep2_push_log(mac);
-@@ -5724,17 +5293,17 @@ ruby_ep0_vendor_audit(vm_offset_t mac, uint32_t t, uint32_t wlen)
+@@ -5724,17 +5301,17 @@ ruby_ep0_vendor_audit(vm_offset_t mac, uint32_t t, uint32_t wlen)
      v[3] = ruby_clr81_hits[2];
      v[4] = ruby_clr81_hits[3];
      v[5] = ruby_clr81_reqs;
@@ -996,7 +1011,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      v[15] = (ruby_gpd_enq & 0xffu) | ((ruby_gpd_deq & 0xffu) << 8) |
          ((ruby_inflight & 0xffu) << 16);
      ruby_ep0_send(mac, t, 0xc030, (const uint8_t *)v, sizeof(v), wlen);
-@@ -6407,33 +5976,21 @@ ruby_usb_probe(void)
+@@ -6407,33 +5984,21 @@ ruby_usb_probe(void)
      int rxskip = 0;
      int txreset = 0;
      int txeprst = 0;
@@ -1031,7 +1046,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      int qisar1w = 1;
      int qisar0isr = 0;
      vm_offset_t ippc, mac, phy, gpio, ifrao;
-@@ -6456,22 +6013,14 @@ ruby_usb_probe(void)
+@@ -6456,22 +6021,14 @@ ruby_usb_probe(void)
      ruby_rx_skip_en = (rxskip == 1);
      PE_parse_boot_argn("ruby_txreset", &txreset, sizeof(txreset));
      PE_parse_boot_argn("ruby_txeprst", &txeprst, sizeof(txeprst));
@@ -1054,7 +1069,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      PE_parse_boot_argn("ruby_lpmhrwe", &lpmhrwe, sizeof(lpmhrwe));
      ruby_lpmhrwe_en = (lpmhrwe == 1);
      PE_parse_boot_argn("ruby_usb2parity", &usb2parity, sizeof(usb2parity));
-@@ -6488,38 +6037,12 @@ ruby_usb_probe(void)
+@@ -6488,38 +6045,12 @@ ruby_usb_probe(void)
      ruby_txslot = txslot;
      PE_parse_boot_argn("ruby_txfifo", &txfifo, sizeof(txfifo));
      ruby_txfifo_en = (txfifo == 1);
@@ -1093,7 +1108,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      PE_parse_boot_argn("ruby_rxbuf", &rxbuf, sizeof(rxbuf));
      if (rxbuf < 64)
          rxbuf = 64;
-@@ -6528,8 +6051,6 @@ ruby_usb_probe(void)
+@@ -6528,8 +6059,6 @@ ruby_usb_probe(void)
      ruby_rx_buf_size = (uint32_t)rxbuf;
      PE_parse_boot_argn("ruby_clr01", &clr01, sizeof(clr01));
      ruby_clr01_en = (clr01 == 1);
@@ -1102,7 +1117,7 @@ diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
      PE_parse_boot_argn("ruby_qisar1_w", &qisar1w, sizeof(qisar1w));
      ruby_qisar1_w_en = (qisar1w != 0);
      PE_parse_boot_argn("ruby_qisar0_isr", &qisar0isr, sizeof(qisar0isr));
-@@ -6544,39 +6065,27 @@ ruby_usb_probe(void)
+@@ -6544,39 +6073,27 @@ ruby_usb_probe(void)
      printf("RUBY USB: 0266 rx probe ready (read-only)\n");
      printf("RUBY USB: 0267 rx skip=%d (rxskip=1 enables)\n",
          ruby_rx_skip_en);
