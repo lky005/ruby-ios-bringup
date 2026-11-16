@@ -280,9 +280,8 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0303-ruby-usb-txep-param.patch" \
     "$ROOT/patches/0304-ruby-usb-cfg-pre-qstart-bell.patch" \
     "$ROOT/patches/0305-ruby-usb-txwatch-progress.patch" \
-    "$ROOT/patches/0306-ruby-usb-epfc-cfgflush.patch" \
-    "$ROOT/patches/0307-ruby-usb-lowring.patch" \
-    "$ROOT/patches/0308-ruby-usb-acr3-bist.patch" \
+    "$ROOT/patches/0308b-ruby-usb-acr3-bist.patch" \
+    "$ROOT/patches/0309-ruby-usb-throughput-axes.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

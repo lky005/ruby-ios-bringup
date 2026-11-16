@@ -1,14 +1,14 @@
 --- a/bsd/dev/ruby_usb.c
 +++ b/bsd/dev/ruby_usb.c
-@@ -6349,6 +6349,7 @@
-     printf("RUBY USB: 0306 lpmfcp=%d cfgnoflush=%d\n",
-         ruby_lpmfcp_en, ruby_cfgnoflush_en);
-     printf("RUBY USB: 0307 txring=%#x\n", ruby_txring_pa_arg);
+@@ -6306,6 +6306,7 @@
+         ruby_cfg_pre, ruby_qstart_cfg, ruby_qstart_keep,
+         ruby_txbell_en, ruby_txbell_ms, ruby_tx_eprst_bit);
+     printf("RUBY USB: 0305 txwatch progress-init\n");
 +    printf("RUBY USB: 0308 acr3_bist=0\n");
      printf("RUBY USB: probe writes %s\n",
          ruby_probe_enabled ? "enabled" : "locked");
      printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
-@@ -6471,8 +6472,14 @@
+@@ -6428,8 +6429,14 @@
      v |= DTM1_FORCE_IDDIG | DTM1_RG_IDDIG;
      ruby_wr32(phy, PHY_U2_DTM1, v);
  
