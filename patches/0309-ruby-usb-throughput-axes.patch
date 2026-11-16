@@ -1,0 +1,585 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2031,6 +2031,7 @@
+ /* 0292: CPU PIO window for EP1 IN (U3D_FIFO0 + 0x10, auto-increment). */
+ #define RUBY_TX_FIFO_OFF 0x0310
+ #define RUBY_TX_MPS     512u
++#define RUBY_TX_GPD_MAX 16384
+ 
+ #define QMU_Q_START     1u
+ #define QMU_Q_STOP      4u
+@@ -2199,6 +2200,12 @@
+ static int ruby_usbintr_en = 1;     /* 0285: vendor suspend intr parity */
+ static int ruby_lpmmask_en = 1;     /* 0287: vendor LPM mask / U3 exit parity */
+ static int ruby_txslot = 2;         /* 0288: EP1 IN TX FIFO slot (A/B) */
++/* 0309: throughput axes; defaults reproduce the 0308 steady state. */
++static uint32_t ruby_tx_gpd_len = RUBY_TX_MPS;    /* TX bytes per GPD */
++static uint32_t ruby_tx_ring_n = RUBY_GPD_NUM;    /* TX GPD slots in use */
++static uint32_t ruby_rx_ring_n = RUBY_RX_GPD_NUM; /* RX GPD slots in use */
++static uint32_t ruby_inflight_max = RUBY_EP2_MAX_INFLIGHT;
++static uint32_t ruby_rx_slot = 2;
+ static int ruby_txfifo_en = 1;      /* 0289: per-GPD TX FIFO trace */
+ static uint32_t ruby_txfifo_lines;
+ static uint32_t ruby_flushfifo_cnt;
+@@ -2325,6 +2332,7 @@
+ static uint32_t ruby_rx_ext_bad;
+ static uint32_t ruby_rx_zlp_err;
+ static uint32_t ruby_rx_stall_seen;
++static uint32_t ruby_rx_full_laps;   /* 0309: ring-lap wraps */
+ /* 0260: RX stall diagnostics (read-only snapshot requests). */
+ static uint32_t ruby_rx_last_pkt_ms;
+ static uint32_t ruby_rx_diag_ms;
+@@ -2568,8 +2576,8 @@
+     ruby_tx_busy = 0;
+     ruby_busy_ticks = 0;
+ 
+-    for (i = 0; i < RUBY_GPD_NUM; i++) {
+-        uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
++    for (i = 0; i < ruby_tx_ring_n; i++) {
++        uint32_t nxt = (i + 1u) % ruby_tx_ring_n;
+         uint64_t np = ruby_gpd_pa[nxt];
+         uint8_t *g = RUBY_GPD_SLOT(i);
+ 
+@@ -2719,7 +2727,7 @@
+     ruby_tx_replay_len = 0;
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+-    for (i = ruby_gpd_deq; i != ruby_gpd_enq; i = (i + 1u) % RUBY_GPD_NUM) {
++    for (i = ruby_gpd_deq; i != ruby_gpd_enq; i = (i + 1u) % ruby_tx_ring_n) {
+         uint32_t len = *(volatile uint16_t *)(RUBY_GPD_SLOT(i) + 12) &
+             0xfffu;
+         uint32_t n;
+@@ -3068,8 +3076,8 @@
+     ruby_seq("TXCFG_CR", ruby_rd32(mac, TX1CSR0_OFF),
+         ruby_rd32(mac, TX1CSR2_OFF));
+ 
+-    for (i = 0; i < RUBY_GPD_NUM; i++) {
+-        uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
++    for (i = 0; i < ruby_tx_ring_n; i++) {
++        uint32_t nxt = (i + 1u) % ruby_tx_ring_n;
+         uint64_t np = ruby_gpd_pa[nxt];
+         uint8_t *g = RUBY_GPD_SLOT(i);
+ 
+@@ -3125,9 +3133,9 @@
+     ruby_seq("TXCFG_OUT", (uint32_t)ruby_ring_pa, ruby_ep_ready);
+     printf("RUBY USB: EP2 QMU ring pa=0x%llx gpd[0]=0x%llx gpd[%u]=0x%llx "
+         "bulk[0]=0x%llx bulk[%u]=0x%llx frames=%u bytes=%u\n",
+-        ruby_ring_pa, ruby_gpd_pa[0], (uint32_t)(RUBY_GPD_NUM - 1u),
+-        ruby_gpd_pa[RUBY_GPD_NUM - 1], ruby_bulk_pa[0],
+-        (uint32_t)(RUBY_GPD_NUM - 1u), ruby_bulk_pa[RUBY_GPD_NUM - 1],
++        ruby_ring_pa, ruby_gpd_pa[0], (uint32_t)(ruby_tx_ring_n - 1u),
++        ruby_gpd_pa[ruby_tx_ring_n - 1], ruby_bulk_pa[0],
++        (uint32_t)(ruby_tx_ring_n - 1u), ruby_bulk_pa[ruby_tx_ring_n - 1],
+         RUBY_BULK_FRAMES, RUBY_BULK_BYTES);
+     /* Fill the queue before the first host IN token; leave one slot free. */
+     ruby_ep2_push_log(mac);
+@@ -3156,7 +3164,7 @@
+ 
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+-    for (i = 0; i < RUBY_GPD_NUM; i++)
++    for (i = 0; i < ruby_tx_ring_n; i++)
+         if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+     return hwo;
+@@ -3177,7 +3185,7 @@
+ static uint32_t
+ ruby_ep2_ring_dist(uint32_t from, uint32_t to)
+ {
+-    return (to + RUBY_GPD_NUM - from) % RUBY_GPD_NUM;
++    return (to + ruby_tx_ring_n - from) % ruby_tx_ring_n;
+ }
+ 
+ /*
+@@ -3214,7 +3222,7 @@
+             ruby_ep2_hwo_gap++;
+             break;
+         }
+-        ruby_gpd_deq = (i + 1u) % RUBY_GPD_NUM;
++        ruby_gpd_deq = (i + 1u) % ruby_tx_ring_n;
+         ruby_inflight--;
+         freed++;
+     }
+@@ -3284,7 +3292,7 @@
+         ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, QISAR0_OFF));
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+-    for (i = first; i <= last && i < RUBY_GPD_NUM; i++) {
++    for (i = first; i <= last && i < ruby_tx_ring_n; i++) {
+         volatile uint8_t *g = RUBY_GPD_SLOT(i);
+ 
+         printf("RUBY USB: GPD[%02u] flag=%02x chk=%02x len=%u "
+@@ -3302,7 +3310,9 @@
+  * (push) run on the same owner: the QMU workloop, or the 1 ms tick when
+  * rubyqmuirq=0.
+  */
+-#define RUBY_ACM_ECHO_SIZE 8192u
++/* 0309: hold one 16 KB host write plus pending data (was 8 KB);
++ * ruby_txgpd can reach 16 KB but the old ring dropped the packet. */
++#define RUBY_ACM_ECHO_SIZE 32768u
+ static uint8_t ruby_acm_echo_buf[RUBY_ACM_ECHO_SIZE];
+ static volatile uint32_t ruby_acm_echo_head;
+ static volatile uint32_t ruby_acm_echo_tail;
+@@ -3391,7 +3401,7 @@
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+     for (i = 0; i < 4; i++) {
+-        uint32_t sl = (d + i) % RUBY_GPD_NUM;
++        uint32_t sl = (d + i) % ruby_tx_ring_n;
+         volatile uint8_t *g = RUBY_GPD_SLOT(sl);
+ 
+         printf("RUBY USB GPD[%02u] f=%02x c=%02x len=%u next=%08x "
+@@ -3617,7 +3627,7 @@
+      */
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+-    for (i = 0; i < RUBY_GPD_NUM; i++)
++    for (i = 0; i < ruby_tx_ring_n; i++)
+         if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+ 
+@@ -3629,7 +3639,7 @@
+         ruby_tx_empty_strikes++;
+         ruby_tx_empty_last_ms = ruby_ms;
+     }
+-    while (ruby_inflight < RUBY_EP2_MAX_INFLIGHT) {
++    while (ruby_inflight < ruby_inflight_max) {
+         enq = ruby_gpd_enq;
+         g = RUBY_GPD_SLOT(enq);
+         if (hwo & (1ull << enq))
+@@ -3650,8 +3660,8 @@
+             if (ruby_tx_replay_len > 0) {
+                 /* 0277: re-send payloads preserved across a TX rebuild. */
+                 n = ruby_tx_replay_len;
+-                if (n > RUBY_TX_MPS)
+-                    n = RUBY_TX_MPS;
++                if (n > ruby_tx_gpd_len)
++                    n = ruby_tx_gpd_len;
+                 memcpy(buf, ruby_tx_replay_buf, n);
+                 memmove(ruby_tx_replay_buf, ruby_tx_replay_buf + n,
+                     ruby_tx_replay_len - n);
+@@ -3662,22 +3672,23 @@
+                     printf("RUBY USB ACM TXREP n=%u left=%u bytes=%u\n",
+                         n, ruby_tx_replay_len, ruby_tx_replay_bytes);
+                 }
+-                acm_zlp = (ruby_zlp_en && n == RUBY_TX_MPS &&
++                acm_zlp = (ruby_zlp_en && n == ruby_tx_gpd_len &&
+                     ruby_tx_replay_len == 0) ? 1u : 0u;
+                 actual_len = n;
+                 frames = 1;
+             } else {
+             /*
+-             * 0300: echo one host read as a chain of <=512 B GPDs (one
+-             * wMaxPacketSize each).  The ring budget bounds a single push
+-             * pass; the remainder stays queued for the next pass.
++             * 0300: echo one host read as a chain of <=MPS GPDs.
++             * 0309: the chunk cap is ruby_txgpd (default 512 = MPS).
++             * The ring budget bounds a single push pass; the remainder
++             * stays queued for the next pass.
+              */
+-            n = ruby_acm_echo_dequeue(buf, RUBY_TX_MPS);
++            n = ruby_acm_echo_dequeue(buf, ruby_tx_gpd_len);
+             if (!n)
+                 break;
+             /* The transfer ends exactly on an MPS boundary only when the
+              * dequeue also drained the ring; then this chunk carries ZLP. */
+-            acm_zlp = (ruby_zlp_en && n == RUBY_TX_MPS &&
++            acm_zlp = (ruby_zlp_en && n == ruby_tx_gpd_len &&
+                 ruby_acm_echo_head == ruby_acm_echo_tail) ? 1u : 0u;
+             if (ruby_acm_echo_dbg_tx < 8) {
+                 ruby_acm_echo_dbg_tx++;
+@@ -3726,12 +3737,12 @@
+             }
+         }
+ 
+-        np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
++        np = ruby_gpd_pa[(enq + 1u) % ruby_tx_ring_n];
+         /* 0214: vendor prepare_tx_gpd step 4 - clear next slot's HWO
+          * before publishing current. QMU follows next_gpd; at the
+-         * enq=63 seam a stale HWO=1 on slot 0 would corrupt the walk.
++         * enq=n-1 seam a stale HWO=1 on slot 0 would corrupt the walk.
+          * ruby_gpd_clear zeros the full 16B descriptor. */
+-        ruby_gpd_clear((enq + 1u) % RUBY_GPD_NUM);
++        ruby_gpd_clear((enq + 1u) % ruby_tx_ring_n);
+         ruby_gpd_clear(enq);
+         g[0] = 1u << 7;
+         g[2] = (uint8_t)(((log_pa >> 32) & 0xfu) |
+@@ -3770,7 +3781,7 @@
+             ruby_dc_civac(g, RUBY_GPD_DESC); /* publish HWO */
+             /* 0263: the QMU reads the next GPD right after this one; make
+              * its cleared state visible too (U-Boot 044d7003a7). */
+-            ruby_dc_civac(RUBY_GPD_SLOT((enq + 1u) % RUBY_GPD_NUM),
++            ruby_dc_civac(RUBY_GPD_SLOT((enq + 1u) % ruby_tx_ring_n),
+                 RUBY_GPD_DESC);
+         }
+         /* 0221: 1:1 req:GPD binding. One ruby_req owns this slot; queue
+@@ -3785,7 +3796,7 @@
+         }
+         ruby_tx_prod_pos_total += actual_len;
+         ruby_log_pos = pos;
+-        ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
++        ruby_gpd_enq = (enq + 1u) % ruby_tx_ring_n;
+         ruby_inflight++;
+         /*
+          * 0305: the watchdog grace runs from the packet's enqueue.
+@@ -3822,24 +3833,30 @@
+     ruby_tx_kick_src = RUBY_TX_SRC_PUSH;
+     ruby_tx_kick_ms = ruby_ms;
+     ruby_tx_kick_total[RUBY_TX_SRC_PUSH]++;
+-    ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_PUSH,
+-        ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
+-    if (!ruby_tx_queue_started) {
++    {
++        uint32_t tq = ruby_rd32(mac, TQCSR1_OFF);
++
++        ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_PUSH,
++            tq, ruby_inflight);
+         /*
+          * 0300: first prepared GPD since prepare/stop/clear.  START from
+          * the oldest pending GPD.  The decision is software-owned, so the
+          * 0x18100 pseudo-active readback can neither veto nor fake it.
++         * 0309: also restart when the queue stopped after draining; RESUME
++         * on a stopped queue is a no-op and stranded the tail of a burst.
+          */
+-        uint64_t kpa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
++        if (!ruby_tx_queue_started || !(tq & QMU_Q_ACTIVE)) {
++            uint64_t kpa = ruby_gpd_pa[ruby_gpd_deq % ruby_tx_ring_n];
+ 
+-        ruby_wr32(mac, TQSAR1_OFF, (uint32_t)kpa);
+-        ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((kpa >> 32) & 0xfu));
+-        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-        ruby_tx_queue_started = 1;
+-        ruby_txkick_starts++;
+-    } else {
+-        /* Vendor mtu3_qmu_resume kick: RESUME only. */
+-        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++            ruby_wr32(mac, TQSAR1_OFF, (uint32_t)kpa);
++            ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((kpa >> 32) & 0xfu));
++            ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++            ruby_tx_queue_started = 1;
++            ruby_txkick_starts++;
++        } else {
++            /* Vendor mtu3_qmu_resume kick: RESUME only. */
++            ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++        }
+     }
+ 
+     if (ruby_rd32(mac, QISAR0_OFF) & RUBY_QMU_TX_DONE) {
+@@ -3951,7 +3968,7 @@
+ ruby_ep2_rx_arm(uint32_t i)
+ {
+     uint8_t *g = ruby_rx_gpd_ring + i * 16;
+-    uint64_t next = ruby_rx_gpd_pa[(i + 1u) % RUBY_RX_GPD_NUM];
++    uint64_t next = ruby_rx_gpd_pa[(i + 1u) % ruby_rx_ring_n];
+     uint64_t buf = ruby_rx_buf_pa[i];
+     uint32_t k;
+ 
+@@ -3976,7 +3993,7 @@
+     ruby_dc_civac(g, 16);
+     /* 0263: publish the next GPD the QMU reads after this one. */
+     ruby_dc_civac(ruby_rx_gpd_ring +
+-        ((i + 1u) % RUBY_RX_GPD_NUM) * 16, 16);
++        ((i + 1u) % ruby_rx_ring_n) * 16, 16);
+ }
+ 
+ static void
+@@ -3998,7 +4015,7 @@
+         return;
+     }
+     ruby_rx_ring_pa = ruby_dma_pa(ruby_rx_gpd_ring);
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++) {
++    for (i = 0; i < ruby_rx_ring_n; i++) {
+         ruby_rx_buf_pa[i] = ruby_dma_pa(ruby_rx_buf[i]);
+         ruby_rx_gpd_pa[i] = ruby_dma_pa(ruby_rx_gpd_ring + i * 16);
+     }
+@@ -4006,7 +4023,7 @@
+         printf("RUBY USB: EP2 RX ring not mapped\n");
+         return;
+     }
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++) {
++    for (i = 0; i < ruby_rx_ring_n; i++) {
+         if (!ruby_rx_buf_pa[i] || !ruby_rx_gpd_pa[i]) {
+             printf("RUBY USB: EP2 RX buffers not mapped\n");
+             ruby_rx_ring_pa = 0;
+@@ -4033,7 +4050,7 @@
+ 
+     /* 0262: RX maxp follows the descriptor (vendor ep1out maxp 512). */
+     ruby_wr32(mac, RX1CSR0_OFF, 512u | RX_DMAREQEN);
+-    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
++    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(ruby_rx_slot) | RX_TYPE(0));
+     /* 0258: vendor RX FIFOADDR=0 (TWRP 0x00090000); 0x40 is not a 512 B unit. */
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+@@ -4046,7 +4063,7 @@
+         QMU_RX_ZLP_ERR_BIT);
+     ruby_wr32(mac, RQSAR1_OFF, (uint32_t)ruby_rx_ring_pa);
+     ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((ruby_rx_ring_pa >> 32) & 0xfu));
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++    for (i = 0; i < ruby_rx_ring_n; i++)
+         ruby_ep2_rx_arm(i);
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
+     ruby_rx_mtr_add(RUBY_RMR_RESTART, (uint16_t)ruby_rx_deq,
+@@ -4082,7 +4099,7 @@
+     /* EP_RST may reset the per-endpoint configuration; restore it before
+      * re-arming the ring so every clean test starts from the same state. */
+     ruby_wr32(mac, RX1CSR0_OFF, 512u | RX_DMAREQEN);
+-    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
++    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(ruby_rx_slot) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+     ruby_wr32(mac, QCR0_OFF, 1u);
+@@ -4114,7 +4131,7 @@
+         ruby_cmd_count = 0;
+         ruby_cmd_errors = 0;
+     }
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++    for (i = 0; i < ruby_rx_ring_n; i++)
+         ruby_ep2_rx_arm(i);
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
+     ruby_rx_mtr_add(RUBY_RMR_RESTART, (uint16_t)ruby_rx_deq,
+@@ -4161,7 +4178,7 @@
+     rqhiar = ruby_rd32(mac, RQHIAR1_OFF);
+     cur_pa = ((uint64_t)((rqhiar >> 8) & 0xfu) << 32) | rqcpr;
+     if (cur_pa < ruby_rx_ring_pa ||
+-        cur_pa >= ruby_rx_ring_pa + (RUBY_RX_GPD_NUM * 16u))
++        cur_pa >= ruby_rx_ring_pa + (ruby_rx_ring_n * 16u))
+         return 0xffu;
+     return (uint32_t)((cur_pa - ruby_rx_ring_pa) / 16u);
+ }
+@@ -4306,7 +4323,7 @@
+     uint32_t rx_hwo = 0, i;
+ 
+     ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++    for (i = 0; i < ruby_rx_ring_n; i++)
+         if (ruby_rx_gpd_ring[i * 16] & 1u)
+             rx_hwo |= 1u << i;
+     printf("RUBY CMD: ring tx cur=%02x enq=%u deq=%u inflight=%u "
+@@ -4470,14 +4487,14 @@
+ static void
+ ruby_ep2_rx_drain(vm_offset_t mac)
+ {
+-    uint32_t cur, hwo = 0, i, n, len, done = 0;
++    uint32_t cur, hwo = 0, i, n, len, done = 0, full_lap = 0;
+     uint8_t *g;
+ 
+     if (!ruby_rx_ready)
+         return;
+ 
+     ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++    for (i = 0; i < ruby_rx_ring_n; i++)
+         if (ruby_rx_gpd_ring[i * 16] & 1u)
+             hwo |= 1u << i;
+ 
+@@ -4485,7 +4502,15 @@
+     if (cur == 0xffu)
+         return;
+ 
+-    for (n = 0; n < RUBY_RX_GPD_NUM && ruby_rx_deq != cur; n++) {
++    /*
++     * 0309: a transfer that fills exactly one ring lap makes RQCPR wrap to
++     * deq.  The normal "drain up to cur" walk then sees zero completed GPDs
++     * even though the QMU consumed the whole ring (HWO all clear).  Treat
++     * that shape as a full lap so the completed GPDs are drained/re-armed.
++     */
++    full_lap = (cur == ruby_rx_deq && hwo == 0) ? 1u : 0u;
++
++    for (n = 0; n < ruby_rx_ring_n && (full_lap || ruby_rx_deq != cur); n++) {
+         i = ruby_rx_deq;
+         g = ruby_rx_gpd_ring + i * 16;
+         if (hwo & (1u << i)) {
+@@ -4495,8 +4520,8 @@
+              * so those completed GPDs are not stranded.  Opt-in and
+              * bounded to one ring lap per drain.
+              */
+-            uint32_t dist = (cur + RUBY_RX_GPD_NUM - ruby_rx_deq) %
+-                RUBY_RX_GPD_NUM;
++            uint32_t dist = (cur + ruby_rx_ring_n - ruby_rx_deq) %
++                ruby_rx_ring_n;
+ 
+             if (ruby_rx_skip_en && dist > 0 &&
+                 (ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE)) {
+@@ -4509,7 +4534,7 @@
+                         hwo, ruby_rx_deq, cur, ruby_rx_packets,
+                         ruby_rx_skip_cnt);
+                 ruby_ep2_rx_arm(i);
+-                ruby_rx_deq = (i + 1u) % RUBY_RX_GPD_NUM;
++                ruby_rx_deq = (i + 1u) % ruby_rx_ring_n;
+                 continue;
+             }
+             break;
+@@ -4543,11 +4568,11 @@
+          * clobber them.  Count a mismatch before re-arming the slot. */
+         if ((g[14] & 0xfu) != ((ruby_rx_buf_pa[i] >> 32) & 0xfu) ||
+             ((g[14] >> 4) & 0xfu) !=
+-            ((ruby_rx_gpd_pa[(i + 1u) % RUBY_RX_GPD_NUM] >> 32) & 0xfu))
++            ((ruby_rx_gpd_pa[(i + 1u) % ruby_rx_ring_n] >> 32) & 0xfu))
+             ruby_rx_ext_bad++;
+ 
+         ruby_ep2_rx_arm(i);
+-        ruby_rx_deq = (i + 1u) % RUBY_RX_GPD_NUM;
++        ruby_rx_deq = (i + 1u) % ruby_rx_ring_n;
+         hwo |= 1u << i;
+         done++;
+         ruby_rx_mtr_add(RUBY_RMR_DONE, (uint16_t)i, len, ruby_rx_deq);
+@@ -4557,7 +4582,19 @@
+         /* 0263: the QMU reads the GPD at cur right after resume; make its
+          * armed state visible before the doorbell (U-Boot 044d7003a7). */
+         ruby_dc_civac(ruby_rx_gpd_ring + cur * 16, 16);
+-        ruby_ep2_rx_resume(mac);
++        if (full_lap) {
++            ruby_rx_full_laps++;
++            if (ruby_rx_full_laps <= 4)
++                printf("RUBY USB: 0309 rx full lap n=%u cur=%02x done=%u "
++                    "rq=%08x\n", ruby_rx_ring_n, cur, done,
++                    ruby_rd32(mac, RQCSR1_OFF));
++            if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
++                ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
++            ruby_rx_mtr_add(RUBY_RMR_RESTART, (uint16_t)ruby_rx_deq,
++                ruby_rd32(mac, RQCSR1_OFF), ruby_rx_packets);
++        } else {
++            ruby_ep2_rx_resume(mac);
++        }
+     }
+     /* 0231: hand the echo bytes to the TX ring right away; the QMU workloop
+      * owns both ends, so this is the same-thread producer -> consumer step. */
+@@ -4574,7 +4611,7 @@
+     if (!ruby_rx_ready)
+         return;
+     ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++    for (i = 0; i < ruby_rx_ring_n; i++)
+         if (ruby_rx_gpd_ring[i * 16] & 1u)
+             hwo |= 1u << i;
+     cur = ruby_ep2_rx_cur_slot(mac);
+@@ -4590,7 +4627,7 @@
+     if (cur == 0xffu)
+         return;
+     for (i = 0; i < 4; i++) {
+-        uint32_t sl = (cur + i) % RUBY_RX_GPD_NUM;
++        uint32_t sl = (cur + i) % ruby_rx_ring_n;
+         volatile uint8_t *g = ruby_rx_gpd_ring + sl * 16;
+ 
+         printf("RUBY USB RXGPD[%02u] f=%02x c=%02x len=%u next=%08x "
+@@ -4600,7 +4637,7 @@
+             *(volatile uint32_t *)(g + 8));
+     }
+     for (i = 0; i < 4; i++) {
+-        uint32_t sl = (ruby_rx_deq + i) % RUBY_RX_GPD_NUM;
++        uint32_t sl = (ruby_rx_deq + i) % ruby_rx_ring_n;
+         volatile uint8_t *g = ruby_rx_gpd_ring + sl * 16;
+ 
+         printf("RUBY USB RXGPDQ[%02u] f=%02x c=%02x len=%u next=%08x "
+@@ -5254,7 +5291,7 @@
+     /* 0260: read-only RX stall snapshot folded into the 5 s line. */
+     if (ruby_rx_ready) {
+         ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
+-        for (ri = 0; ri < RUBY_RX_GPD_NUM; ri++)
++        for (ri = 0; ri < ruby_rx_ring_n; ri++)
+             if (ruby_rx_gpd_ring[ri * 16] & 1u)
+                 rxhwo |= 1u << ri;
+         rxcur = ruby_ep2_rx_cur_slot(mac);
+@@ -5444,7 +5481,7 @@
+ 
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+-    for (i = 0; i < RUBY_GPD_NUM; i++)
++    for (i = 0; i < ruby_tx_ring_n; i++)
+         if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+     txcpr = ruby_rd32(mac, TQCPR1_OFF);
+@@ -5472,7 +5509,7 @@
+     uint32_t hwo = 0, i;
+ 
+     ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++    for (i = 0; i < ruby_rx_ring_n; i++)
+         if (ruby_rx_gpd_ring[i * 16] & 1u)
+             hwo |= 1u << i;
+ 
+@@ -5506,7 +5543,7 @@
+     uint32_t *g;
+ 
+     ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
+-    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++    for (i = 0; i < ruby_rx_ring_n; i++)
+         if (ruby_rx_gpd_ring[i * 16] & 1u)
+             hwo |= 1u << i;
+ 
+@@ -5529,8 +5566,8 @@
+     v[8] = cur;
+     v[9] = v[10] = v[11] = v[12] = v[13] = v[14] = 0;
+     if (cur != 0xffu) {
+-        uint32_t prev = (cur + RUBY_RX_GPD_NUM - 1u) % RUBY_RX_GPD_NUM;
+-        uint32_t next = (cur + 1u) % RUBY_RX_GPD_NUM;
++        uint32_t prev = (cur + ruby_rx_ring_n - 1u) % ruby_rx_ring_n;
++        uint32_t next = (cur + 1u) % ruby_rx_ring_n;
+ 
+         g = (uint32_t *)(ruby_rx_gpd_ring + cur * 16);
+         v[9] = g[0];
+@@ -6110,6 +6147,11 @@
+     int lpmmask = 1;
+     int txslot = 2;
+     int txfifo = 1;
++    int txgpd = 512;
++    int txgpdnum = 64;
++    int rxgpdnum = 16;
++    int inflight = 16;
++    int rxslot = 2;
+     int cfgrst = 0;
+     int recover = 0;
+     int rxbuf = 512;
+@@ -6241,9 +6283,39 @@
+     PE_parse_boot_argn("ruby_txslot", &txslot, sizeof(txslot));
+     if (txslot < 0)
+         txslot = 0;
+-    if (txslot > 0x3f)
+-        txslot = 0x3f;
++    if (txslot > 7)
++        txslot = 7;
+     ruby_txslot = txslot;
++    PE_parse_boot_argn("ruby_txgpd", &txgpd, sizeof(txgpd));
++    if (txgpd < 64)
++        txgpd = 64;
++    if (txgpd > RUBY_TX_GPD_MAX)
++        txgpd = RUBY_TX_GPD_MAX;
++    ruby_tx_gpd_len = (uint32_t)txgpd;
++    PE_parse_boot_argn("ruby_txgpd_num", &txgpdnum, sizeof(txgpdnum));
++    if (txgpdnum < 8)
++        txgpdnum = 8;
++    if (txgpdnum > RUBY_GPD_NUM)
++        txgpdnum = RUBY_GPD_NUM;
++    ruby_tx_ring_n = (uint32_t)txgpdnum;
++    PE_parse_boot_argn("ruby_rxgpd_num", &rxgpdnum, sizeof(rxgpdnum));
++    if (rxgpdnum < 4)
++        rxgpdnum = 4;
++    if (rxgpdnum > RUBY_RX_GPD_NUM)
++        rxgpdnum = RUBY_RX_GPD_NUM;
++    ruby_rx_ring_n = (uint32_t)rxgpdnum;
++    PE_parse_boot_argn("ruby_inflight", &inflight, sizeof(inflight));
++    if (inflight < 1)
++        inflight = 1;
++    if (inflight >= (int)ruby_tx_ring_n)
++        inflight = (int)ruby_tx_ring_n - 1;
++    ruby_inflight_max = (uint32_t)inflight;
++    PE_parse_boot_argn("ruby_rxslot", &rxslot, sizeof(rxslot));
++    if (rxslot < 0)
++        rxslot = 0;
++    if (rxslot > 7)
++        rxslot = 7;
++    ruby_rx_slot = (uint32_t)rxslot;
+     PE_parse_boot_argn("ruby_txfifo", &txfifo, sizeof(txfifo));
+     ruby_txfifo_en = (txfifo == 1);
+     PE_parse_boot_argn("ruby_cfgrst", &cfgrst, sizeof(cfgrst));
+@@ -6307,6 +6379,10 @@
+         ruby_txbell_en, ruby_txbell_ms, ruby_tx_eprst_bit);
+     printf("RUBY USB: 0305 txwatch progress-init\n");
+     printf("RUBY USB: 0308 acr3_bist=0\n");
++    printf("RUBY USB: 0309 txgpd=%u txring=%u inf=%u rxbuf=%u "
++        "rxring=%u rxslot=%u txslot=%d\n",
++        ruby_tx_gpd_len, ruby_tx_ring_n, ruby_inflight_max,
++        ruby_rx_buf_size, ruby_rx_ring_n, ruby_rx_slot, ruby_txslot);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
