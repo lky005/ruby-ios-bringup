@@ -282,6 +282,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0305-ruby-usb-txwatch-progress.patch" \
     "$ROOT/patches/0308b-ruby-usb-acr3-bist.patch" \
     "$ROOT/patches/0309-ruby-usb-throughput-axes.patch" \
+    "$ROOT/patches/0310-ruby-usb-rx-uc-ring.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
