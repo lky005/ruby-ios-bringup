@@ -1,0 +1,26 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -6349,6 +6349,7 @@
+     printf("RUBY USB: 0306 lpmfcp=%d cfgnoflush=%d\n",
+         ruby_lpmfcp_en, ruby_cfgnoflush_en);
+     printf("RUBY USB: 0307 txring=%#x\n", ruby_txring_pa_arg);
++    printf("RUBY USB: 0308 acr3_bist=0\n");
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+@@ -6471,8 +6472,14 @@
+     v |= DTM1_FORCE_IDDIG | DTM1_RG_IDDIG;
+     ruby_wr32(phy, PHY_U2_DTM1, v);
+ 
++    /*
++     * 0308: never enable the PHY pull-up/down BIST.  The vendor keeps
++     * ACR3=0xc0040000/0xc0040200 (BIST clear); with BIST on, an idle TX
++     * endpoint answers an IN with no handshake at all (host XactErr), so
++     * the first write->read of every session failed.
++     */
+     v = ruby_rd32(phy, PHY_U2_ACR3);
+-    v = (v | ACR3_PUPD_BIST_EN) & ~ACR3_EN_PU_DP;
++    v &= ~(ACR3_PUPD_BIST_EN | ACR3_EN_PU_DP);
+     ruby_wr32(phy, PHY_U2_ACR3, v);
+ 
+     /* PS5169 enable on GPIO121. */
