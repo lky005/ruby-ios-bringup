@@ -1,0 +1,318 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index d6549d8..1fcbdf4 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -120,6 +120,7 @@ bsd/dev/ruby_usb_qmu.c			standard
+ bsd/dev/ruby_usb_plat.c			standard
+ bsd/dev/ruby_usb_port.c			standard
+ bsd/dev/ruby_usb_gadget.c			standard
++bsd/dev/ruby_usb_config.c			standard
+ bsd/dev/ruby_usb_io.c			standard
+ bsd/dev/ruby_tty.c			standard
+ bsd/dev/ruby_raw.c			standard
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 791285d..2a24de0 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -62,6 +62,7 @@
+ #include "ruby_usb_mac.h"
+ #include "ruby_usb_port.h"
+ #include "ruby_usb_gadget.h"
++#include "ruby_usb_config.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+@@ -535,10 +536,10 @@ static int ruby_usbintr_en = 1;     /* 0285: vendor suspend intr parity */
+ static int ruby_lpmmask_en = 1;     /* 0287: vendor LPM mask / U3 exit parity */
+ int ruby_txslot = 2;         /* 0288: EP1 IN TX FIFO slot (A/B) */
+ /* 0309: throughput axes; defaults reproduce the 0308 steady state. */
+-static uint32_t ruby_tx_gpd_len = RUBY_TX_MPS;    /* TX bytes per GPD */
++uint32_t ruby_tx_gpd_len = RUBY_TX_MPS;    /* TX bytes per GPD */
+ uint32_t ruby_tx_ring_n = RUBY_GPD_NUM;    /* TX GPD slots in use */
+ uint32_t ruby_rx_ring_n = RUBY_RX_GPD_NUM; /* RX GPD slots in use */
+-static uint32_t ruby_inflight_max = RUBY_EP2_MAX_INFLIGHT;
++uint32_t ruby_inflight_max = RUBY_EP2_MAX_INFLIGHT;
+ uint32_t ruby_rx_slot = 2;
+ static int ruby_txfifo_en = 1;      /* 0289: per-GPD TX FIFO trace */
+ static uint32_t ruby_txfifo_lines;
+@@ -2564,6 +2565,11 @@ ruby_usb_probe(void)
+      * already off above, the PHY pull-up went down with the PHY setup) and
+      * clean EP0 while nothing can reach it.
+      */
++    /* 0330: validate the queue axes and publish the FIFO map before
++     * anything reprograms the endpoints.  Legal input keeps the
++     * effective configuration identical to 0329a6. */
++    ruby_usb_config_validate(mac);
++
+     printf("RUBY USB: detach 150 ms (PHY D+ down, soft-connect off)\n");
+     ruby_ep0_quiet_reset(mac);
+     delay(150000);
+diff --git a/bsd/dev/ruby_usb_config.c b/bsd/dev/ruby_usb_config.c
+new file mode 100644
+index 0000000..6e50a87
+--- /dev/null
++++ b/bsd/dev/ruby_usb_config.c
+@@ -0,0 +1,212 @@
++/*
++ * 0330: configuration/boundary layer.
++ *
++ * The queue axes have always been clamped silently, and the FIFO layout
++ * had no EP0 reservation.  This module re-reads the raw boot arguments,
++ * rejects anything outside the contract (with a bounded print), keeps
++ * an EP0-first 512 B bitmap per direction, and prints the resulting map
++ * once per boot.  Legal input (the 0328 cmdline) is left untouched.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <pexpert/pexpert.h>
++
++#include "ruby_hal.h"
++#include "ruby_usb_mac.h"
++#include "ruby_usb_qmu.h"
++#include "ruby_usb_config.h"
++
++#define CFG_TXGP_DFLT       512u
++#define CFG_TXGP_MAX        16384u
++#define CFG_TXRING_DFLT     64u
++#define CFG_INFLIGHT_DFLT   16u
++#define CFG_RXRING_DFLT     16u
++#define CFG_RXBUF_DFLT      512u
++#define CFG_TXSLOT_DFLT     2
++#define CFG_RXSLOT_DFLT     2u
++#define CFG_TXFBASE_DFLT    0u
++
++int
++ruby_usb_fifo_init(struct ruby_usb_fifo *f, uint32_t total_units,
++    uint32_t ep0_units)
++{
++    if (total_units == 0 || ep0_units == 0 || ep0_units >= total_units)
++        return -1;
++    f->total_units = total_units;
++    f->ep0_units = ep0_units;
++    f->used_units = ep0_units;
++    f->free_units = total_units - ep0_units;
++    f->bitmap = (ep0_units >= 32u) ? ~0u : ((1u << ep0_units) - 1u);
++    return 0;
++}
++
++int
++ruby_usb_fifo_alloc(struct ruby_usb_fifo *f, uint32_t unit)
++{
++    if (unit >= f->total_units)
++        return -1;
++    if (f->bitmap & (1u << unit))
++        return -1;
++    if (f->free_units <= f->ep0_units)      /* never eat the reserve */
++        return -1;
++    f->bitmap |= 1u << unit;
++    f->used_units++;
++    f->free_units--;
++    return 0;
++}
++
++void
++ruby_usb_fifo_release(struct ruby_usb_fifo *f, uint32_t unit)
++{
++    if (unit >= f->total_units || !(f->bitmap & (1u << unit)))
++        return;
++    f->bitmap &= ~(1u << unit);
++    f->used_units--;
++    f->free_units++;
++}
++
++static int
++cfg_raw(const char *key, int dflt)
++{
++    int v = dflt;
++
++    PE_parse_boot_argn(key, &v, sizeof(v));
++    return v;
++}
++
++static void
++cfg_reject(const char *key, int raw, uint32_t used)
++{
++    printf("RUBY CFG: 0330 reject %s=%d -> %u\n", key, raw, used);
++}
++
++static uint32_t
++cfg_multiple(const char *key, int raw, uint32_t dflt, uint32_t min,
++    uint32_t max)
++{
++    if (raw < 0)
++        return dflt;
++    if ((uint32_t)raw < min || (uint32_t)raw > max ||
++        ((uint32_t)raw % RUBY_USB_FIFO_UNIT) != 0) {
++        cfg_reject(key, raw, dflt);
++        return dflt;
++    }
++    return (uint32_t)raw;
++}
++
++void
++ruby_usb_config_validate(vm_offset_t mac)
++{
++    uint32_t cap_ep0, cap_tx, cap_rx, cap_info;
++    uint32_t total_tx, total_rx, ep0_units;
++    uint32_t tx_unit, rx_unit;
++    struct ruby_usb_fifo ftx, frx;
++    int raw;
++    int bad = 0;
++
++    cap_ep0 = ruby_rd32(mac, CAP_EP0FFSZ_OFF);
++    cap_tx = ruby_rd32(mac, CAP_EPNTXFFSZ_OFF);
++    cap_rx = ruby_rd32(mac, CAP_EPNRXFFSZ_OFF);
++    cap_info = ruby_rd32(mac, CAP_EPINFO_OFF);
++    total_tx = (cap_tx >= RUBY_USB_FIFO_UNIT && cap_tx <= 65536u) ?
++        cap_tx : RUBY_USB_FIFO_TOTAL;
++    total_rx = (cap_rx >= RUBY_USB_FIFO_UNIT && cap_rx <= 65536u) ?
++        cap_rx : RUBY_USB_FIFO_TOTAL;
++    ep0_units = (cap_ep0 >= RUBY_USB_FIFO_UNIT) ?
++        (cap_ep0 / RUBY_USB_FIFO_UNIT) : 1u;
++    if (ep0_units == 0 || ep0_units >= total_tx || ep0_units >= total_rx) {
++        printf("RUBY CFG: 0330 bad caps ep0=%u tx=%u rx=%u, use defaults\n",
++            cap_ep0, total_tx, total_rx);
++        total_tx = RUBY_USB_FIFO_TOTAL;
++        total_rx = RUBY_USB_FIFO_TOTAL;
++        ep0_units = 1u;
++        bad = 1;
++    }
++
++    /* ---- queue geometry: reject, never silently clamp ---- */
++    raw = cfg_raw("ruby_txgpd", -1);
++    if (raw >= 0 && ((uint32_t)raw < 64u || (uint32_t)raw > CFG_TXGP_MAX ||
++        ((uint32_t)raw % RUBY_USB_FIFO_UNIT) != 0)) {
++        cfg_reject("ruby_txgpd", raw, CFG_TXGP_DFLT);
++        ruby_tx_gpd_len = CFG_TXGP_DFLT;
++    }
++
++    raw = cfg_raw("ruby_txgpd_num", -1);
++    if (raw >= 0 && ((uint32_t)raw < 8u || (uint32_t)raw > RUBY_GPD_NUM)) {
++        cfg_reject("ruby_txgpd_num", raw, CFG_TXRING_DFLT);
++        ruby_tx_ring_n = CFG_TXRING_DFLT;
++    }
++
++    raw = cfg_raw("ruby_inflight", -1);
++    if (raw >= 0 && ((uint32_t)raw < 1u ||
++        (uint32_t)raw > ruby_tx_ring_n - 1u)) {
++        uint32_t dflt = (CFG_INFLIGHT_DFLT < ruby_tx_ring_n - 1u) ?
++            CFG_INFLIGHT_DFLT : ruby_tx_ring_n - 1u;
++        cfg_reject("ruby_inflight", raw, dflt);
++        ruby_inflight_max = dflt;
++    }
++    if (ruby_inflight_max >= ruby_tx_ring_n) {
++        ruby_inflight_max = ruby_tx_ring_n - 1u;
++        printf("RUBY CFG: 0330 keep one slot inf -> %u\n",
++            ruby_inflight_max);
++        bad = 1;
++    }
++
++    raw = cfg_raw("ruby_rxgpd_num", -1);
++    if (raw >= 0 && ((uint32_t)raw < 4u ||
++        (uint32_t)raw > RUBY_RX_GPD_NUM)) {
++        cfg_reject("ruby_rxgpd_num", raw, CFG_RXRING_DFLT);
++        ruby_rx_ring_n = CFG_RXRING_DFLT;
++    }
++
++    raw = cfg_raw("ruby_rxbuf", -1);
++    if (raw >= 0 && ((uint32_t)raw < RUBY_USB_FIFO_UNIT ||
++        (uint32_t)raw > RUBY_RX_BUF_MAX ||
++        ((uint32_t)raw % RUBY_USB_FIFO_UNIT) != 0)) {
++        cfg_reject("ruby_rxbuf", raw, CFG_RXBUF_DFLT);
++        ruby_rx_buf_size = CFG_RXBUF_DFLT;
++    }
++
++    /* ---- FIFO map: EP0 first, then one 512 B unit per direction ---- */
++    tx_unit = (ruby_txfbase != 0) ?
++        (ruby_txfbase / RUBY_USB_FIFO_UNIT) : (uint32_t)ruby_txslot;
++    rx_unit = ruby_rx_slot;
++    if (ruby_usb_fifo_init(&ftx, total_tx / RUBY_USB_FIFO_UNIT, ep0_units) ||
++        ruby_usb_fifo_init(&frx, total_rx / RUBY_USB_FIFO_UNIT, ep0_units)) {
++        printf("RUBY CFG: 0330 fifo init failed tx=%u rx=%u ep0=%u\n",
++            total_tx, total_rx, ep0_units);
++        return;
++    }
++    if (ruby_usb_fifo_alloc(&ftx, tx_unit) != 0) {
++        cfg_reject("ruby_txslot/txfbase", (int)tx_unit, CFG_TXSLOT_DFLT);
++        ruby_txslot = CFG_TXSLOT_DFLT;
++        ruby_txfbase = CFG_TXFBASE_DFLT;
++        tx_unit = CFG_TXSLOT_DFLT;
++        if (ruby_usb_fifo_alloc(&ftx, tx_unit) != 0)
++            printf("RUBY CFG: 0330 tx fallback ENOSPC\n");
++    }
++    if (ruby_usb_fifo_alloc(&frx, rx_unit) != 0) {
++        cfg_reject("ruby_rxslot", (int)rx_unit, CFG_RXSLOT_DFLT);
++        ruby_rx_slot = CFG_RXSLOT_DFLT;
++        rx_unit = CFG_RXSLOT_DFLT;
++        if (ruby_usb_fifo_alloc(&frx, rx_unit) != 0)
++            printf("RUBY CFG: 0330 rx fallback ENOSPC\n");
++    }
++
++    printf("RUBY CFG: 0330 fifo unit=%u total_tx=%u total_rx=%u "
++        "ep0=%u free_tx=%u free_rx=%u caps=%u/%u/%u/info%u\n",
++        RUBY_USB_FIFO_UNIT, total_tx, total_rx, ep0_units * RUBY_USB_FIFO_UNIT,
++        ftx.free_units * RUBY_USB_FIFO_UNIT, frx.free_units * RUBY_USB_FIFO_UNIT,
++        cap_ep0, cap_tx, cap_rx, cap_info);
++    printf("RUBY CFG: 0330 map ep0=[0,%u) tx=unit%u rx=unit%u txfbase=0x%x\n",
++        ep0_units, tx_unit, ruby_rx_slot, ruby_txfbase);
++    printf("RUBY CFG: 0330 validate %s txgpd=%u txring=%u inf=%u "
++        "rxbuf=%u rxring=%u txslot=%d rxslot=%u\n",
++        bad ? "ok-with-notes" : "ok",
++        ruby_tx_gpd_len, ruby_tx_ring_n, ruby_inflight_max,
++        ruby_rx_buf_size, ruby_rx_ring_n, ruby_txslot, ruby_rx_slot);
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+\ No newline at end of file
+diff --git a/bsd/dev/ruby_usb_config.h b/bsd/dev/ruby_usb_config.h
+new file mode 100644
+index 0000000..b359153
+--- /dev/null
++++ b/bsd/dev/ruby_usb_config.h
+@@ -0,0 +1,43 @@
++#ifndef _RUBY_USB_CONFIG_H_
++#define _RUBY_USB_CONFIG_H_
++
++#include <mach/vm_types.h>
++#include <sys/types.h>
++
++/*
++ * 0330: configuration/boundary layer.  Validates the queue/FIFO boot
++ * arguments, keeps an EP0-first FIFO bitmap and refuses illegal
++ * combinations instead of silently clamping them.  With the 0328
++ * cmdline every value is legal, so the effective configuration is
++ * byte-identical to 0329a6.
++ */
++#define RUBY_USB_FIFO_UNIT      512u
++#define RUBY_USB_FIFO_TOTAL     (8u * 1024u)
++#define RUBY_USB_EP0_RESERVE    512u
++
++struct ruby_usb_fifo {
++    uint32_t total_units;
++    uint32_t ep0_units;
++    uint32_t used_units;
++    uint32_t free_units;
++    uint32_t bitmap;
++};
++
++int  ruby_usb_fifo_init(struct ruby_usb_fifo *f, uint32_t total_units,
++                        uint32_t ep0_units);
++int  ruby_usb_fifo_alloc(struct ruby_usb_fifo *f, uint32_t unit);
++void ruby_usb_fifo_release(struct ruby_usb_fifo *f, uint32_t unit);
++
++/* Values corrected by the validator (defined in ruby_usb.c). */
++extern uint32_t ruby_tx_gpd_len;
++extern uint32_t ruby_inflight_max;
++extern uint32_t ruby_tx_ring_n;
++extern uint32_t ruby_rx_ring_n;
++extern uint32_t ruby_rx_buf_size;
++extern uint32_t ruby_rx_slot;
++extern uint32_t ruby_txfbase;
++extern int      ruby_txslot;
++
++void ruby_usb_config_validate(vm_offset_t mac);
++
++#endif /* _RUBY_USB_CONFIG_H_ */
+\ No newline at end of file
