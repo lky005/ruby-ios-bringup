@@ -1,0 +1,806 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index e8873d2..e7157e0 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -117,6 +117,7 @@ bsd/dev/sweet_goodix_spi.c		standard
+ bsd/dev/ruby_usb.c			standard
+ bsd/dev/ruby_usb_ep.c			standard
+ bsd/dev/ruby_usb_qmu.c			standard
++bsd/dev/ruby_usb_plat.c			standard
+ bsd/dev/ruby_usb_io.c			standard
+ bsd/dev/ruby_tty.c			standard
+ bsd/dev/ruby_raw.c			standard
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1027987..e949f1a 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -61,141 +61,10 @@
+ 
+ #include "ruby_probe.h"
+ #include "ruby_battery.h"
++#include "ruby_usb_plat.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+-#define IPPC_PA      0x11203e00UL
+-#define MTU3_PA      0x11201000UL
+-#define PHY_PA       0x11e40000UL
+-#define GPIO_PA      0x10005000UL
+-#define IFRAO_PA     0x10001000UL
+-/*
+- * 0199: clock-audit regions (probe read-only).  0201: APMIXED base fixed
+- * to the real MT6877 syscon (0x1000C000); the 0199 value 0x11c00000 was
+- * wrong and made the USBPLL reads unreachable.
+- */
+-#define TOPCKGEN_PA  0x10000000UL
+-#define APMIXED_PA   0x1000c000UL
+-
+-#define IPPC_SIZE    0x100
+-#define MTU3_SIZE    0x3000
+-#define PHY_SIZE     0x2000
+-#define GPIO_SIZE    0x1000
+-#define IFRAO_SIZE   0x1000
+-#define TOPCKGEN_SIZE 0x1000
+-#define APMIXED_SIZE  0x1000
+-
+-/* IPPC */
+-#define C0_SW_RST    (1u << 0)
+-#define C2_DEV_PDN   (1u << 0)
+-#define U3_DIS       (1u << 0)
+-#define U3_PDN       (1u << 1)
+-#define U3_HOST_SEL  (1u << 2)
+-#define U3_DUAL_MODE (1u << 7)
+-#define U2_DIS       (1u << 0)
+-#define U2_PDN       (1u << 1)
+-#define U2_HOST      (1u << 2)
+-#define U2_OTG_SEL   (1u << 7)
+-#define DEV_SW_RST   (1u << 0)
+-
+-#define STS_SYSPLL   (1u << 0)
+-#define STS_REF_RST  (1u << 8)
+-#define STS_SYS125   (1u << 10)
+-#define STS_U3_RST   (1u << 16)
+-#define STS2_U2_RST  (1u << 0)
+-
+-/* MAC */
+-#define USB3_CONFIG  (MTU3_PA + 0x141c)
+-#define DEVICE_CONF  (MTU3_PA + 0x0800)
+-#define MISC_CTRL    (MTU3_PA + 0x0c84)
+-#define PM_CTRL      (MTU3_PA + 0x2404)
+-#define USB20_OP     (MTU3_PA + 0x2460)
+-#define BUS_PERFORMANCE (MTU3_PA + 0x2420)
+-#define BUS_PERF_NOISE_STILL_TR (1u << 21)
+-#define LV1IECR      (MTU3_PA + 0x000c)
+-
+-/* PHY banks relative to PHY_PA (U2 COM +0x300; U3 +0x700..) */
+-#define PHY_U2_COM   0x0300
+-#define PHY_U2_ACR3  0x031c
+-#define PHY_U2_ACR0  0x0300
+-#define PHY_U2_ACR4  0x0320
+-#define PHY_U2_ACR5  0x0314
+-#define PHY_U2_ACR6  0x0318
+-#define PHY_U2_DTM0  0x0368
+-#define PHY_U2_DTM1  0x036c
+-#define PHY_U2_DMON1 0x0374
+-#define PHY_U3_SPLLC 0x0700
+-#define PHY_U3_CHIP  0x0800
+-#define PHY_U3_PHYA  0x0b00
+-#define PHY_U3_PHYA_DA0 (PHY_U3_PHYA + 0x100)
+-
+-/* U2 PHY bits (phy-mtk-tphy.c, tphy v2) */
+-#define DTM0_FORCE_UART_EN  (1u << 26)
+-#define DTM0_FORCE_SUSPENDM (1u << 18)
+-#define DTM0_RG_SUSPENDM    (1u << 3)
+-#define DTM0_FORCE_DATAIN   (1u << 23)
+-#define DTM0_FORCE_DM_PD    (1u << 21)
+-#define DTM0_FORCE_DP_PD    (1u << 20)
+-#define DTM0_FORCE_XCVRSEL  (1u << 19)
+-#define DTM0_FORCE_TERMSEL  (1u << 17)
+-#define DTM0_RG_DMPD        (1u << 7)
+-#define DTM0_RG_DPPD        (1u << 6)
+-#define DTM0_RG_XCVRSEL     (0x3u << 4)
+-#define DTM0_RG_TERMSEL     (1u << 2)
+-#define DTM0_RG_DATAIN      (0xfu << 10)
+-#define DTM0_PART_MASK      (DTM0_FORCE_DATAIN | DTM0_FORCE_DM_PD | \
+-                             DTM0_FORCE_DP_PD | DTM0_FORCE_XCVRSEL | \
+-                             DTM0_FORCE_SUSPENDM | DTM0_FORCE_TERMSEL | \
+-                             DTM0_RG_DMPD | DTM0_RG_DPPD | DTM0_RG_TERMSEL)
+-
+-#define DTM1_FORCE_IDDIG    (1u << 9)
+-#define DTM1_RG_IDDIG       (1u << 1)
+-#define DTM1_RG_UART_EN     (1u << 16)
+-#define DTM1_RG_VBUSVALID   (1u << 5)
+-#define DTM1_RG_AVALID      (1u << 2)
+-#define DTM1_RG_SESSEND     (1u << 4)
+-
+-#define ACR0_INTR_EN        (1u << 5)
+-#define ACR5_HS_100U_U3_EN  (1u << 11)
+-#define ACR4_GPIO_CTL       (1u << 9)
+-#define ACR4_GPIO_MODE      (1u << 8)
+-#define ACR6_BC11_SW_EN     (1u << 23)
+-#define ACR6_OTG_VBUSCMP_EN (1u << 20)
+-#define ACR3_PUPD_BIST_EN   (1u << 12)
+-#define ACR3_EN_PU_DP       (1u << 9)
+-
+-/* 0186: vendor hs_slew_rate_calibrate (tphy v2, U2FREQ bank at +0x100). */
+-#define PHY_U2_FMCR0    0x0100
+-#define PHY_U2_FMMONR0  0x0108
+-#define PHY_U2_FMVAL    0x010c
+-#define PHY_U2_FMMONR1  0x0110
+-#define ACR5_SRCAL_EN   (1u << 15)
+-#define ACR5_SRCTRL     (0x7u << 12)
+-#define FMCR0_FREQDET_EN (1u << 24)
+-#define FMCR0_CYCLECNT  0x00ffffffu
+-#define FMMONR1_FRCK_EN  (1u << 8)
+-#define FMMONR1_FM_VALID (1u << 0)
+-#define RUBY_SLEW_REF_MHZ  26u
+-#define RUBY_SLEW_COEF     28u
+-#define RUBY_SLEW_CYCLE    1024u
+-/* 0194: live-sweep golden PHY value (SRCTRL=5, bit30 reserved). */
+-/* 0259: TWRP kprobe read the vendor's live U2 COM block (0x11e40300):
+- * ACR5=0x40804000 (SRCTRL=4, the FM-calibration fallback), not the 5 the
+- * 0189C sweep picked on this board.  Vendor adb on the same PHY is clean. */
+-#define RUBY_GOLDEN_ACR5   0x40804000u
+-
+-/* 0185/0187: ruby u2port0 HS eye tuning (board ruby-mt6877.dtsi). */
+-#define PHY_U2_ACR1     0x0304
+-#define ACR1_VRT_SEL    (0x7u << 12)    /* PA1_RG_VRT_SEL  [14:12] */
+-#define ACR1_TERM_SEL   (0x7u << 8)     /* PA1_RG_TERM_SEL [10:8] */
+-#define ACR6_REV6_SEL   (0x3u << 30)    /* PA6_RG_U2_PHY_REV6  [31:30] */
+-#define ACR6_DISCTH_SEL (0xfu << 4)     /* PA6_RG_U2_DISCTH    [7:4] */
+-#define ACR6_SQTH_SEL   0x0fu           /* PA6_RG_U2_SQTH      [3:0] */
+-#define RUBY_U2_EYE_VRT  6u
+-#define RUBY_U2_EYE_TERM 3u
+-#define RUBY_U2_EYE_REV6 2u
+-#define RUBY_U2_EYE_DISC 13u
+-#define RUBY_U2_SQTH     2u
+ 
+ /* PS5169 enable: GPIO121, bank 3 */
+ #define GPIO_PINMUX_121 0x03f0
+@@ -745,228 +614,6 @@ ruby_probe_write32(uint32_t pa, uint32_t val)
+     return 1;
+ }
+ 
+-static int
+-ruby_usb_wait_sts(vm_offset_t ippc, uint32_t *s1_out, uint32_t *s2_out)
+-{
+-    uint32_t want = STS_SYSPLL | STS_REF_RST | STS_SYS125 | STS_U3_RST;
+-    uint32_t s1 = 0, s2 = 0;
+-
+-    for (int i = 0; i < 2000; i++) {
+-        s1 = ruby_rd32(ippc, 0x10);
+-        s2 = ruby_rd32(ippc, 0x14);
+-        if ((s1 & want) == want && (s2 & STS2_U2_RST))
+-            break;
+-        delay(100);
+-    }
+-    *s1_out = s1;
+-    *s2_out = s2;
+-    return ((s1 & want) == want && (s2 & STS2_U2_RST)) ? 0 : -1;
+-}
+-
+-static void
+-ruby_usb_u3_phy_on(vm_offset_t phy)
+-{
+-    uint32_t v;
+-
+-    v = ruby_rd32(phy, PHY_U3_PHYA + 0x04);       /* RG_SSUSB_VA_ON */
+-    v |= (1u << 29);
+-    ruby_wr32(phy, PHY_U3_PHYA + 0x04, v);
+-
+-    v = ruby_rd32(phy, PHY_U3_SPLLC + 0x18);      /* XTAL RX */
+-    v |= (1u << 9) | (1u << 8);
+-    ruby_wr32(phy, PHY_U3_SPLLC + 0x18, v);
+-
+-    v = ruby_rd32(phy, PHY_U3_PHYA_DA0);          /* XTAL_EXT_EN_U3 */
+-    v &= ~(0x3u << 10);
+-    v |= (2u << 10);
+-    ruby_wr32(phy, PHY_U3_PHYA_DA0, v);
+-
+-    v = ruby_rd32(phy, PHY_U3_CHIP + 0x0c);       /* release IP reset */
+-    v &= ~((1u << 31) | (1u << 29));
+-    ruby_wr32(phy, PHY_U3_CHIP + 0x0c, v);
+-
+-    v = ruby_rd32(phy, PHY_U3_CHIP + 0x10);       /* release PHYD reset */
+-    v &= ~((1u << 25) | (1u << 24));
+-    ruby_wr32(phy, PHY_U3_CHIP + 0x10, v);
+-}
+-
+-/*
+- * 0203: vendor u2_phy_instance_power_off cold-soak, phy-mtk-tphy.c
+- * :1362-1451.  MT6877 takes the CONFIG_MACH_MT6781=unset branch, so the
+- * full SUSPENDM/REV6/800us analog reset is compiled; avoid_rx_sen_
+- * degradation is false for generic-tphy-v2, so the :1433 block is skipped.
+- * This is the vendor cold-enable cycle never exercised here before (0189C
+- * only did microsecond pokes).  It runs before the board eye props so the
+- * golden REV6=2/ACR5 written afterwards wins over the transient REV6=1.
+- * REV6 is masked-then-set (not the vendor's bare |=) because the pre-soak
+- * REV6 is not guaranteed 0 on this board.
+- */
+-static void
+-ruby_usb_u2_phy_off(vm_offset_t phy)
+-{
+-    uint32_t v;
+-
+-    v = ruby_rd32(phy, PHY_U2_DTM0);              /* clear FORCE_UART_EN */
+-    v &= ~DTM0_FORCE_UART_EN;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_DTM1);              /* clear RG_UART_EN */
+-    v &= ~DTM1_RG_UART_EN;
+-    ruby_wr32(phy, PHY_U2_DTM1, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR4);              /* clear GPIO mask */
+-    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
+-    ruby_wr32(phy, PHY_U2_ACR4, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR6);              /* clear BC11 */
+-    v &= ~ACR6_BC11_SW_EN;
+-    ruby_wr32(phy, PHY_U2_ACR6, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR6);              /* OTG disable */
+-    v &= ~ACR6_OTG_VBUSCMP_EN;
+-    ruby_wr32(phy, PHY_U2_ACR6, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_DTM1);              /* VBUS/AVALID off */
+-    v &= ~(DTM1_RG_VBUSVALID | DTM1_RG_AVALID);
+-    v |= DTM1_RG_SESSEND;
+-    ruby_wr32(phy, PHY_U2_DTM1, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_DTM0);              /* force suspend */
+-    v |= DTM0_RG_SUSPENDM | DTM0_FORCE_SUSPENDM;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-
+-    delay(2000);                                  /* vendor mdelay(2) */
+-
+-    v = ruby_rd32(phy, PHY_U2_DTM0);              /* XCVRSEL=1 + part */
+-    v &= ~DTM0_FORCE_DATAIN;
+-    v |= (1u << 4) | DTM0_PART_MASK;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR6);              /* REV6=1 (transient) */
+-    v = (v & ~ACR6_REV6_SEL) | (1u << 30);
+-    ruby_wr32(phy, PHY_U2_ACR6, v);
+-
+-    delay(800);                                   /* vendor udelay(800) */
+-
+-    v = ruby_rd32(phy, PHY_U2_DTM0);              /* release suspend */
+-    v &= ~DTM0_RG_SUSPENDM;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-
+-    delay(1);                                     /* vendor udelay(1) */
+-}
+-
+-static void
+-ruby_usb_u2_phy_on(vm_offset_t phy)
+-{
+-    uint32_t v;
+-
+-    /* u2_phy_instance_init (tphy v2, generic-tphy-v2). */
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v &= ~(DTM0_FORCE_UART_EN | DTM0_FORCE_SUSPENDM);
+-    v |= (1u << 4);                              /* XCVRSEL = 1 */
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_DTM1);
+-    v &= ~DTM1_RG_UART_EN;
+-    ruby_wr32(phy, PHY_U2_DTM1, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR0);
+-    v |= ACR0_INTR_EN;
+-    ruby_wr32(phy, PHY_U2_ACR0, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR5);
+-    v &= ~ACR5_HS_100U_U3_EN;
+-    ruby_wr32(phy, PHY_U2_ACR5, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR4);
+-    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
+-    ruby_wr32(phy, PHY_U2_ACR4, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR6);
+-    v &= ~(ACR6_BC11_SW_EN | 0xfu);
+-    v |= 2u;                                     /* SQTH = 2 */
+-    ruby_wr32(phy, PHY_U2_ACR6, v);
+-
+-    /*
+-     * 0203: vendor cold-enable cycle.  Run the power_off cold-soak here,
+-     * after instance_init and before the board eye props below, so the
+-     * golden eye (REV6=2/ACR5) is the last write and overrides the soak's
+-     * transient REV6=1.  Boot-enable only (reattach unchanged, single
+-     * variable).
+-     */
+-    ruby_usb_u2_phy_off(phy);
+-
+-    /*
+-     * 0185/0187: board eye tuning from ruby-mt6877.dtsi &u2port0
+-     * (model "RUBY"): VRT=6, TERM=3, REV6=2, DISCTH=13, SQTH=2.
+-     * Vendor order is instance_init -> efuse -> props_set -> power_on,
+-     * so this sits before the SUSPENDM sequence below.
+-     */
+-    v = ruby_rd32(phy, PHY_U2_ACR1);
+-    v &= ~(ACR1_VRT_SEL | ACR1_TERM_SEL);
+-    v |= (RUBY_U2_EYE_VRT << 12) | (RUBY_U2_EYE_TERM << 8);
+-    ruby_wr32(phy, PHY_U2_ACR1, v);
+-
+-    v = ruby_rd32(phy, PHY_U2_ACR6);
+-    v &= ~(ACR6_REV6_SEL | ACR6_DISCTH_SEL | ACR6_SQTH_SEL);
+-    v |= (RUBY_U2_EYE_REV6 << 30) | (RUBY_U2_EYE_DISC << 4) |
+-        RUBY_U2_SQTH;
+-    ruby_wr32(phy, PHY_U2_ACR6, v);
+-    printf("RUBY USB: PHY eye acr1=0x%08x acr6=0x%08x\n",
+-        ruby_rd32(phy, PHY_U2_ACR1), ruby_rd32(phy, PHY_U2_ACR6));
+-
+-    /* u2_phy_instance_power_on. */
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v |= DTM0_FORCE_SUSPENDM;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v &= ~DTM0_RG_SUSPENDM;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v |= DTM0_RG_SUSPENDM;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-    delay(30);
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v &= ~DTM0_FORCE_SUSPENDM;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v &= ~DTM0_RG_SUSPENDM;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v &= ~DTM0_FORCE_UART_EN;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-    v = ruby_rd32(phy, PHY_U2_DTM1);
+-    v &= ~DTM1_RG_UART_EN;
+-    ruby_wr32(phy, PHY_U2_DTM1, v);
+-    v = ruby_rd32(phy, PHY_U2_ACR4);
+-    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
+-    ruby_wr32(phy, PHY_U2_ACR4, v);
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v &= ~DTM0_FORCE_SUSPENDM;
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-    v = ruby_rd32(phy, PHY_U2_DTM0);
+-    v &= ~(DTM0_RG_XCVRSEL | DTM0_RG_DATAIN | DTM0_PART_MASK);
+-    ruby_wr32(phy, PHY_U2_DTM0, v);
+-    v = ruby_rd32(phy, PHY_U2_ACR6);
+-    v &= ~ACR6_BC11_SW_EN;
+-    ruby_wr32(phy, PHY_U2_ACR6, v);
+-    v = ruby_rd32(phy, PHY_U2_ACR6);
+-    v |= ACR6_OTG_VBUSCMP_EN;
+-    ruby_wr32(phy, PHY_U2_ACR6, v);
+-    v = ruby_rd32(phy, PHY_U2_DTM1);
+-    v |= DTM1_RG_VBUSVALID | DTM1_RG_AVALID;
+-    v &= ~DTM1_RG_SESSEND;
+-    ruby_wr32(phy, PHY_U2_DTM1, v);
+-
+-    /*
+-     * 0194: FM calibration retired.  The 0189C live sweep selected
+-     * SRCTRL=5 (ACR5=0x40805000) as the golden board value; the FM
+-     * counter never oscillated on this port, so it is not a selector.
+-     */
+-    ruby_wr32(phy, PHY_U2_ACR5, RUBY_GOLDEN_ACR5);
+-    printf("RUBY USB: golden acr5=0x%08x\n", ruby_rd32(phy, PHY_U2_ACR5));
+-}
+-
+ static void
+ ruby_trace(uint32_t t, uint16_t type, uint16_t a, uint32_t b, uint32_t c,
+     uint32_t d)
+diff --git a/bsd/dev/ruby_usb_plat.c b/bsd/dev/ruby_usb_plat.c
+new file mode 100644
+index 0000000..49928bb
+--- /dev/null
++++ b/bsd/dev/ruby_usb_plat.c
+@@ -0,0 +1,255 @@
++/*
++ * 0329a5: L0 platform moved verbatim from ruby_usb.c.
++ *
++ * IPPC status wait and the vendor U2/U3 PHY power sequences.  Register
++ * accessors are local copies of the ruby_usb.c ones so the moved bodies
++ * keep the same ordering (store then dsb, load then dmb oshld).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <mach/vm_types.h>
++#include <machine/machine_routines.h>
++
++#include "ruby_usb_plat.h"
++
++static inline uint32_t
++ruby_rd32(vm_offset_t base, uint32_t off)
++{
++    uint32_t v = *(volatile uint32_t *)(base + off);
++    __asm__ volatile("dmb oshld" ::: "memory");
++    return v;
++}
++
++static inline void
++ruby_wr32(vm_offset_t base, uint32_t off, uint32_t v)
++{
++    *(volatile uint32_t *)(base + off) = v;
++    __asm__ volatile("dsb sy" ::: "memory");
++}
++
++int
++ruby_usb_wait_sts(vm_offset_t ippc, uint32_t *s1_out, uint32_t *s2_out)
++{
++    uint32_t want = STS_SYSPLL | STS_REF_RST | STS_SYS125 | STS_U3_RST;
++    uint32_t s1 = 0, s2 = 0;
++
++    for (int i = 0; i < 2000; i++) {
++        s1 = ruby_rd32(ippc, 0x10);
++        s2 = ruby_rd32(ippc, 0x14);
++        if ((s1 & want) == want && (s2 & STS2_U2_RST))
++            break;
++        delay(100);
++    }
++    *s1_out = s1;
++    *s2_out = s2;
++    return ((s1 & want) == want && (s2 & STS2_U2_RST)) ? 0 : -1;
++}
++
++void
++ruby_usb_u3_phy_on(vm_offset_t phy)
++{
++    uint32_t v;
++
++    v = ruby_rd32(phy, PHY_U3_PHYA + 0x04);       /* RG_SSUSB_VA_ON */
++    v |= (1u << 29);
++    ruby_wr32(phy, PHY_U3_PHYA + 0x04, v);
++
++    v = ruby_rd32(phy, PHY_U3_SPLLC + 0x18);      /* XTAL RX */
++    v |= (1u << 9) | (1u << 8);
++    ruby_wr32(phy, PHY_U3_SPLLC + 0x18, v);
++
++    v = ruby_rd32(phy, PHY_U3_PHYA_DA0);          /* XTAL_EXT_EN_U3 */
++    v &= ~(0x3u << 10);
++    v |= (2u << 10);
++    ruby_wr32(phy, PHY_U3_PHYA_DA0, v);
++
++    v = ruby_rd32(phy, PHY_U3_CHIP + 0x0c);       /* release IP reset */
++    v &= ~((1u << 31) | (1u << 29));
++    ruby_wr32(phy, PHY_U3_CHIP + 0x0c, v);
++
++    v = ruby_rd32(phy, PHY_U3_CHIP + 0x10);       /* release PHYD reset */
++    v &= ~((1u << 25) | (1u << 24));
++    ruby_wr32(phy, PHY_U3_CHIP + 0x10, v);
++}
++
++/*
++ * 0203: vendor u2_phy_instance_power_off cold-soak, phy-mtk-tphy.c
++ * :1362-1451.  MT6877 takes the CONFIG_MACH_MT6781=unset branch, so the
++ * full SUSPENDM/REV6/800us analog reset is compiled; avoid_rx_sen_
++ * degradation is false for generic-tphy-v2, so the :1433 block is skipped.
++ * This is the vendor cold-enable cycle never exercised here before (0189C
++ * only did microsecond pokes).  It runs before the board eye props so the
++ * golden REV6=2/ACR5 written afterwards wins over the transient REV6=1.
++ * REV6 is masked-then-set (not the vendor's bare |=) because the pre-soak
++ * REV6 is not guaranteed 0 on this board.
++ */
++void
++ruby_usb_u2_phy_off(vm_offset_t phy)
++{
++    uint32_t v;
++
++    v = ruby_rd32(phy, PHY_U2_DTM0);              /* clear FORCE_UART_EN */
++    v &= ~DTM0_FORCE_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    v = ruby_rd32(phy, PHY_U2_DTM1);              /* clear RG_UART_EN */
++    v &= ~DTM1_RG_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR4);              /* clear GPIO mask */
++    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
++    ruby_wr32(phy, PHY_U2_ACR4, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);              /* clear BC11 */
++    v &= ~ACR6_BC11_SW_EN;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);              /* OTG disable */
++    v &= ~ACR6_OTG_VBUSCMP_EN;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++
++    v = ruby_rd32(phy, PHY_U2_DTM1);              /* VBUS/AVALID off */
++    v &= ~(DTM1_RG_VBUSVALID | DTM1_RG_AVALID);
++    v |= DTM1_RG_SESSEND;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++
++    v = ruby_rd32(phy, PHY_U2_DTM0);              /* force suspend */
++    v |= DTM0_RG_SUSPENDM | DTM0_FORCE_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    delay(2000);                                  /* vendor mdelay(2) */
++
++    v = ruby_rd32(phy, PHY_U2_DTM0);              /* XCVRSEL=1 + part */
++    v &= ~DTM0_FORCE_DATAIN;
++    v |= (1u << 4) | DTM0_PART_MASK;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);              /* REV6=1 (transient) */
++    v = (v & ~ACR6_REV6_SEL) | (1u << 30);
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++
++    delay(800);                                   /* vendor udelay(800) */
++
++    v = ruby_rd32(phy, PHY_U2_DTM0);              /* release suspend */
++    v &= ~DTM0_RG_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    delay(1);                                     /* vendor udelay(1) */
++}
++
++void
++ruby_usb_u2_phy_on(vm_offset_t phy)
++{
++    uint32_t v;
++
++    /* u2_phy_instance_init (tphy v2, generic-tphy-v2). */
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~(DTM0_FORCE_UART_EN | DTM0_FORCE_SUSPENDM);
++    v |= (1u << 4);                              /* XCVRSEL = 1 */
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    v = ruby_rd32(phy, PHY_U2_DTM1);
++    v &= ~DTM1_RG_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR0);
++    v |= ACR0_INTR_EN;
++    ruby_wr32(phy, PHY_U2_ACR0, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR5);
++    v &= ~ACR5_HS_100U_U3_EN;
++    ruby_wr32(phy, PHY_U2_ACR5, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR4);
++    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
++    ruby_wr32(phy, PHY_U2_ACR4, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);
++    v &= ~(ACR6_BC11_SW_EN | 0xfu);
++    v |= 2u;                                     /* SQTH = 2 */
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++
++    /*
++     * 0203: vendor cold-enable cycle.  Run the power_off cold-soak here,
++     * after instance_init and before the board eye props below, so the
++     * golden eye (REV6=2/ACR5) is the last write and overrides the soak's
++     * transient REV6=1.  Boot-enable only (reattach unchanged, single
++     * variable).
++     */
++    ruby_usb_u2_phy_off(phy);
++
++    /*
++     * 0185/0187: board eye tuning from ruby-mt6877.dtsi &u2port0
++     * (model "RUBY"): VRT=6, TERM=3, REV6=2, DISCTH=13, SQTH=2.
++     * Vendor order is instance_init -> efuse -> props_set -> power_on,
++     * so this sits before the SUSPENDM sequence below.
++     */
++    v = ruby_rd32(phy, PHY_U2_ACR1);
++    v &= ~(ACR1_VRT_SEL | ACR1_TERM_SEL);
++    v |= (RUBY_U2_EYE_VRT << 12) | (RUBY_U2_EYE_TERM << 8);
++    ruby_wr32(phy, PHY_U2_ACR1, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);
++    v &= ~(ACR6_REV6_SEL | ACR6_DISCTH_SEL | ACR6_SQTH_SEL);
++    v |= (RUBY_U2_EYE_REV6 << 30) | (RUBY_U2_EYE_DISC << 4) |
++        RUBY_U2_SQTH;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++    printf("RUBY USB: PHY eye acr1=0x%08x acr6=0x%08x\n",
++        ruby_rd32(phy, PHY_U2_ACR1), ruby_rd32(phy, PHY_U2_ACR6));
++
++    /* u2_phy_instance_power_on. */
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v |= DTM0_FORCE_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_RG_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v |= DTM0_RG_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    delay(30);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_FORCE_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_RG_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_FORCE_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM1);
++    v &= ~DTM1_RG_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++    v = ruby_rd32(phy, PHY_U2_ACR4);
++    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
++    ruby_wr32(phy, PHY_U2_ACR4, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~DTM0_FORCE_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_DTM0);
++    v &= ~(DTM0_RG_XCVRSEL | DTM0_RG_DATAIN | DTM0_PART_MASK);
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++    v = ruby_rd32(phy, PHY_U2_ACR6);
++    v &= ~ACR6_BC11_SW_EN;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++    v = ruby_rd32(phy, PHY_U2_ACR6);
++    v |= ACR6_OTG_VBUSCMP_EN;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++    v = ruby_rd32(phy, PHY_U2_DTM1);
++    v |= DTM1_RG_VBUSVALID | DTM1_RG_AVALID;
++    v &= ~DTM1_RG_SESSEND;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++
++    /*
++     * 0194: FM calibration retired.  The 0189C live sweep selected
++     * SRCTRL=5 (ACR5=0x40805000) as the golden board value; the FM
++     * counter never oscillated on this port, so it is not a selector.
++     */
++    ruby_wr32(phy, PHY_U2_ACR5, RUBY_GOLDEN_ACR5);
++    printf("RUBY USB: golden acr5=0x%08x\n", ruby_rd32(phy, PHY_U2_ACR5));
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ruby_usb_plat.h b/bsd/dev/ruby_usb_plat.h
+new file mode 100644
+index 0000000..f5a851c
+--- /dev/null
++++ b/bsd/dev/ruby_usb_plat.h
+@@ -0,0 +1,151 @@
++#ifndef _RUBY_USB_PLAT_H_
++#define _RUBY_USB_PLAT_H_
++
++#include <mach/vm_types.h>
++#include <sys/types.h>
++
++/*
++ * 0329a5: L0 platform layer.  The IPPC/clock/PHY map and the vendor
++ * U3/U2 PHY sequences move here verbatim from ruby_usb.c; the MAC
++ * register map travels with it because attach/EP0 still share the
++ * offsets.  Behavior must stay identical to 0329a4.
++ */
++#define IPPC_PA      0x11203e00UL
++#define MTU3_PA      0x11201000UL
++#define PHY_PA       0x11e40000UL
++#define GPIO_PA      0x10005000UL
++#define IFRAO_PA     0x10001000UL
++/*
++ * 0199: clock-audit regions (probe read-only).  0201: APMIXED base fixed
++ * to the real MT6877 syscon (0x1000C000); the 0199 value 0x11c00000 was
++ * wrong and made the USBPLL reads unreachable.
++ */
++#define TOPCKGEN_PA  0x10000000UL
++#define APMIXED_PA   0x1000c000UL
++
++#define IPPC_SIZE    0x100
++#define MTU3_SIZE    0x3000
++#define PHY_SIZE     0x2000
++#define GPIO_SIZE    0x1000
++#define IFRAO_SIZE   0x1000
++#define TOPCKGEN_SIZE 0x1000
++#define APMIXED_SIZE  0x1000
++
++/* IPPC */
++#define C0_SW_RST    (1u << 0)
++#define C2_DEV_PDN   (1u << 0)
++#define U3_DIS       (1u << 0)
++#define U3_PDN       (1u << 1)
++#define U3_HOST_SEL  (1u << 2)
++#define U3_DUAL_MODE (1u << 7)
++#define U2_DIS       (1u << 0)
++#define U2_PDN       (1u << 1)
++#define U2_HOST      (1u << 2)
++#define U2_OTG_SEL   (1u << 7)
++#define DEV_SW_RST   (1u << 0)
++
++#define STS_SYSPLL   (1u << 0)
++#define STS_REF_RST  (1u << 8)
++#define STS_SYS125   (1u << 10)
++#define STS_U3_RST   (1u << 16)
++#define STS2_U2_RST  (1u << 0)
++
++/* MAC */
++#define USB3_CONFIG  (MTU3_PA + 0x141c)
++#define DEVICE_CONF  (MTU3_PA + 0x0800)
++#define MISC_CTRL    (MTU3_PA + 0x0c84)
++#define PM_CTRL      (MTU3_PA + 0x2404)
++#define USB20_OP     (MTU3_PA + 0x2460)
++#define BUS_PERFORMANCE (MTU3_PA + 0x2420)
++#define BUS_PERF_NOISE_STILL_TR (1u << 21)
++#define LV1IECR      (MTU3_PA + 0x000c)
++
++/* PHY banks relative to PHY_PA (U2 COM +0x300; U3 +0x700..) */
++#define PHY_U2_COM   0x0300
++#define PHY_U2_ACR3  0x031c
++#define PHY_U2_ACR0  0x0300
++#define PHY_U2_ACR4  0x0320
++#define PHY_U2_ACR5  0x0314
++#define PHY_U2_ACR6  0x0318
++#define PHY_U2_DTM0  0x0368
++#define PHY_U2_DTM1  0x036c
++#define PHY_U2_DMON1 0x0374
++#define PHY_U3_SPLLC 0x0700
++#define PHY_U3_CHIP  0x0800
++#define PHY_U3_PHYA  0x0b00
++#define PHY_U3_PHYA_DA0 (PHY_U3_PHYA + 0x100)
++
++/* U2 PHY bits (phy-mtk-tphy.c, tphy v2) */
++#define DTM0_FORCE_UART_EN  (1u << 26)
++#define DTM0_FORCE_SUSPENDM (1u << 18)
++#define DTM0_RG_SUSPENDM    (1u << 3)
++#define DTM0_FORCE_DATAIN   (1u << 23)
++#define DTM0_FORCE_DM_PD    (1u << 21)
++#define DTM0_FORCE_DP_PD    (1u << 20)
++#define DTM0_FORCE_XCVRSEL  (1u << 19)
++#define DTM0_FORCE_TERMSEL  (1u << 17)
++#define DTM0_RG_DMPD        (1u << 7)
++#define DTM0_RG_DPPD        (1u << 6)
++#define DTM0_RG_XCVRSEL     (0x3u << 4)
++#define DTM0_RG_TERMSEL     (1u << 2)
++#define DTM0_RG_DATAIN      (0xfu << 10)
++#define DTM0_PART_MASK      (DTM0_FORCE_DATAIN | DTM0_FORCE_DM_PD | \
++                             DTM0_FORCE_DP_PD | DTM0_FORCE_XCVRSEL | \
++                             DTM0_FORCE_SUSPENDM | DTM0_FORCE_TERMSEL | \
++                             DTM0_RG_DMPD | DTM0_RG_DPPD | DTM0_RG_TERMSEL)
++
++#define DTM1_FORCE_IDDIG    (1u << 9)
++#define DTM1_RG_IDDIG       (1u << 1)
++#define DTM1_RG_UART_EN     (1u << 16)
++#define DTM1_RG_VBUSVALID   (1u << 5)
++#define DTM1_RG_AVALID      (1u << 2)
++#define DTM1_RG_SESSEND     (1u << 4)
++
++#define ACR0_INTR_EN        (1u << 5)
++#define ACR5_HS_100U_U3_EN  (1u << 11)
++#define ACR4_GPIO_CTL       (1u << 9)
++#define ACR4_GPIO_MODE      (1u << 8)
++#define ACR6_BC11_SW_EN     (1u << 23)
++#define ACR6_OTG_VBUSCMP_EN (1u << 20)
++#define ACR3_PUPD_BIST_EN   (1u << 12)
++#define ACR3_EN_PU_DP       (1u << 9)
++
++/* 0186: vendor hs_slew_rate_calibrate (tphy v2, U2FREQ bank at +0x100). */
++#define PHY_U2_FMCR0    0x0100
++#define PHY_U2_FMMONR0  0x0108
++#define PHY_U2_FMVAL    0x010c
++#define PHY_U2_FMMONR1  0x0110
++#define ACR5_SRCAL_EN   (1u << 15)
++#define ACR5_SRCTRL     (0x7u << 12)
++#define FMCR0_FREQDET_EN (1u << 24)
++#define FMCR0_CYCLECNT  0x00ffffffu
++#define FMMONR1_FRCK_EN  (1u << 8)
++#define FMMONR1_FM_VALID (1u << 0)
++#define RUBY_SLEW_REF_MHZ  26u
++#define RUBY_SLEW_COEF     28u
++#define RUBY_SLEW_CYCLE    1024u
++/* 0194: live-sweep golden PHY value (SRCTRL=5, bit30 reserved). */
++/* 0259: TWRP kprobe read the vendor's live U2 COM block (0x11e40300):
++ * ACR5=0x40804000 (SRCTRL=4, the FM-calibration fallback), not the 5 the
++ * 0189C sweep picked on this board.  Vendor adb on the same PHY is clean. */
++#define RUBY_GOLDEN_ACR5   0x40804000u
++
++/* 0185/0187: ruby u2port0 HS eye tuning (board ruby-mt6877.dtsi). */
++#define PHY_U2_ACR1     0x0304
++#define ACR1_VRT_SEL    (0x7u << 12)    /* PA1_RG_VRT_SEL  [14:12] */
++#define ACR1_TERM_SEL   (0x7u << 8)     /* PA1_RG_TERM_SEL [10:8] */
++#define ACR6_REV6_SEL   (0x3u << 30)    /* PA6_RG_U2_PHY_REV6  [31:30] */
++#define ACR6_DISCTH_SEL (0xfu << 4)     /* PA6_RG_U2_DISCTH    [7:4] */
++#define ACR6_SQTH_SEL   0x0fu           /* PA6_RG_U2_SQTH      [3:0] */
++#define RUBY_U2_EYE_VRT  6u
++#define RUBY_U2_EYE_TERM 3u
++#define RUBY_U2_EYE_REV6 2u
++#define RUBY_U2_EYE_DISC 13u
++#define RUBY_U2_SQTH     2u
++
++int ruby_usb_wait_sts(vm_offset_t ippc, uint32_t *s1_out, uint32_t *s2_out);
++void ruby_usb_u3_phy_on(vm_offset_t phy);
++void ruby_usb_u2_phy_off(vm_offset_t phy);
++void ruby_usb_u2_phy_on(vm_offset_t phy);
++
++#endif /* _RUBY_USB_PLAT_H_ */
