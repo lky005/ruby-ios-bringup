@@ -1,0 +1,315 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1ad2e1f..46f1f0f 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -110,6 +110,7 @@ static const uint8_t ruby_dev_desc_base[18] = {
+  * 0xEF/0x02/0x01 (explicit composite); profiles 0/1 keep 0/0/0.
+  */
+ uint8_t ruby_dev_desc[18];
++int ruby_winusb_mode;
+ 
+ const uint8_t ruby_str_lang[4] = { 4, 3, 0x09, 0x04 };
+ const uint8_t ruby_str_mfg[10] = {
+@@ -2087,6 +2088,7 @@ ruby_usb_probe(void)
+     int cfgrst = 0;
+     int recover = 0;
+     int rxbuf = 512;
++    int winusb = 0;
+     int lpmfc = 0;
+     int devrstpre = 0;
+     int clr01 = 0;
+@@ -2265,6 +2267,23 @@ ruby_usb_probe(void)
+     if (rxbuf > RUBY_RX_BUF_MAX)
+         rxbuf = RUBY_RX_BUF_MAX;
+     ruby_rx_buf_size = (uint32_t)rxbuf;
++    PE_parse_boot_argn("rubywinusb", &winusb, sizeof(winusb));
++    if (winusb < 0)
++        winusb = 0;
++    if (winusb > 3)
++        winusb = 0;
++    ruby_winusb_mode = winusb;
++    if ((ruby_winusb_mode == 1 || ruby_winusb_mode == 2) &&
++        (ruby_enum_profile == 0 || ruby_enum_profile == 2)) {
++        ruby_dev_desc[2] = 0x01;
++        ruby_dev_desc[3] = 0x02;
++    }
++    printf("RUBY 0332: bcdusb=%02x%02x winusb=%d bos=%d msos_iface=%d "
++        "rescue ep=01/81 kept ", ruby_dev_desc[3], ruby_dev_desc[2],
++        ruby_winusb_mode,
++        ((ruby_winusb_mode == 1 || ruby_winusb_mode == 2) &&
++         (ruby_enum_profile == 0 || ruby_enum_profile == 2)) ? 1 : 0,
++        (ruby_enum_profile == 0) ? 0 : ((ruby_enum_profile == 2) ? 2 : -1));
+     PE_parse_boot_argn("ruby_clr01", &clr01, sizeof(clr01));
+     ruby_clr01_en = (clr01 == 1);
+     PE_parse_boot_argn("ruby_qisar1_w", &qisar1w, sizeof(qisar1w));
+diff --git a/bsd/dev/ruby_usb_gadget.c b/bsd/dev/ruby_usb_gadget.c
+index 45ae2c8..4681dda 100644
+--- a/bsd/dev/ruby_usb_gadget.c
++++ b/bsd/dev/ruby_usb_gadget.c
+@@ -17,6 +17,8 @@
+ #include "ruby_usb_plat.h"
+ #include "ruby_usb_mac.h"
+ #include "ruby_usb_ep_test.h"
++
++extern int ruby_winusb_mode;
+ #include "ruby_battery.h"
+ #include "ruby_probe.h"
+ #include "ruby_usb_gadget.h"
+@@ -134,6 +136,13 @@ ruby_build_cfg_desc(uint8_t *out)
+         vout[off++] = (uint8_t)(ruby_eps[3].mps & 0xffu);
+         vout[off++] = (uint8_t)((ruby_eps[3].mps >> 8) & 0xffu);
+         vout[off++] = 0;
++        if (ruby_enum_profile == 2 && ruby_winusb_mode != 0) {
++            /* 0332: vendor debug interface #2 (control-only) for MS OS 2.0.
++             * The CDC data pair 0x01/0x81 and the rescue lane stay put. */
++            vout[off++] = 9; vout[off++] = 4; vout[off++] = 2;
++            vout[off++] = 0; vout[off++] = 0; vout[off++] = 0xFF;
++            vout[off++] = 0; vout[off++] = 0; vout[off++] = 0;
++        }
+         vout[2] = (uint8_t)(off & 0xffu);
+         vout[3] = (uint8_t)((off >> 8) & 0xffu);
+         return off;
+@@ -436,6 +445,206 @@ ruby_ep0_tx_service(vm_offset_t mac, uint32_t t)
+     ruby_ep0_tx_step(mac, t, 0);
+ }
+ 
++
++/* ---- 0332: BOS + MS OS 2.0 (Vendor debug interface only, gated) ---- */
++#define RUBY_BOS_LEN 40u
++#define RUBY_MSOS_MAX 192u
++static uint8_t ruby_bos_desc[RUBY_BOS_LEN];
++static uint8_t ruby_msos_desc[RUBY_MSOS_MAX];
++static uint32_t ruby_msos_len;
++static int ruby_0332_iface = -2;   /* -2 unbuilt, -1 none, >=0 vendor iface */
++
++extern int ruby_winusb_mode;
++
++static int
++ruby_0332_vendor_iface(void)
++{
++    if (ruby_winusb_mode == 0)
++        return -1;
++    if (ruby_enum_profile == 0)
++        return 0;
++    if (ruby_enum_profile == 2)
++        return 2;
++    return -1;
++}
++
++static int
++ruby_0332_bos_on(void)
++{
++    /* mode 3 serves BOS for host-side inspection without advertising
++     * bcdUSB 2.01, so Windows ignores it and enumeration stays safe. */
++    return ruby_winusb_mode == 1 || ruby_winusb_mode == 2 ||
++        ruby_winusb_mode == 3;
++}
++
++static int
++ruby_0332_msos_on(void)
++{
++    return ruby_winusb_mode == 1 || ruby_winusb_mode == 3;
++}
++
++static void
++ruby_0332_build(void)
++{
++    uint32_t o = 0, total, subset, func, iface, reglen;
++    volatile uint8_t *v;
++    uint16_t w;
++    const char *name = "DeviceInterfaceGUIDs";
++    const char *guid = "{2C4FFB48-B39B-4E6E-9D4B-6B0E7C9C0E35}";
++    uint32_t nlen = 0, glen = 0, i;
++
++    if (ruby_0332_iface != -2)
++        return;
++    iface = (uint32_t)ruby_0332_vendor_iface();
++    ruby_0332_iface = (int)iface;
++    if ((int)iface < 0)
++        return;
++
++    /* BOS: header(5) + USB2 extension(7) + platform capability(28) */
++    v = ruby_bos_desc;
++    v[0] = 5; v[1] = 0x0F; v[2] = RUBY_BOS_LEN; v[3] = 0; v[4] = 2;
++    v[5] = 7; v[6] = 0x10; v[7] = 0x02; v[8] = 0; v[9] = 0; v[10] = 0; v[11] = 0;
++    v[12] = 28; v[13] = 0x10; v[14] = 0x05; v[15] = 0;
++    {
++        static const uint8_t uuid[16] = {
++            0xB0, 0x60, 0xDD, 0xD8, 0x4F, 0x0E, 0x5B, 0x4E,
++            0x98, 0xA2, 0x1C, 0xE7, 0x62, 0x73, 0xE2, 0xCE
++        };
++
++        for (i = 0; i < 16; i++)
++            v[16 + i] = uuid[i];
++    }
++    v[32] = 0x00; v[33] = 0x00; v[34] = 0x03; v[35] = 0x06;
++    for (i = 36; i < RUBY_BOS_LEN; i++)
++        v[i] = 0;
++
++    while (name[nlen])
++        nlen++;
++    while (guid[glen])
++        glen++;
++    reglen = 6u + 2u * (nlen + 1u) + 2u + 2u * (glen + 2u);
++    func = 8u + 20u + reglen;
++    subset = 8u + func;
++    total = 10u + subset;
++    if (total > RUBY_MSOS_MAX) {
++        printf("RUBY 0332: msos overflow %u ", total);
++        ruby_0332_iface = -1;
++        return;
++    }
++    v = ruby_msos_desc;
++    v[o++] = 10; v[o++] = 0x00;
++    v[o++] = 0x00; v[o++] = 0x00; v[o++] = 0x03; v[o++] = 0x06;
++    v[o++] = (uint8_t)(total & 0xffu); v[o++] = (uint8_t)(total >> 8);
++    v[o++] = 0; v[o++] = 0;
++    v[o++] = 8; v[o++] = 0x01; v[o++] = 1; v[o++] = 0;
++    v[o++] = (uint8_t)(subset & 0xffu); v[o++] = (uint8_t)(subset >> 8);
++    v[o++] = 0; v[o++] = 0;
++    v[o++] = 8; v[o++] = 0x02; v[o++] = (uint8_t)iface; v[o++] = 0;
++    v[o++] = (uint8_t)(func & 0xffu); v[o++] = (uint8_t)(func >> 8);
++    v[o++] = 0; v[o++] = 0;
++    v[o++] = 20; v[o++] = 0x03;
++    v[o++] = 0x57; v[o++] = 0x49; v[o++] = 0x4E; v[o++] = 0x55;
++    v[o++] = 0x53; v[o++] = 0x42; v[o++] = 0; v[o++] = 0;
++    for (i = 0; i < 8; i++)
++        v[o++] = 0;
++    /* MS OS 2.0 CompatibleID declares bLength=20: two Reserved bytes. */
++    v[o++] = 0; v[o++] = 0;
++    v[o++] = (uint8_t)reglen; v[o++] = 0x04;
++    v[o++] = 0x01; v[o++] = 0x00;
++    w = (uint16_t)(2u * (nlen + 1u));
++    v[o++] = (uint8_t)(w & 0xffu); v[o++] = (uint8_t)(w >> 8);
++    for (i = 0; i < nlen; i++) {
++        v[o++] = (uint8_t)name[i];
++        v[o++] = 0;
++    }
++    v[o++] = 0; v[o++] = 0;
++    w = (uint16_t)(2u * (glen + 2u));
++    v[o++] = (uint8_t)(w & 0xffu); v[o++] = (uint8_t)(w >> 8);
++    for (i = 0; i < glen; i++) {
++        v[o++] = (uint8_t)guid[i];
++        v[o++] = 0;
++    }
++    v[o++] = 0; v[o++] = 0;
++    v[o++] = 0; v[o++] = 0;
++    ruby_msos_len = o;
++    printf("RUBY 0332: bos=%u msos=%u iface=%u reglen=%u rescue ep=01/81 kept ",
++        RUBY_BOS_LEN, ruby_msos_len, iface, reglen);
++}
++
++
++/* 0332: USB 2.01 hosts ask for the device qualifier and the other-speed
++ * configuration; stall at 2.00 was tolerated, at 2.01 it aborts the
++ * enumeration with "invalid configuration descriptor".  Serve a HS-only
++ * qualifier (one other-speed configuration) and an FS-clamped copy. */
++static uint8_t ruby_qual_desc[10];
++static uint8_t ruby_other_cfg[96];
++static uint32_t ruby_other_len;
++static int ruby_0332_qual_ready;
++
++static void
++ruby_0332_build_qual(void)
++{
++    if (ruby_0332_qual_ready)
++        return;
++    ruby_0332_qual_ready = 1;
++    ruby_qual_desc[0] = 10;
++    ruby_qual_desc[1] = 0x06;
++    ruby_qual_desc[2] = 0x00;
++    ruby_qual_desc[3] = 0x02;
++    ruby_qual_desc[4] = ruby_dev_desc[4];
++    ruby_qual_desc[5] = ruby_dev_desc[5];
++    ruby_qual_desc[6] = ruby_dev_desc[6];
++    ruby_qual_desc[7] = 64;
++    ruby_qual_desc[8] = 1;
++    ruby_qual_desc[9] = 0;
++
++    ruby_other_len = ruby_build_cfg_desc(ruby_other_cfg);
++    if (ruby_other_len >= 2)
++        ruby_other_cfg[1] = 0x07;
++    {
++        uint32_t off = 9;
++
++        while (off + 2 <= ruby_other_len) {
++            uint8_t len = ruby_other_cfg[off];
++
++            if (len < 2)
++                break;
++            if (ruby_other_cfg[off + 1] == 0x05 && off + 6 <= ruby_other_len) {
++                uint16_t mps = (uint16_t)(ruby_other_cfg[off + 4] |
++                    (ruby_other_cfg[off + 5] << 8));
++
++                if (mps > 64) {
++                    ruby_other_cfg[off + 4] = 64;
++                    ruby_other_cfg[off + 5] = 0;
++                }
++            }
++            off += len;
++        }
++    }
++    printf("RUBY 0332: qual=10 other_cfg=%u ", ruby_other_len);
++}
++
++static void
++ruby_ep0_0332_msos(vm_offset_t mac, uint32_t t, uint32_t wlen)
++{
++    static uint32_t msos_reqs;
++
++    if (!ruby_0332_msos_on()) {
++        ruby_ep0_stall(mac, t, 0xc001, wlen);
++        return;
++    }
++    if (msos_reqs < 8) {
++        msos_reqs++;
++        printf("RUBY 0332: msos req wlen=%u ", wlen);
++    }
++    ruby_0332_build();
++    if (ruby_0332_iface < 0) {
++        ruby_ep0_stall(mac, t, 0xc001, wlen);
++        return;
++    }
++    ruby_ep0_send(mac, t, 0xc001, ruby_msos_desc, ruby_msos_len, wlen);
++}
++
+ const uint8_t *
+ ruby_descriptor(uint32_t value, uint32_t *len)
+ {
+@@ -448,6 +657,26 @@ ruby_descriptor(uint32_t value, uint32_t *len)
+         ruby_cfg_buf_len = ruby_build_cfg_desc(ruby_cfg_buf);
+         *len = ruby_cfg_buf_len;
+         return ruby_cfg_buf;
++    case 0x0600:    /* 0332: device qualifier (BOS modes) */
++        if (!ruby_0332_bos_on())
++            return NULL;
++        ruby_0332_build_qual();
++        *len = sizeof(ruby_qual_desc);
++        return ruby_qual_desc;
++    case 0x0700:    /* 0332: other-speed configuration (FS-clamped) */
++        if (!ruby_0332_bos_on())
++            return NULL;
++        ruby_0332_build_qual();
++        *len = ruby_other_len;
++        return ruby_other_cfg;
++    case 0x0F00:    /* 0332: BOS, gated by rubywinusb=1/2 */
++        if (!ruby_0332_bos_on())
++            return NULL;
++        ruby_0332_build();
++        if (ruby_0332_iface < 0)
++            return NULL;
++        *len = RUBY_BOS_LEN;
++        return ruby_bos_desc;
+     case 0x0300:
+         *len = sizeof(ruby_str_lang);
+         return ruby_str_lang;
+@@ -718,6 +947,9 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+ 
+     if ((st[0] & 0x60) == 0)
+         ruby_ep0_standard(mac, t, st[0], st[1], value, index, len);
++    else if ((st[0] == 0xc0 || st[0] == 0xc1) && st[1] == 0x01 &&
++        (index == 7 || index == 0))
++        ruby_ep0_0332_msos(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x21)
+         ruby_ep0_vendor_state(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x22)
