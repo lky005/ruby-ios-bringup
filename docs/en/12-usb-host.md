@@ -7,6 +7,17 @@
 > This page describes how to operate the channel; it is not a fix for the
 > open host-side XACT.
 
+## What is verified (2026-11-18) [measured]
+
+- The 0334 line keeps the same channel: EP0 `0x2E` commands and the
+  `0xC0/0x31` mailbox; host-side data is still measured on endpoint `0x81`.
+  Patchset `d87e666f...` (305 files); CI `44296779724`; kernel full
+  `5ee3019d...`, exec-data `61c6b1a1...`.
+- New in this line: per-endpoint GPD rings and a real FIFO allocation
+  (0334), plus port events and gated suspend (0333). The method, raw
+  evidence and limits are in [14](14-usb-per-endpoint.md); this page stays
+  the host-channel reference.
+
 ## What is verified (2026-11-06) [measured]
 
 - Kernel 0179 (patchset `10b1e2e8...`, 175 files; CI `42114854911`;

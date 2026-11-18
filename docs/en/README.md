@@ -10,12 +10,11 @@ personal paths, device identifiers or Apple binaries here.
 
 | Item | Value |
 |---|---|
-| Line | 0195 |
-| `main` / tag | `1e45453` / `v0.6.0` |
-| Patchset | `a9cc0050…` (187 files) |
-| Kernel | full `45ea1bc3…`, exec-data `6b22fc25…` |
-| Image | `fe009b89…` (`x16-0195-ack.img`; golden boot verified on 0194 `1808e440…`) |
-| Known limits | XactErr `0xC0000011`; 511 B framing; host-port drop under clear storms; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep; research bring-up |
+| Line | 0334 |
+| Patchset | `d87e666f…` (305 files) |
+| Kernel | full `5ee3019d…`, exec-data `61c6b1a1…` (CI `44296779724`) |
+| Image | default `561f1026…` (`x16-0334b4-default.img`), lite `b4b95789…` (`x16-0334b4-lite.img`) |
+| Known limits | host-side data measured on `0x81` only; concurrent multi-EP and non-default RX data unmeasured; 511 B framing; XactErr `0xC0000011`; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep; research bring-up |
 
 See [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md) · [GUARANTEE](../records/GUARANTEE.md).
 
@@ -44,7 +43,9 @@ See [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md)
 | [`10-scripts`](10-scripts.md) | per-script purpose and boundaries | `[measured]` | 2026-11-06 |
 | [`11-ci-baseline`](11-ci-baseline.md) | content-pinned baseline, branch pins, exec-data gates | `[measured]` | 2026-11-06 |
 | [`12-usb-host`](12-usb-host.md) | USB host channel: test conditions, driver binding, safe debugging | `[measured]` | 2026-11-06 |
-| [`13-usb-ep2-golden`](13-usb-ep2-golden.md) | EP2 state machine 0180–0195, golden PHY, host-side limits | `[measured]` | 2026-11-07 |
+| [`13-usb-ep2-golden`](13-usb-ep2-golden.md) | EP2 state machine 0180–0195, golden PHY, host-side limits | `[historical]` | 2026-11-07 |
+| [`14-usb-per-endpoint`](14-usb-per-endpoint.md) | 0333/0334 line: per-endpoint GPD rings, FIFO allocation, T2 batch, limits | `[measured]` | 2026-11-18 |
+| [`appendix-bootargs`](appendix-bootargs.md) | recommended cmdline preset, USB boot-arg reference, image packaging parameters | `[measured]` | 2026-11-18 |
 | [`appendix-dualboot`](appendix-dualboot.md) | optional layout; method note only | `[inferred]` | — |
 | [`glossary`](glossary.md) | codenames, acronyms and status tags | — | — |
 | [`device`](device.md) | device situation; no baseline hashes | `[measured]` | 2026-10-22 |

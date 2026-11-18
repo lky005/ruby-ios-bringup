@@ -29,17 +29,19 @@
 | main（2026-10-30 集成） | `f47f4c19...` | 139 | `config/0143.env` | full `d2eae74d...`，exec `6fa65088...`（CI `41022192026`） |
 | main（2026-10-29 集成） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
 | USB 0142 / 0143 分支 | `d0c5ab5e...` / `f47f4c19...` | 138 / 139 | `config/0142.env`、`config/0143.env` | CI `41015790742` / `41022192026` |
+| USB 拆分 0334（`p3-usb-cl0329-driver-split-2026-11-18`） | `d87e666f...` | 305 | `config/0334.env` | full `5ee3019d...`、exec `61c6b1a1...`（CI `44296779724`） |
 | USB（`usb-0131b-probe-write`，历史） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
 
 - main 包含 0080/0084/0085、0086-0131b、0140/0141、0142/0143、
-  0144/0145、历史 0146a-0155 线（探针/pwrap、按键/复位、电池、触摸），
-  以及当前 0156-0179 线（HAL/I2C、USB 热插拔、RubyGIC/KPD、原生 EINT
-  触摸）。
+  0144/0145、历史 0146a-0155 线（探针/pwrap、按键/复位、电池、触摸）、
+  0156-0179 线（HAL/I2C、USB 热插拔、RubyGIC/KPD、原生 EINT 触摸）
+  以及当前 0329a-0334 USB 拆分/队列线。
 - 0142 把 EP2 IN bulk MPS 扩到 512；0143 把每帧日志扩到 511 B（16 B 头
   + 最多 495 B 文本），并在停 QMU 后 reset TX 环。host 侧首会话 XACT
   在 0143 仍未闭环。
-- 0131b 分支保留自己的 workflow 和 patch 列表；main 保留
-  `config/0131b.env` 与 `config/0131b-boot.cmdline` 作为历史。
+- 0131b 分支保留自己的 workflow 和 patch 列表；当前 0334 线使用
+  `config/0334.env`，`config/0131b.env` 与 `config/0131b-boot.cmdline`
+  作为历史保留。
 - 内核 run `41022192026` 构建 0143，exec-data 与 `6fa65088...` 一致；
   `41015790742` 对应 0142（`99d98d80...`）。2026-10-29 的
   `40822689195` / `40824668335` 作为历史 main/USB 参考保留。
@@ -66,10 +68,23 @@ ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
-python scripts/verify-local.py --ci-config config/0179.env
+python scripts/verify-local.py --ci-config config/0334.env
 ```
 
-USB 分支使用 `--ci-config config/0131b.env`。
+USB 分支使用 `--ci-config config/0334.env`。
+
+## 镜像打包参数 [measured]
+
+boot 镜像由两个宿主脚本拼装；它们的输入都不发布。
+
+| 环节 | 工具 | 参数 |
+|---|---|---|
+| payload | `.temp/mkpayload.py` | `kernel`、`adt`、`out`、`--cmdline <587/605/585 B>`，可选 `--ramdisk` |
+| boot 镜像 | `tools/image/pack_boot.py` | `--base`、`--shim`、`--payload`、`--out`、`--seed 0x84`，可选 `--payload-off` 与 `--expect-{base,shim,payload,out}-sha` |
+| 校验 | `tools/image/boot_verify.py` | 镜像路径（布局 + cmdline 打印） |
+
+可直接复制的 cmdline 预设、完整启动参数参考与复现规则见
+[启动参数附录](appendix-bootargs.md)。
 
 ## 边界
 

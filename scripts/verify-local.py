@@ -12,6 +12,7 @@ Checks:
   * personal-path and secret patterns
   * toolchain pins (docs, workflow, branch config)
   * English/Chinese document set parity
+  * markdown relative-link scan (broken local links fail)
   * commit-message neutrality and an optional private denylist
 
 Exit code is non-zero only for hard failures. External-tree checks are
