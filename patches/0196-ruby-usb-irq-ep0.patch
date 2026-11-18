@@ -1,0 +1,787 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -212,6 +212,30 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define MAC2_INTR_ENABLE_OFF 0x2418
+ #define MAC2_INTR_STATUS_OFF 0x241c
+ #define MAC2_INTR_RESET      (1u << 2)
++#define MAC2_INTR_RESUME     (1u << 1)
++#define MAC2_INTR_SUSPEND    (1u << 0)
++
++/*
++ * 0196: MAC level-1 groups (vendor mtu3_hw_regs.h).  LV1ISR is RU -- read
++ * and mask with LV1IER, never write it back; the line clears when the
++ * underlying group sources clear.  The IRQ service enables only the
++ * groups it fully consumes (enable-set <= service-set): BMU/EP0 and
++ * MAC2/reset; QMU stays polled (0194 golden EP2 line) and EP_CTRL/MAC3
++ * stay off, so an enabled-but-unserviced group can never storm the line.
++ */
++#define LV1ISR_OFF      0x0000
++#define LV1IER_OFF      0x0004
++#define LV1IESR_OFF     0x0008
++#define EPIER_OFF       0x0084
++#define EPIESR_OFF      0x0088
++#define EPIECR_OFF      0x008c
++#define LV1_BMU_INTR    (1u << 0)
++#define LV1_QMU_INTR    (1u << 1)
++#define LV1_MAC3_INTR   (1u << 2)
++#define LV1_MAC2_INTR   (1u << 4)
++#define LV1_EPCTRL_INTR (1u << 5)
++#define RUBY_IRQ_LV1_SET (LV1_BMU_INTR | LV1_MAC2_INTR)
++#define RUBY_IRQ_EPI_SET (EPISR_EP0ISR | EPISR_SETUPEND)
+ 
+ /* EP0 responses are copied here: handler buffers may live on the stack. */
+ #define RUBY_EP0_TXBUF 512
+@@ -328,6 +352,28 @@ static uint32_t ruby_cmd_busy_rejects;
+  */
+ static volatile uint32_t ruby_ms;
+ static volatile uint32_t ruby_enum_assist_until;
++/*
++ * 0196: IRQ service (rubyusbirq=1).  EP0 + MAC2/reset move to the
++ * RubyUSBIntService workloop (INTID160); the 1 ms thread keeps command
++ * execution, EP2 polls and the attach/heartbeat work.  The reset two-beat
++ * state lives at file scope so the workloop pass can see the pending
++ * beat; behavior is identical to the old function statics.  The event
++ * source count is a merged notification, so the pass keeps its own
++ * per-group counters for the run card.
++ */
++static int ruby_irq_mode;
++static uint32_t ruby_rst_seen;
++static uint32_t ruby_rst_armed;
++static volatile uint32_t ruby_irq_passes;
++static volatile uint32_t ruby_irq_mac2;
++static volatile uint32_t ruby_irq_bmu;
++static volatile uint32_t ruby_irq_resume;
++static volatile uint32_t ruby_irq_suspend;
++static volatile uint32_t ruby_irq_idle;
++static volatile uint32_t ruby_irq_fused;
++static volatile uint32_t ruby_irq_requeues;
++static volatile uint32_t ruby_irq_reattach_req;
++static volatile uint32_t ruby_irq_reattach_done;
+ static void ruby_ep2_config(vm_offset_t mac);
+ static void ruby_ep2_push_log(vm_offset_t mac);
+ static void ruby_ep2_dump_gpd(vm_offset_t mac, uint32_t first, uint32_t last);
+@@ -948,10 +994,18 @@ static void ruby_ep2_rx_config(vm_offset_t mac);
+ static void ruby_ep2_rx_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters);
+ static void ruby_ep2_rx_halt_clear(vm_offset_t mac);
+-static void ruby_usb_reset_check(vm_offset_t mac);
++static int ruby_usb_reset_check(vm_offset_t mac);
+ static void ruby_usb_attach_poll(vm_offset_t mac, vm_offset_t ippc);
+ static void ruby_usb_reattach(vm_offset_t mac, vm_offset_t phy);
++static void ruby_usb_reattach_owned(vm_offset_t mac, vm_offset_t phy);
+ static void ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc);
++/* 0196: IRQ service entry points (RubyUSBIntService, INTID160). */
++int ruby_usb_irq_pass(void);
++void ruby_usb_irq_service_work(void);
++void ruby_usb_reattach_impl(void);
++extern int ruby_usb_irq_prepare(void);
++extern int ruby_usb_irq_activate(void);
++extern int ruby_usb_irq_kick(void);
+ 
+ static void
+ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+@@ -1147,7 +1201,11 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+ {
+     uint32_t v, epi;
+ 
+-    ruby_usb_reset_check(mac);
++    /*
++     * 0196: the bus-reset two-beat moved to the callers (the polling
++     * call sites and, in IRQ mode, the service workloop pass), so the
++     * same beat is never sampled twice inside one pass.
++     */
+ 
+     /*
+      * EPISR is W1C and is drained every round (vendor ISR inspects
+@@ -1266,12 +1324,20 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+             ruby_enum_assist_until = now + 200;
+         assist = ruby_enum_assist_until != 0 &&
+             now < ruby_enum_assist_until;
+-        if (assist) {
++        if (ruby_irq_mode) {
++            /*
++             * 0196: EP0 and the reset two-beat live on the IRQ service
++             * workloop (INTID160); this tick keeps command execution,
++             * the EP2 polls and the attach/heartbeat work only.
++             */
++        } else if (assist) {
+             for (uint32_t i = 0; i < 10; i++) {
++                ruby_usb_reset_check(ruby_mac_base);
+                 ruby_ep0_service(ruby_mac_base, 0);
+                 delay(100);
+             }
+         } else {
++            ruby_usb_reset_check(ruby_mac_base);
+             ruby_ep0_service(ruby_mac_base, 0);
+         }
+         ruby_cmd_tick(ruby_mac_base);
+@@ -3031,27 +3097,28 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+  * MAC2 common-USB status latches that event; without handling it the
+  * device keeps its old address and a stale EP0 state, so the host's next
+  * attempt is answered by garbage and the device looks dead until reboot.
++ * 0196: returns 1 when the two-beat progressed (sample or confirm) so the
++ * IRQ service can tell real resets from a stuck line.
+  */
+-static void
++static int
+ ruby_usb_reset_check(vm_offset_t mac)
+ {
+-    static uint32_t seen, armed;
+     uint32_t st = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
+ 
+     if (!(st & MAC2_INTR_RESET)) {
+-        seen = 0;
+-        armed = 1;         /* the bit reads back clear at least once */
+-        return;
++        ruby_rst_seen = 0;
++        ruby_rst_armed = 1;    /* the bit reads back clear at least once */
++        return 0;
+     }
+-    if (!armed)
+-        return;             /* stuck high: not a usable reset source */
+-    if (!seen) {
++    if (!ruby_rst_armed)
++        return 0;           /* stuck high: not a usable reset source */
++    if (!ruby_rst_seen) {
+         /* Confirm on the next poll: a single sample may be a glitch. */
+-        seen = 1;
++        ruby_rst_seen = 1;
+         ruby_seq("RST_SAMPLE", st, ruby_cfg_seen);
+-        return;
++        return 1;
+     }
+-    seen = 0;
++    ruby_rst_seen = 0;
+     ruby_seq("RST_CONFIRM", st, ruby_cfg_seen);
+     ruby_wr32(mac, MAC2_INTR_STATUS_OFF, st & MAC2_INTR_RESET);
+ 
+@@ -3061,6 +3128,82 @@ ruby_usb_reset_check(vm_offset_t mac)
+     if (ruby_bus_resets <= 4)
+         printf("RUBY USB: t=%u host bus reset #%u, address cleared\n",
+             ruby_ms, ruby_bus_resets);
++    return 1;
++}
++
++/*
++ * 0196: one IRQ service pass, run on the RubyUSBIntService workloop
++ * (INTID160 level).  Vendor order: MAC2/common before BMU/EP0.  LV1ISR is
++ * read-only (RU); every sub-status is consumed here per its own register
++ * semantics.  Returns 1 when deferred EP0 work needs another pass --
++ * the caller requeues via its timer exactly like the old 1 ms tick.
++ */
++int
++ruby_usb_irq_pass(void)
++{
++    vm_offset_t mac = ruby_mac_base;
++    uint32_t level1, st;
++    int more = 0;
++
++    if (!ruby_irq_mode || mac == 0)
++        return 0;
++    ruby_irq_passes++;
++
++    /* Refresh the two-beat arm/sample state on every pass. */
++    ruby_usb_reset_check(mac);
++
++    level1 = ruby_rd32(mac, LV1ISR_OFF) & ruby_rd32(mac, LV1IER_OFF);
++    if (level1 & LV1_MAC2_INTR) {
++        ruby_irq_mac2++;
++        st = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
++        if (st & (MAC2_INTR_RESUME | MAC2_INTR_SUSPEND)) {
++            /* Count-only (plan v1): W1C so the group cannot storm. */
++            ruby_wr32(mac, MAC2_INTR_STATUS_OFF,
++                st & (MAC2_INTR_RESUME | MAC2_INTR_SUSPEND));
++            if (st & MAC2_INTR_RESUME)
++                ruby_irq_resume++;
++            if (st & MAC2_INTR_SUSPEND)
++                ruby_irq_suspend++;
++            st = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
++        }
++        if (!(st & MAC2_INTR_RESET)) {
++            if (++ruby_irq_idle > 1000) {
++                /* Phantom group: bounded isolation, fuse the line off. */
++                ruby_irq_idle = 0;
++                ruby_irq_fused++;
++                ruby_wr32(mac, LV1IECR - MTU3_PA, LV1_MAC2_INTR);
++                printf("RUBY USB IRQ: MAC2 fused off after 1000 idle "
++                    "passes\n");
++            }
++        } else {
++            ruby_irq_idle = 0;
++        }
++    }
++    if (level1 & LV1_BMU_INTR) {
++        ruby_irq_bmu++;
++        ruby_ep0_service(mac, ruby_ms);
++    }
++    if (ruby_ep0_tx_pending || ruby_rst_seen)
++        more = 1;
++    return more;
++}
++
++/* Reattach requests run on the service workloop (single EP0 owner). */
++void
++ruby_usb_irq_service_work(void)
++{
++    if (ruby_irq_reattach_req) {
++        ruby_irq_reattach_req = 0;
++        ruby_usb_reattach(ruby_mac_base, ruby_phy_base);
++        ruby_irq_reattach_done = 1;
++    }
++}
++
++/* Called from RubyUSBIntService (same workloop as the pass). */
++void
++ruby_usb_reattach_impl(void)
++{
++    ruby_usb_irq_service_work();
+ }
+ 
+ /*
+@@ -3113,7 +3256,7 @@ ruby_usb_attach_poll(vm_offset_t mac, vm_offset_t ippc)
+      * not enough: the D+ pull-up has to be cycled before the host can see
+      * a new connect.  Reuse the 0116 boot-window sequence at runtime.
+      */
+-    ruby_usb_reattach(mac, ruby_phy_base);
++    ruby_usb_reattach_owned(mac, ruby_phy_base);
+     ruby_enum_assist_until = ruby_ms + 15000;
+     ruby_trace(0, RUBY_TR_STATE, 9, v, attaches, 0);
+     printf("RUBY USB: t=%u fast EP0 assist 15 s\n", ruby_ms);
+@@ -3152,6 +3295,12 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_DMON1) : 0,
+         seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
+         ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
++    if (ruby_irq_mode)
++        printf("RUBY USB IRQ: pass=%u mac2=%u bmu=%u resume=%u "
++            "suspend=%u idle=%u fused=%u requeue=%u\n",
++            ruby_irq_passes, ruby_irq_mac2, ruby_irq_bmu,
++            ruby_irq_resume, ruby_irq_suspend, ruby_irq_idle,
++            ruby_irq_fused, ruby_irq_requeues);
+     last_otg = otg;
+     last_mac2 = mac2;
+     last_ext = ext;
+@@ -3581,6 +3730,30 @@ ruby_usb_reattach(vm_offset_t mac, vm_offset_t phy)
+     delay(2000);
+ }
+ 
++/*
++ * 0196: the reattach sequence owns EP0 (address/FIFO/QMU state), so in
++ * IRQ mode it must run on the service workloop, not in the caller's
++ * context.  The requester sets the flag, kicks the service timer and
++ * busy-waits for the done flag -- the old path blocked the same way,
++ * and there is a single requester at a time (the boot window exits
++ * before the 1 ms thread starts).
++ */
++static void
++ruby_usb_reattach_owned(vm_offset_t mac, vm_offset_t phy)
++{
++    if (!ruby_irq_mode) {
++        ruby_usb_reattach(mac, phy);
++        return;
++    }
++    ruby_mac_base = mac;
++    ruby_phy_base = phy;
++    ruby_irq_reattach_done = 0;
++    ruby_irq_reattach_req = 1;
++    ruby_usb_irq_kick();
++    while (!ruby_irq_reattach_done)
++        delay(1000);
++}
++
+ static void
+ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+ {
+@@ -3607,10 +3780,11 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+     if (window_ms < 1000 || window_ms > 120000)
+         window_ms = 30000;
+ 
+-    if (!(ruby_rd32(mac, EP0CSR_OFF) & EP0_SETUPPKTRDY))
++    if (!(ruby_rd32(mac, EP0CSR_OFF) & EP0_SETUPPKTRDY) && !ruby_irq_mode)
+         ruby_ep0_set_maxpacket(mac);
+-    printf("RUBY USB: P2b window %u ms; EP0 polling, trace ring %u\n",
+-        window_ms, RUBY_TRACE_MAX);
++    printf("RUBY USB: P2b window %u ms; EP0 %s, trace ring %u\n",
++        window_ms, ruby_irq_mode ? "IRQ INTID160" : "polling",
++        RUBY_TRACE_MAX);
+ 
+     while (t <= window_ms) {
+         while (si < sizeof(snaps) / sizeof(snaps[0]) && t >= snaps[si]) {
+@@ -3618,7 +3792,10 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+             si++;
+         }
+ 
+-        ruby_ep0_service(mac, t);
++        if (!ruby_irq_mode) {
++            ruby_usb_reset_check(mac);
++            ruby_ep0_service(mac, t);
++        }
+ 
+         /*
+          * The host sometimes gives up in the middle of enumeration (0116:
+@@ -3643,7 +3820,7 @@ ruby_usb_ep0_window(vm_offset_t mac, vm_offset_t ippc, vm_offset_t gpio)
+             printf("RUBY USB: no config by t=%u (setups=%u resets=%u), "
+                 "re-attach (%u left)\n",
+                 t, ruby_ep0_setups, ruby_bus_resets, attach_left);
+-            ruby_usb_reattach(mac, ruby_phy_base);
++            ruby_usb_reattach_owned(mac, ruby_phy_base);
+             retry_at = t + 12000;
+         }
+         if (ruby_cfg_seen) {
+@@ -3818,6 +3995,7 @@ ruby_usb_probe(void)
+     int enable = 0;
+     int probe = 0;
+     int ep2log = 1;
++    int usbirq = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -3825,6 +4003,8 @@ ruby_usb_probe(void)
+     PE_parse_boot_argn("rubyusb", &enable, sizeof(enable));
+     PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
+     PE_parse_boot_argn("rubyep2log", &ep2log, sizeof(ep2log));
++    PE_parse_boot_argn("rubyusbirq", &usbirq, sizeof(usbirq));
++    ruby_irq_mode = (enable == 1 && usbirq == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log != 0);
+     printf("RUBY USB: probe writes %s\n",
+@@ -3849,6 +4029,15 @@ ruby_usb_probe(void)
+     }
+     ruby_gpio_base = gpio;
+     ruby_ifrao_base = ifrao;
++    /*
++     * 0196: the IRQ service workloop can run as soon as it is activated,
++     * and the reattach handoff uses these bases, so publish them before
++     * the boot window instead of at its end (the old late assignment is
++     * kept below; both are idempotent).
++     */
++    ruby_mac_base = mac;
++    ruby_ippc_base = ippc;
++    ruby_phy_base = phy;
+ 
+     if (ruby_rd32(ifrao, 0xac) & (1u << 1)) {
+         printf("RUBY USB: SSUSB clock gated; skipped\n");
+@@ -3964,6 +4153,45 @@ ruby_usb_probe(void)
+     v = ruby_rd32(mac, MISC_CTRL - MTU3_PA);
+     ruby_wr32(mac, MISC_CTRL - MTU3_PA, v | 0x3u);
+ 
++    if (ruby_irq_mode) {
++        /*
++         * 0196: hand EP0 + MAC2/reset to the IRQ service before the
++         * pull-up makes the device visible.  Order per the plan: the
++         * service handler is published first (prepare creates the
++         * masked event source), then the MTU3 enable sets, then the
++         * GIC line is unmasked (activate) -- an enabled group is never
++         * left without a live consumer (enable-set <= service-set).
++         * The RESUME/SUSPEND bits are count-only in this round.
++         */
++        ruby_usb_reset_check(mac);     /* arm the two-beat while idle */
++        if (ruby_usb_irq_prepare() != 0) {
++            printf("RUBY USB: irq service absent, staying on polling\n");
++            ruby_irq_mode = 0;
++            ruby_wr32(mac, LV1IECR - MTU3_PA, ~0u);
++            ruby_wr32(mac, EPIECR_OFF, ~0u);
++        } else {
++            ruby_wr32(mac, EPIESR_OFF, RUBY_IRQ_EPI_SET);
++            ruby_wr32(mac, LV1IESR_OFF, RUBY_IRQ_LV1_SET);
++            v = ruby_rd32(mac, MAC2_INTR_ENABLE_OFF);
++            ruby_wr32(mac, MAC2_INTR_ENABLE_OFF,
++                v | MAC2_INTR_RESET | MAC2_INTR_RESUME |
++                MAC2_INTR_SUSPEND);
++            if (ruby_usb_irq_activate() != 0) {
++                printf("RUBY USB: irq activate failed, staying on "
++                    "polling\n");
++                ruby_irq_mode = 0;
++                ruby_wr32(mac, LV1IECR - MTU3_PA, ~0u);
++                ruby_wr32(mac, EPIECR_OFF, ~0u);
++            } else {
++                printf("RUBY USB: irq service live (lv1ier=%08x "
++                    "epier=%08x mac2en=%08x)\n",
++                    ruby_rd32(mac, LV1IER_OFF),
++                    ruby_rd32(mac, EPIER_OFF),
++                    ruby_rd32(mac, MAC2_INTR_ENABLE_OFF));
++            }
++        }
++    }
++
+     /* Attach: PHY pull-up first, then the MAC soft-connect. */
+     v = ruby_rd32(phy, PHY_U2_ACR3);
+     ruby_wr32(phy, PHY_U2_ACR3, v | ACR3_EN_PU_DP);
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyUSBIntService.cpp
+@@ -0,0 +1,266 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(SWEET)
++/*
++ * SWEET: MTU3 USB device MAC (INTID160, SPI128 level-high) on RubyGIC.
++ *
++ * The level IOInterruptEventSource hard-masks INTID160 through the
++ * controller in the occurrence path and schedules this dedicated workloop;
++ * the action runs the C service pass (MAC2 first, then BMU/EP0, vendor
++ * order) and the class re-enables the line afterwards.  Primary never
++ * touches MTU3 MMIO and never clears device state -- all sub-status is
++ * consumed by the action per the register semantics.
++ *
++ * The 100 us timer requeue advances deferred EP0 work (DATAEND written on
++ * a later pass, reset two-beat) the way the old 1 ms polling tick did, and
++ * runs the EP0-owning reattach sequence on the same single-owner loop.
++ * Deferred-work requeues are bounded: past the cap the service waits for
++ * the next real interrupt instead of spinning.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOWorkLoop.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSSymbol.h>
++#include <pexpert/pexpert.h>
++#include <sys/errno.h>
++
++#include "../../../bsd/dev/ruby_gic.h"
++#include "RubyUSBIntService.h"
++
++#define super IOService
++OSDefineMetaClassAndStructors(RubyUSBIntService, IOService);
++
++#define RUBY_USB_INTID          160u
++#define RUBY_USB_REQUEUE_US     100u
++#define RUBY_USB_REQUEUE_CAP    20000u
++
++static RubyUSBIntService *gRubyUSBIntService;
++
++extern "C" {
++int ruby_usb_irq_pass(void);        /* 1 = deferred EP0 work remains */
++void ruby_usb_irq_service_work(void);
++}
++
++bool
++RubyUSBIntService::init(OSDictionary *dictionary)
++{
++	fWorkLoop = NULL;
++	fIRQ = NULL;
++	fTimer = NULL;
++	fActive = false;
++	fRequeues = 0;
++	return super::init(dictionary);
++}
++
++bool
++RubyUSBIntService::publishInterruptSource(void)
++{
++	OSArray *controllers = NULL;
++	OSArray *specifiers = NULL;
++	OSSymbol *name = NULL;
++	OSData *data = NULL;
++	struct ruby_gic_spec spec = {
++		.intid = RUBY_USB_INTID,
++		.flags = RUBY_GIC_LEVEL,
++	};
++	bool ok = false;
++
++	controllers = OSArray::withCapacity(1);
++	specifiers = OSArray::withCapacity(1);
++	name = (OSSymbol *)OSSymbol::withCStringNoCopy("RubyGIC");
++	data = OSData::withBytes(&spec, sizeof(spec));
++	if (!controllers || !specifiers || !name || !data) {
++		goto out;
++	}
++	if (!controllers->setObject(name) || !specifiers->setObject(data)) {
++		goto out;
++	}
++	ok = setProperty("IOInterruptControllers", controllers) &&
++	    setProperty("IOInterruptSpecifiers", specifiers);
++out:
++	OSSafeRelease(controllers);
++	OSSafeRelease(specifiers);
++	OSSafeRelease(name);
++	OSSafeRelease(data);
++	return ok;
++}
++
++bool
++RubyUSBIntService::start(IOService *provider)
++{
++	int usbirq = 0;
++
++	if (!super::start(provider)) {
++		return false;
++	}
++	(void)PE_parse_boot_argn("rubyusbirq", &usbirq, sizeof(usbirq));
++	if (usbirq != 1) {
++		return false;
++	}
++	fWorkLoop = getWorkLoop();
++	if (!fWorkLoop) {
++		return false;
++	}
++	fWorkLoop->retain();
++	fTimer = IOTimerEventSource::timerEventSource(this,
++	    &RubyUSBIntService::timerAction);
++	if (!fTimer ||
++	    fWorkLoop->addEventSource(fTimer) != kIOReturnSuccess) {
++		return false;
++	}
++	if (!publishInterruptSource()) {
++		return false;
++	}
++	gRubyUSBIntService = this;
++	IOLog("RUBY USB INT: service ready (INTID160, activation pending)\n");
++	return true;
++}
++
++void
++RubyUSBIntService::free(void)
++{
++	if (gRubyUSBIntService == this) {
++		gRubyUSBIntService = NULL;
++	}
++	if (fIRQ) {
++		fIRQ->disable();
++		if (fWorkLoop) {
++			fWorkLoop->removeEventSource(fIRQ);
++		}
++		OSSafeRelease(fIRQ);
++		fIRQ = NULL;
++	}
++	if (fTimer) {
++		fTimer->cancelTimeout();
++		if (fWorkLoop) {
++			fWorkLoop->removeEventSource(fTimer);
++		}
++		OSSafeRelease(fTimer);
++		fTimer = NULL;
++	}
++	if (fWorkLoop) {
++		fWorkLoop->release();
++		fWorkLoop = NULL;
++	}
++	super::free();
++}
++
++bool
++RubyUSBIntService::createIrqSource(void)
++{
++	if (fIRQ) {
++		return true;
++	}
++	fIRQ = IOInterruptEventSource::interruptEventSource(this,
++	    &RubyUSBIntService::irqAction, this, 0);
++	if (!fIRQ ||
++	    fWorkLoop->addEventSource(fIRQ) != kIOReturnSuccess) {
++		return false;
++	}
++	/* Starts masked; ruby_usb activates it after the MTU3 enables. */
++	fIRQ->disable();
++	return true;
++}
++
++int
++RubyUSBIntService::prepare(void)
++{
++	if (!fWorkLoop || !createIrqSource()) {
++		return ENODEV;
++	}
++	return 0;
++}
++
++int
++RubyUSBIntService::activate(void)
++{
++	if (!fIRQ) {
++		return ENODEV;
++	}
++	fIRQ->enable();
++	fActive = true;
++	IOLog("RUBY USB INT: INTID160 unmasked\n");
++	return 0;
++}
++
++int
++RubyUSBIntService::kick(void)
++{
++	if (!fTimer) {
++		return ENODEV;
++	}
++	fTimer->setTimeoutUS(1);
++	return 0;
++}
++
++void
++RubyUSBIntService::serviceWork(void)
++{
++	int more;
++
++	/*
++	 * Reattach requests come from the probe/boot window and the 1 ms
++	 * thread (single requester at a time); run the EP0-owning sequence
++	 * here so only the workloop ever touches EP0 ownership state.
++	 */
++	ruby_usb_irq_service_work();
++	more = ruby_usb_irq_pass();
++	if (more) {
++		if (++fRequeues <= RUBY_USB_REQUEUE_CAP) {
++			fTimer->setTimeoutUS(RUBY_USB_REQUEUE_US);
++		}
++		/* Past the cap: wait for the next real interrupt. */
++	} else {
++		fRequeues = 0;
++	}
++}
++
++void
++RubyUSBIntService::irqAction(OSObject *owner,
++    IOInterruptEventSource *sender, int count)
++{
++	RubyUSBIntService *self = (RubyUSBIntService *)owner;
++
++	(void)sender;
++	(void)count;
++	if (!self->fActive) {
++		return;
++	}
++	self->fRequeues = 0;
++	self->serviceWork();
++}
++
++void
++RubyUSBIntService::timerAction(OSObject *owner, IOTimerEventSource *sender)
++{
++	RubyUSBIntService *self = (RubyUSBIntService *)owner;
++
++	(void)sender;
++	if (!self->fActive) {
++		return;
++	}
++	self->serviceWork();
++}
++
++extern "C" int
++ruby_usb_irq_prepare(void)
++{
++	return gRubyUSBIntService ? gRubyUSBIntService->prepare() : ENODEV;
++}
++
++extern "C" int
++ruby_usb_irq_activate(void)
++{
++	return gRubyUSBIntService ? gRubyUSBIntService->activate() : ENODEV;
++}
++
++extern "C" int
++ruby_usb_irq_kick(void)
++{
++	return gRubyUSBIntService ? gRubyUSBIntService->kick() : ENODEV;
++}
++
++#endif /* SWEET */
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyUSBIntService.h
+@@ -0,0 +1,51 @@
++#ifndef _IOKIT_RUBY_USB_INT_SERVICE_H
++#define _IOKIT_RUBY_USB_INT_SERVICE_H
++
++#include <IOKit/IOService.h>
++#include <mach/vm_types.h>
++#include <stdint.h>
++
++class OSDictionary;
++class IOWorkLoop;
++class IOInterruptEventSource;
++class IOTimerEventSource;
++
++/*
++ * SWEET: MTU3 USB device MAC (INTID160) as a RubyGIC vector.
++ *
++ * The level interrupt event source hard-masks the GIC line in the
++ * occurrence path and signals this dedicated workloop; the action consumes
++ * the MAC level-1 groups (BMU/EP0 + MAC2/reset) through the C service pass
++ * and the class re-enables the line afterwards.  A 100 us timer requeue
++ * advances deferred EP0 work (DATAEND next pass, reset second beat) and
++ * runs the EP0-owning reattach sequence on the same single-owner loop.
++ */
++class RubyUSBIntService : public IOService
++{
++	OSDeclareDefaultStructors(RubyUSBIntService);
++
++public:
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++
++	int prepare(void);
++	int activate(void);
++	int kick(void);
++
++private:
++	IOWorkLoop *fWorkLoop;
++	IOInterruptEventSource *fIRQ;
++	IOTimerEventSource *fTimer;
++	bool fActive;
++	uint32_t fRequeues;
++
++	bool publishInterruptSource(void);
++	bool createIrqSource(void);
++	void serviceWork(void);
++	static void irqAction(OSObject *owner,
++	    IOInterruptEventSource *sender, int count);
++	static void timerAction(OSObject *owner, IOTimerEventSource *sender);
++};
++
++#endif /* _IOKIT_RUBY_USB_INT_SERVICE_H */
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -13,12 +13,14 @@
+ 
+ #include "RubyEINTParent.h"
+ #include "RubyGICInterruptController.h"
++#include "RubyUSBIntService.h"
+ #include "SweetGoodixTouch.h"
+ #include "SweetKPD.h"
+ 
+ static RubyEINTParent *gRubyEINTParent;
+ static RubyGICInterruptController *gRubyGIC;
+ static SweetGoodixTouch *gSweetGoodixTouch;
++static RubyUSBIntService *gRubyUSBIntService;
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+@@ -115,6 +117,28 @@ SweetPlatformExpert::start(IOService *provider)
+ 			OSSafeRelease(kpd);
+ 		}
+ 	}
++
++	/*
++	 * 0196: the MTU3 USB device MAC (INTID160) behind rubyusbirq=1.
++	 * The service publishes its GIC specifier and waits; ruby_usb_probe
++	 * activates it after the MTU3 level-1 enable sets are programmed.
++	 */
++	if (gRubyGIC) {
++		int usbirq = 0;
++
++		if (PE_parse_boot_argn("rubyusbirq", &usbirq,
++		    sizeof(usbirq)) && usbirq == 1) {
++			RubyUSBIntService *usb = new RubyUSBIntService;
++			if (usb && usb->init() && usb->attach(this) &&
++			    usb->start(this)) {
++				gRubyUSBIntService = usb;
++			} else {
++				IOLog("SWEET: RubyUSBIntService start "
++				    "failed\n");
++				OSSafeRelease(usb);
++			}
++		}
++	}
+ 	return true;
+ }
+ 
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -12,6 +12,7 @@ iokit/Kernel/arm/RubyGICInterruptController.cpp                  optional iokitc
+ iokit/Kernel/arm/RubyEINTParent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/RubyEINTInterruptController.cpp                 optional iokitcpp
+ iokit/Kernel/arm/SweetGoodixTouch.cpp                            optional iokitcpp
++iokit/Kernel/arm/RubyUSBIntService.cpp                           optional iokitcpp
+ iokit/Kernel/arm/SweetKPD.cpp                                    optional iokitcpp
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp

@@ -1,0 +1,470 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -111,6 +111,8 @@
+  */
+ uint8_t ruby_dev_desc[18];
+ int ruby_winusb_mode;
++int ruby_usb_hotplug_on;
++int ruby_susp_on;
+ 
+ const uint8_t ruby_str_lang[4] = { 4, 3, 0x09, 0x04 };
+ const uint8_t ruby_str_mfg[10] = {
+@@ -2292,6 +2294,18 @@
+         ruby_dev_desc[12] = 0x12;
+         ruby_dev_desc[13] = 0x02;
+     }
++    {
++        int hotplug = 0;
++
++        PE_parse_boot_argn("rubyusb_hotplug", &hotplug, sizeof(hotplug));
++        ruby_usb_hotplug_on = hotplug != 0;
++    }
++    {
++        int susp = 0;
++
++        PE_parse_boot_argn("rubyusb_susp", &susp, sizeof(susp));
++        ruby_susp_on = susp != 0;
++    }
+     printf("RUBY 0332: bcdusb=%02x%02x bcddev=%02x%02x winusb=%d bos=%d "
+         "msos_iface=%d ms10=%d rescue ep=01/81 kept ",
+         ruby_dev_desc[3], ruby_dev_desc[2],
+@@ -2664,6 +2678,11 @@
+             } else {
+                 ruby_wr32(mac, LV1IESR_OFF, RUBY_IRQ_LV1_SET);
+             }
++            if (ruby_usb_hotplug_on) {
++                ruby_wr32(mac, EPCTL_LINK_INTR_ENABLE_OFF,
++                    EPCTL_LINK_SPEED_CHG);
++                ruby_wr32(mac, LV1IESR_OFF, LV1_EPCTRL_INTR);
++            }
+             v = ruby_rd32(mac, MAC2_INTR_ENABLE_OFF);
+             ruby_wr32(mac, MAC2_INTR_ENABLE_OFF,
+                 v | MAC2_INTR_RESET | MAC2_INTR_RESUME |
+@@ -2677,12 +2696,15 @@
+                 ruby_wr32(mac, EPIECR_OFF, ~0u);
+             } else {
+                 printf("RUBY USB: irq service live (lv1ier=%08x "
+-                    "epier=%08x mac2en=%08x qier0=%08x qier1=%08x)\n",
++                    "epier=%08x mac2en=%08x qier0=%08x qier1=%08x "
++                    "hotplug=%d linken=%08x)\n",
+                     ruby_rd32(mac, LV1IER_OFF),
+                     ruby_rd32(mac, EPIER_OFF),
+                     ruby_rd32(mac, MAC2_INTR_ENABLE_OFF),
+                     ruby_rd32(mac, QIER0_OFF),
+-                    ruby_rd32(mac, QIER1_OFF));
++                    ruby_rd32(mac, QIER1_OFF),
++                    ruby_usb_hotplug_on,
++                    ruby_rd32(mac, EPCTL_LINK_INTR_ENABLE_OFF));
+             }
+         }
+     }
+diff --git a/bsd/dev/ruby_usb_gadget.c b/bsd/dev/ruby_usb_gadget.c
+--- a/bsd/dev/ruby_usb_gadget.c
++++ b/bsd/dev/ruby_usb_gadget.c
+@@ -19,6 +19,7 @@
+ #include "ruby_usb_ep_test.h"
+ 
+ extern int ruby_winusb_mode;
++extern volatile int ruby_usb_suspended;
+ #include "ruby_battery.h"
+ #include "ruby_probe.h"
+ #include "ruby_usb_gadget.h"
+@@ -460,6 +461,7 @@
+ static int ruby_0332_iface = -2;   /* -2 unbuilt, -1 none, >=0 vendor iface */
+ 
+ extern int ruby_winusb_mode;
++extern volatile int ruby_usb_suspended;
+ 
+ static int
+ ruby_0332_vendor_iface(void)
+@@ -1310,6 +1312,15 @@
+     static int primed;
+     uint32_t frame;
+ 
++    /*
++     * 0333c: a host-initiated U2 suspend stops SOF without a bus reset.
++     * Do not treat that as a lost port; the suspend/resume handler owns
++     * the QMU freeze and re-kicks on resume.
++     */
++    if (ruby_usb_suspended) {
++        primed = 0;
++        return;
++    }
+     if (!ruby_cfg_seen || mac == 0) {
+         primed = 0;
+         return;
+diff --git a/bsd/dev/ruby_usb_mac.h b/bsd/dev/ruby_usb_mac.h
+--- a/bsd/dev/ruby_usb_mac.h
++++ b/bsd/dev/ruby_usb_mac.h
+@@ -37,6 +37,21 @@
+ #define MAC2_INTR_RESET      (1u << 2)
+ #define MAC2_INTR_RESUME     (1u << 1)
+ #define MAC2_INTR_SUSPEND    (1u << 0)
++
++/*
++ * 0333a: EPCTL link interrupt.  The vendor map puts the link registers at
++ * EPCTL 0x0050/0x0054 (EPCTL base 0x0800); these are MAC-relative like the
++ * rest of this header.  A speed change is the only source the EPCTL group
++ * carries here; the IRQ service consumes it before the group is enabled
++ * (enable-set <= service-set) and only in rubyusb_hotplug mode.
++ */
++#define EPCTL_LINK_INTR_ENABLE_OFF 0x0850
++#define EPCTL_LINK_INTR_OFF        0x0854
++#define EPCTL_LINK_SPEED_CHG       (1u << 0)
++#define DEVICE_CONF_SPEED_MSK      0x7u
++#define DEVICE_CONF_SPEED_UNKNOWN  0u
++#define DEVICE_CONF_SPEED_FULL     1u
++#define DEVICE_CONF_SPEED_HIGH     3u
+ /* 0202: USB2 frame number; advances on every SOF a live port delivers. */
+ 
+ /*
+diff --git a/bsd/dev/ruby_usb_port.c b/bsd/dev/ruby_usb_port.c
+--- a/bsd/dev/ruby_usb_port.c
++++ b/bsd/dev/ruby_usb_port.c
+@@ -40,6 +40,124 @@
+     return *(volatile uint8_t *)(base + off);
+ }
+ 
++/* 0333a: controller-only port events, behind rubyusb_hotplug. */
++static uint32_t ruby_evt_connect, ruby_evt_disconnect, ruby_evt_other;
++static uint32_t ruby_evt_logged, ruby_evt_epctl_idle;
++static uint32_t ruby_evt_susp_logged, ruby_evt_res_logged;
++
++/*
++ * 0333b: unified port state machine.  Only the service workloop mutates
++ * ruby_port_state; the tick/IRQ contexts post ruby_port_pending bits (or
++ * call the workloop entry points) and never touch the state directly.
++ */
++enum {
++    RUBY_PORT_UNKNOWN, RUBY_PORT_ATTACHED, RUBY_PORT_CONFIGURED,
++    RUBY_PORT_SUSPENDED
++};
++enum {
++    RUBY_PORT_EV_LINK_CONN, RUBY_PORT_EV_LINK_DISC, RUBY_PORT_EV_RESET,
++    RUBY_PORT_EV_SUSPEND, RUBY_PORT_EV_RESUME, RUBY_PORT_EV_VBUS_ON,
++    RUBY_PORT_EV_VBUS_OFF, RUBY_PORT_EV_COUNT
++};
++#define RUBY_PORT_PEND_RESET    (1u << 0)
++#define RUBY_PORT_PEND_VBUS_ON  (1u << 1)
++#define RUBY_PORT_PEND_VBUS_OFF (1u << 2)
++static uint32_t ruby_port_state = RUBY_PORT_UNKNOWN;
++static volatile uint32_t ruby_port_pending;
++static uint32_t ruby_port_evts[RUBY_PORT_EV_COUNT];
++static uint32_t ruby_port_logged;
++
++/*
++ * 0333c: suspend/resume behavior, gated by rubyusb_susp.  The flag is
++ * read by the gadget-side SOF watchdog, which must not mistake a host
++ * U2 suspend for a lost port.
++ */
++volatile int ruby_usb_suspended;
++static uint32_t ruby_susp_enters, ruby_susp_exits, ruby_susp_logged;
++
++static void
++ruby_usb_susp_enter(vm_offset_t mac)
++{
++    (void)mac;
++    if (!ruby_susp_on || ruby_usb_suspended)
++        return;
++    ruby_usb_suspended = 1;
++    ruby_susp_enters++;
++    if (ruby_susp_logged < 8) {
++        ruby_susp_logged++;
++        printf("RUBY EVT: susp enter (qmu frozen)\n");
++    }
++}
++
++static void
++ruby_usb_susp_exit(vm_offset_t mac, int detached)
++{
++    (void)mac;
++    if (!ruby_usb_suspended)
++        return;
++    ruby_usb_suspended = 0;
++    ruby_susp_exits++;
++    if (!detached) {
++        /* Vendor qmu_resume semantics: re-kick, never reset the ring. */
++        ruby_qmu_push_req = 1;
++        ruby_qmu_rx_req = 1;
++        ruby_usb_irq_kick();
++    }
++    if (ruby_susp_logged < 8) {
++        ruby_susp_logged++;
++        printf("RUBY EVT: susp exit detached=%d\n", detached);
++    }
++}
++
++static void
++ruby_port_event(uint32_t ev)
++{
++    uint32_t next = ruby_port_state;
++
++    if (ev >= RUBY_PORT_EV_COUNT)
++        return;
++    ruby_port_evts[ev]++;
++    switch (ev) {
++    case RUBY_PORT_EV_LINK_CONN:
++    case RUBY_PORT_EV_VBUS_ON:
++        ruby_usb_susp_exit(ruby_mac_base, 0);
++        if (ruby_port_state == RUBY_PORT_UNKNOWN)
++            next = ruby_cfg_seen ? RUBY_PORT_CONFIGURED : RUBY_PORT_ATTACHED;
++        break;
++    case RUBY_PORT_EV_RESET:
++        ruby_usb_susp_exit(ruby_mac_base, 0);
++        if (ruby_port_state == RUBY_PORT_UNKNOWN)
++            next = RUBY_PORT_ATTACHED;
++        break;
++    case RUBY_PORT_EV_LINK_DISC:
++    case RUBY_PORT_EV_VBUS_OFF:
++        ruby_usb_susp_exit(ruby_mac_base, 1);
++        next = RUBY_PORT_UNKNOWN;
++        break;
++    case RUBY_PORT_EV_SUSPEND:
++        ruby_usb_susp_enter(ruby_mac_base);
++        if (ruby_port_state != RUBY_PORT_UNKNOWN)
++            next = RUBY_PORT_SUSPENDED;
++        break;
++    case RUBY_PORT_EV_RESUME:
++        ruby_usb_susp_exit(ruby_mac_base, 0);
++        if (ruby_port_state == RUBY_PORT_SUSPENDED)
++            next = ruby_cfg_seen ? RUBY_PORT_CONFIGURED :
++                RUBY_PORT_ATTACHED;
++        break;
++    default:
++        break;
++    }
++    if (next != ruby_port_state) {
++        if (ruby_port_logged < 16) {
++            ruby_port_logged++;
++            printf("RUBY EVT: port %u -> %u (ev=%u)\n",
++                (unsigned)ruby_port_state, (unsigned)next, (unsigned)ev);
++        }
++        ruby_port_state = next;
++    }
++}
++
+ void
+ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+ {
+@@ -172,6 +290,10 @@
+     if (ruby_bus_resets <= 4)
+         printf("RUBY USB: t=%u host bus reset #%u, address cleared\n",
+             ruby_ms, ruby_bus_resets);
++    if (ruby_usb_hotplug_on && ruby_irq_mode) {
++        ruby_port_pending |= RUBY_PORT_PEND_RESET;
++        ruby_usb_irq_kick();
++    }
+     return 1;
+ }
+ 
+@@ -197,17 +319,74 @@
+     ruby_usb_reset_check(mac);
+ 
+     level1 = ruby_rd32(mac, LV1ISR_OFF) & ruby_rd32(mac, LV1IER_OFF);
++    if (ruby_usb_hotplug_on && (level1 & LV1_EPCTRL_INTR)) {
++        uint32_t link, speed;
++
++        /* 0333a: LINK speed change = connect/disconnect.  W1C the whole
++         * status once the group is enabled, and fuse a phantom line. */
++        link = ruby_rd32(mac, EPCTL_LINK_INTR_OFF) &
++            ruby_rd32(mac, EPCTL_LINK_INTR_ENABLE_OFF);
++        ruby_wr32(mac, EPCTL_LINK_INTR_OFF, link);
++        if (link & EPCTL_LINK_SPEED_CHG) {
++            speed = ruby_rd32(mac, DEVICE_CONF - MTU3_PA) &
++                DEVICE_CONF_SPEED_MSK;
++            if (speed == DEVICE_CONF_SPEED_FULL ||
++                speed == DEVICE_CONF_SPEED_HIGH) {
++                ruby_evt_connect++;
++                ruby_port_event(RUBY_PORT_EV_LINK_CONN);
++            } else if (speed == DEVICE_CONF_SPEED_UNKNOWN) {
++                ruby_evt_disconnect++;
++                ruby_port_event(RUBY_PORT_EV_LINK_DISC);
++            } else {
++                ruby_evt_other++;
++            }
++            if (ruby_evt_logged < 12) {
++                ruby_evt_logged++;
++                printf("RUBY EVT: link speed=%u conn=%u disc=%u other=%u\n",
++                    (unsigned)speed, (unsigned)ruby_evt_connect,
++                    (unsigned)ruby_evt_disconnect,
++                    (unsigned)ruby_evt_other);
++            }
++            ruby_trace(ruby_ms, RUBY_TR_STATE, 10, speed,
++                ruby_evt_connect, ruby_evt_disconnect);
++        }
++        if (link) {
++            ruby_evt_epctl_idle = 0;
++        } else if (++ruby_evt_epctl_idle > 1000) {
++            ruby_evt_epctl_idle = 0;
++            ruby_wr32(mac, LV1IECR - MTU3_PA, LV1_EPCTRL_INTR);
++            printf("RUBY USB IRQ: EPCTL fused off after 1000 idle "
++                "passes\n");
++        }
++    }
+     if (level1 & LV1_MAC2_INTR) {
+         ruby_irq_mac2++;
+         st = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
+         if (st & (MAC2_INTR_RESUME | MAC2_INTR_SUSPEND)) {
+-            /* Count-only (plan v1): W1C so the group cannot storm. */
++            /* 0333a: W1C so the group cannot storm; behavior stays off
++             * until 0333c, the first events are printed for the trace. */
+             ruby_wr32(mac, MAC2_INTR_STATUS_OFF,
+                 st & (MAC2_INTR_RESUME | MAC2_INTR_SUSPEND));
+-            if (st & MAC2_INTR_RESUME)
++            if (st & MAC2_INTR_RESUME) {
+                 ruby_irq_resume++;
+-            if (st & MAC2_INTR_SUSPEND)
++                if (ruby_usb_hotplug_on) {
++                    ruby_port_event(RUBY_PORT_EV_RESUME);
++                    if (ruby_evt_res_logged < 8) {
++                        ruby_evt_res_logged++;
++                        printf("RUBY EVT: resume\n");
++                    }
++                }
++            }
++            if (st & MAC2_INTR_SUSPEND) {
+                 ruby_irq_suspend++;
++                if (ruby_usb_hotplug_on) {
++                    ruby_port_event(RUBY_PORT_EV_SUSPEND);
++                    if (ruby_evt_susp_logged < 8) {
++                        ruby_evt_susp_logged++;
++                        printf("RUBY EVT: suspend\n");
++                    }
++                }
++            }
+             st = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
+         }
+         if (!(st & MAC2_INTR_RESET)) {
+@@ -255,22 +434,27 @@
+             ruby_wr32(mac, QISAR1_OFF, q1 & RUBY_QMU_TXQ_BITS);
+         if (terr != 0)
+             ruby_wr32(mac, TQERRIR0_OFF, terr);
+-        if ((q0 & RUBY_QMU_TX_DONE) || (q1 & QISAR1_TXQ_EMPTY)) {
++        if (ruby_usb_suspended)
++            ruby_irq_qmu_idle = 0;
++        if (!ruby_usb_suspended &&
++            ((q0 & RUBY_QMU_TX_DONE) || (q1 & QISAR1_TXQ_EMPTY))) {
+             ruby_qmu_push_req = 1;
+             routed = 1;
+         }
+         /* 0232: EP1 (0x01) RX done is BIT(16) << 1; the old mask only saw
+          * EP2's BIT(18), so rx drain never ran on EP1 data. */
+-        if ((q0 & (QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1)) ||
+-            (q1 & RUBY_QMU_RXQ_EMPTY_BITS)) {
++        if (!ruby_usb_suspended &&
++            ((q0 & (QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1)) ||
++            (q1 & RUBY_QMU_RXQ_EMPTY_BITS))) {
+             ruby_qmu_rx_req = 1;
+             routed = 1;
+         }
+-        if ((q1 & (QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR)) || terr != 0) {
++        if (!ruby_usb_suspended &&
++            ((q1 & (QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR)) || terr != 0)) {
+             ruby_qmu_recover_req = 1;
+             routed = 1;
+         }
+-        if (q1 & RUBY_QMU_RXQ_ERR_BITS) {
++        if (!ruby_usb_suspended && (q1 & RUBY_QMU_RXQ_ERR_BITS)) {
+             ruby_qmu_rx_recover_req = 1;
+             routed = 1;
+         }
+@@ -297,11 +481,29 @@
+ {
+     vm_offset_t mac = ruby_mac_base;
+ 
++    if (ruby_usb_hotplug_on && ruby_port_pending) {
++        uint32_t p = ruby_port_pending;
++
++        ruby_port_pending = 0;
++        if (p & RUBY_PORT_PEND_VBUS_OFF)
++            ruby_port_event(RUBY_PORT_EV_VBUS_OFF);
++        if (p & RUBY_PORT_PEND_VBUS_ON)
++            ruby_port_event(RUBY_PORT_EV_VBUS_ON);
++        if (p & RUBY_PORT_PEND_RESET)
++            ruby_port_event(RUBY_PORT_EV_RESET);
++    }
+     if (ruby_irq_reattach_req) {
+         ruby_irq_reattach_req = 0;
+         ruby_usb_reattach(mac, ruby_phy_base);
+         ruby_irq_reattach_done = 1;
+     }
++    /*
++     * 0333c: while a host U2 suspend is active, leave the QMU request
++     * bits pending and skip every data-plane pass; RESUME re-kicks and
++     * the parked requests run from clean state.
++     */
++    if (ruby_usb_suspended)
++        return;
+     if (!ruby_qmu_irq_mode)
+         return;
+     /*
+@@ -380,6 +582,8 @@
+ void
+ ruby_ep2_tick_assist(vm_offset_t mac)
+ {
++    if (ruby_usb_suspended)
++        return;
+     ruby_tx_recover_poll(mac);
+     /* 0266: read-only RX ring desync detector (cur vs driver deq). */
+     if (ruby_rx_ready && ruby_rx_packets > 0 &&
+@@ -489,6 +693,10 @@
+ 
+     if (!present) {
+         seen_detach = 1;
++        if (ruby_usb_hotplug_on && ruby_irq_mode) {
++            ruby_port_pending |= RUBY_PORT_PEND_VBUS_OFF;
++            ruby_usb_irq_kick();
++        }
+         ruby_trace(0, RUBY_TR_STATE, 8, v, 0, 0);
+         printf("RUBY USB: t=%u VBUS detached (ext=0 seq=%u otg=%08x)\n",
+             ruby_ms, seq, v);
+@@ -502,8 +710,17 @@
+      * A VBUS detach drops the U2 PHY session, so the light MAC rearm is
+      * not enough: the D+ pull-up has to be cycled before the host can see
+      * a new connect.  Reuse the 0116 boot-window sequence at runtime.
++     * 0333b: in hotplug mode the tick only posts the event and the
++     * request; the service workloop owns the PHY/MAC sequence, so the
++     * 1 ms tick no longer busy-waits inside it.
+      */
+-    ruby_usb_reattach_owned(mac, ruby_phy_base);
++    if (ruby_usb_hotplug_on && ruby_irq_mode) {
++        ruby_port_pending |= RUBY_PORT_PEND_VBUS_ON;
++        ruby_irq_reattach_req = 1;
++        ruby_usb_irq_kick();
++    } else {
++        ruby_usb_reattach_owned(mac, ruby_phy_base);
++    }
+     ruby_enum_assist_until = ruby_ms + 15000;
+     ruby_trace(0, RUBY_TR_STATE, 9, v, attaches, 0);
+     printf("RUBY USB: t=%u fast EP0 assist 15 s\n", ruby_ms);
+diff --git a/bsd/dev/ruby_usb_port.h b/bsd/dev/ruby_usb_port.h
+--- a/bsd/dev/ruby_usb_port.h
++++ b/bsd/dev/ruby_usb_port.h
+@@ -68,6 +68,8 @@
+ extern uint32_t ruby_txrdy_kicks;
+ extern uint64_t ruby_log_pos;
+ extern uint8_t ruby_config;
++extern int ruby_usb_hotplug_on;
++extern int ruby_susp_on;
+ extern vm_offset_t ruby_ippc_base;
+ extern vm_offset_t ruby_mac_base;
+ extern vm_offset_t ruby_phy_base;
+@@ -146,6 +148,8 @@
+ extern uint32_t ruby_txrdy_kicks;
+ extern uint64_t ruby_log_pos;
+ extern uint8_t ruby_config;
++extern int ruby_usb_hotplug_on;
++extern int ruby_susp_on;
+ extern vm_offset_t ruby_ippc_base;
+ extern vm_offset_t ruby_mac_base;
+ extern vm_offset_t ruby_phy_base;
+@@ -224,6 +228,8 @@
+ extern uint32_t ruby_txrdy_kicks;
+ extern uint64_t ruby_log_pos;
+ extern uint8_t ruby_config;
++extern int ruby_usb_hotplug_on;
++extern int ruby_susp_on;
+ extern vm_offset_t ruby_ippc_base;
+ extern vm_offset_t ruby_mac_base;
+ extern vm_offset_t ruby_phy_base;

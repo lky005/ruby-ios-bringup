@@ -1,0 +1,14 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2590,6 +2590,11 @@
+         }
+ 
+         np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
++        /* 0214: vendor prepare_tx_gpd step 4 - clear next slot's HWO
++         * before publishing current. QMU follows next_gpd; at the
++         * enq=63 seam a stale HWO=1 on slot 0 would corrupt the walk.
++         * ruby_gpd_clear zeros the full 16B descriptor. */
++        ruby_gpd_clear((enq + 1u) % RUBY_GPD_NUM);
+         ruby_gpd_clear(enq);
+         g[0] = 1u << 7;
+         g[2] = (uint8_t)(((log_pa >> 32) & 0xfu) |

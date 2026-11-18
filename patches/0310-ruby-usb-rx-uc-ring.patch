@@ -1,0 +1,386 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2082,6 +2082,8 @@
+ #define EP_RST_RX1_BIT      (1u << 1)  /* EP1 OUT = our RX endpoint */
+ #define EP_RST_TX1_BIT      (1u << 17)  /* 0211: EP_RST(in, 1) = BIT(16) << 1 */
+ #define RUBY_RX_GPD_NUM 16
++#define RUBY_RX_GPD_RING_SZ (RUBY_RX_GPD_NUM * 16u)
++#define RUBY_RX_PAGE_SIZE (1u << 14)   /* PAGE_MAX_SHIFT: exclusive 16 KB page */
+ /*
+  * 0299: RX GPD declared buflen is runtime (ruby_rx_buf_size, boot-arg
+  * ruby_rxbuf, default 512 = wMaxPacketSize).  docs/113 pinned the
+@@ -2311,8 +2313,31 @@
+ static uint32_t ruby_tx_empty_last_ms;    /* ruby_ms at last empty */
+ static uint32_t ruby_txdone_count;
+ 
+-static uint8_t ruby_rx_gpd_ring[RUBY_RX_GPD_NUM * 16]
+-    __attribute__((aligned(4096)));
++/*
++ * 0310: RX GPD ring ownership.  ruby_rxuc=1 (default) maps the ring's own
++ * PAGE_MAX_SHIFT (16 KB) BSS page as an uncached alias: the page holds the
++ * 256 B ring plus explicit padding and nothing else, so the QMU keeps the
++ * same physical ring address that worked in 0309 while the CPU never
++ * shares a cache line with DMA.  ruby_rxuc=0 keeps the cached BSS path for
++ * A/B.  All ring mutations and the diagnostic snapshot are workloop-only.
++ * The 1ms EP0 thread reads the seqlock snapshot (and the read-only
++ * 0xC0/0x23/24 diag may read the ring); it never mutates the ring or runs
++ * dc civac on the UC alias.
++ */
++struct ruby_rx_gpd_page {
++    uint8_t ring[RUBY_RX_GPD_RING_SZ];
++    uint8_t pad[RUBY_RX_PAGE_SIZE - RUBY_RX_GPD_RING_SZ];
++};
++static struct ruby_rx_gpd_page ruby_rx_gpd_store
++    __attribute__((aligned(RUBY_RX_PAGE_SIZE)));
++#define ruby_rx_gpd_ring (ruby_rx_gpd_store.ring)
++static uint8_t *ruby_rx_gpd_ring_cpu = ruby_rx_gpd_ring;
++static vm_offset_t ruby_rx_gpd_ring_uc;
++static int ruby_rx_uc = 1;
++static volatile uint32_t ruby_rx_snap_seq;
++static volatile uint32_t ruby_rx_snap_hwo;
++static volatile uint32_t ruby_rx_snap_cur;
++static uint32_t ruby_rx_snap_bad;
+ static uint8_t ruby_rx_buf[RUBY_RX_GPD_NUM][RUBY_RX_BUF_MAX]
+     __attribute__((aligned(4096)));
+ static uint64_t ruby_rx_gpd_pa[RUBY_RX_GPD_NUM];
+@@ -3967,7 +3992,7 @@
+ static void
+ ruby_ep2_rx_arm(uint32_t i)
+ {
+-    uint8_t *g = ruby_rx_gpd_ring + i * 16;
++    uint8_t *g = ruby_rx_gpd_ring_cpu + i * 16;
+     uint64_t next = ruby_rx_gpd_pa[(i + 1u) % ruby_rx_ring_n];
+     uint64_t buf = ruby_rx_buf_pa[i];
+     uint32_t k;
+@@ -3990,10 +4015,56 @@
+     g[0] = (1u << 0) | (1u << 7);
+ 
+     ruby_dc_civac(ruby_rx_buf[i], RUBY_RX_BUF_MAX);
+-    ruby_dc_civac(g, 16);
+-    /* 0263: publish the next GPD the QMU reads after this one. */
+-    ruby_dc_civac(ruby_rx_gpd_ring +
+-        ((i + 1u) % ruby_rx_ring_n) * 16, 16);
++    if (!ruby_rx_uc) {
++        ruby_dc_civac(g, 16);
++        /* 0263: publish the next GPD the QMU reads after this one. */
++        ruby_dc_civac(ruby_rx_gpd_ring_cpu +
++            ((i + 1u) % ruby_rx_ring_n) * 16, 16);
++    } else {
++        /* 0310: uncached ring; publish HWO/next before the QMU sees it. */
++        ruby_dma_mb();
++    }
++}
++
++/*
++ * 0310: set up the RX GPD ring.  ruby_rxuc=1 maps the ring's own 4 KB BSS
++ * page as an uncached alias (same physical address as 0309; the ring
++ * occupies the first 256 B and the tail is padding).  ruby_rxuc=0 keeps
++ * the legacy cached BSS ring for zero-build A/B.  Returns 1 when
++ * ruby_rx_ring_pa is valid.
++ */
++static int
++ruby_rx_ring_setup(void)
++{
++    if (ruby_rx_gpd_ring_uc) {
++        ruby_rx_gpd_ring_cpu = (uint8_t *)ruby_rx_gpd_ring_uc;
++        return ruby_rx_ring_pa != 0;
++    }
++    if (ruby_rx_uc) {
++        uint64_t pa = ruby_dma_pa(ruby_rx_gpd_ring);
++        vm_offset_t uc;
++
++        if (pa && !(pa & (PAGE_SIZE - 1u))) {
++            /* clean the cached alias of the whole exclusive page */
++            ruby_dc_civac(&ruby_rx_gpd_store, RUBY_RX_PAGE_SIZE);
++            uc = ml_io_map((vm_offset_t)pa, PAGE_SIZE);
++            if (uc) {
++                ruby_rx_ring_pa = pa;
++                ruby_rx_gpd_ring_uc = uc;
++                ruby_rx_gpd_ring_cpu = (uint8_t *)uc;
++                return 1;
++            }
++            printf("RUBY USB: 0310 rx ring uc map failed pa=0x%llx\n",
++                (unsigned long long)pa);
++        } else {
++            printf("RUBY USB: 0310 rx ring pa bad 0x%llx\n",
++                (unsigned long long)pa);
++        }
++        ruby_rx_uc = 0;
++    }
++    ruby_rx_gpd_ring_cpu = ruby_rx_gpd_ring;
++    ruby_rx_ring_pa = ruby_dma_pa(ruby_rx_gpd_ring);
++    return ruby_rx_ring_pa != 0;
+ }
+ 
+ static void
+@@ -4014,16 +4085,17 @@
+         printf("RUBY USB: EP2 RX stop timeout in config\n");
+         return;
+     }
+-    ruby_rx_ring_pa = ruby_dma_pa(ruby_rx_gpd_ring);
+-    for (i = 0; i < ruby_rx_ring_n; i++) {
+-        ruby_rx_buf_pa[i] = ruby_dma_pa(ruby_rx_buf[i]);
+-        ruby_rx_gpd_pa[i] = ruby_dma_pa(ruby_rx_gpd_ring + i * 16);
+-    }
+-    if (!ruby_rx_ring_pa) {
++    if (!ruby_rx_ring_setup()) {
+         printf("RUBY USB: EP2 RX ring not mapped\n");
+         return;
+     }
+     for (i = 0; i < ruby_rx_ring_n; i++) {
++        ruby_rx_buf_pa[i] = ruby_dma_pa(ruby_rx_buf[i]);
++        ruby_rx_gpd_pa[i] = ruby_rx_uc ?
++            ruby_rx_ring_pa + i * 16u :
++            ruby_dma_pa(ruby_rx_gpd_ring_cpu + i * 16);
++    }
++    for (i = 0; i < ruby_rx_ring_n; i++) {
+         if (!ruby_rx_buf_pa[i] || !ruby_rx_gpd_pa[i]) {
+             printf("RUBY USB: EP2 RX buffers not mapped\n");
+             ruby_rx_ring_pa = 0;
+@@ -4070,8 +4142,9 @@
+         ruby_rd32(mac, RQCSR1_OFF), ruby_rx_packets);
+     ruby_rx_ready = 1;
+     ruby_seq("RXCFG_OUT", (uint32_t)ruby_rx_ring_pa, ruby_rx_ready);
+-    printf("RUBY USB: EP2 RX ring pa=0x%llx buf=0x%llx/0x%llx/0x%llx/0x%llx\n",
+-        ruby_rx_ring_pa, ruby_rx_buf_pa[0], ruby_rx_buf_pa[1],
++    printf("RUBY USB: EP2 RX ring uc=%d pa=0x%llx "
++        "buf=0x%llx/0x%llx/0x%llx/0x%llx\n",
++        ruby_rx_uc, ruby_rx_ring_pa, ruby_rx_buf_pa[0], ruby_rx_buf_pa[1],
+         ruby_rx_buf_pa[2], ruby_rx_buf_pa[3]);
+ }
+ 
+@@ -4183,6 +4256,32 @@
+     return (uint32_t)((cur_pa - ruby_rx_ring_pa) / 16u);
+ }
+ 
++/*
++ * 0310: RX ring snapshot, workloop-only.  The seqlock lets the 1ms
++ * heartbeat read HWO/cur without touching the ring; a stuck odd sequence
++ * is counted by the reader (ruby_rx_snap_bad).
++ */
++static void
++ruby_rx_snapshot_update(vm_offset_t mac)
++{
++    uint32_t i, hwo = 0, cur;
++
++    if (!ruby_rx_ready)
++        return;
++    if (!ruby_rx_uc)
++        ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
++    for (i = 0; i < ruby_rx_ring_n; i++)
++        if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
++            hwo |= 1u << i;
++    cur = ruby_ep2_rx_cur_slot(mac);
++    ruby_rx_snap_seq++;
++    __asm__ volatile("dmb sy" ::: "memory");
++    ruby_rx_snap_hwo = hwo;
++    ruby_rx_snap_cur = cur;
++    __asm__ volatile("dmb sy" ::: "memory");
++    ruby_rx_snap_seq++;
++}
++
+ static void
+ ruby_ep2_rx_resume(vm_offset_t mac)
+ {
+@@ -4322,9 +4421,10 @@
+ {
+     uint32_t rx_hwo = 0, i;
+ 
+-    ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++    if (!ruby_rx_uc)
++        ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+     for (i = 0; i < ruby_rx_ring_n; i++)
+-        if (ruby_rx_gpd_ring[i * 16] & 1u)
++        if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+             rx_hwo |= 1u << i;
+     printf("RUBY CMD: ring tx cur=%02x enq=%u deq=%u inflight=%u "
+         "hwo=%llx\n", ruby_ep2_cur_slot(mac), ruby_gpd_enq, ruby_gpd_deq,
+@@ -4493,9 +4593,10 @@
+     if (!ruby_rx_ready)
+         return;
+ 
+-    ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++    if (!ruby_rx_uc)
++        ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+     for (i = 0; i < ruby_rx_ring_n; i++)
+-        if (ruby_rx_gpd_ring[i * 16] & 1u)
++        if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+             hwo |= 1u << i;
+ 
+     cur = ruby_ep2_rx_cur_slot(mac);
+@@ -4512,7 +4613,7 @@
+ 
+     for (n = 0; n < ruby_rx_ring_n && (full_lap || ruby_rx_deq != cur); n++) {
+         i = ruby_rx_deq;
+-        g = ruby_rx_gpd_ring + i * 16;
++        g = ruby_rx_gpd_ring_cpu + i * 16;
+         if (hwo & (1u << i)) {
+             /*
+              * 0267: the QMU can skip the ring head (its HWO stays set)
+@@ -4581,7 +4682,8 @@
+     if (done) {
+         /* 0263: the QMU reads the GPD at cur right after resume; make its
+          * armed state visible before the doorbell (U-Boot 044d7003a7). */
+-        ruby_dc_civac(ruby_rx_gpd_ring + cur * 16, 16);
++        if (!ruby_rx_uc)
++            ruby_dc_civac(ruby_rx_gpd_ring_cpu + cur * 16, 16);
+         if (full_lap) {
+             ruby_rx_full_laps++;
+             if (ruby_rx_full_laps <= 4)
+@@ -4610,9 +4712,10 @@
+ 
+     if (!ruby_rx_ready)
+         return;
+-    ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++    if (!ruby_rx_uc)
++        ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+     for (i = 0; i < ruby_rx_ring_n; i++)
+-        if (ruby_rx_gpd_ring[i * 16] & 1u)
++        if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+             hwo |= 1u << i;
+     cur = ruby_ep2_rx_cur_slot(mac);
+     printf("RUBY USB RXSTALL pk=%u done=%u deq=%u cur=%02x rqcsr=%08x "
+@@ -4628,7 +4731,7 @@
+         return;
+     for (i = 0; i < 4; i++) {
+         uint32_t sl = (cur + i) % ruby_rx_ring_n;
+-        volatile uint8_t *g = ruby_rx_gpd_ring + sl * 16;
++        volatile uint8_t *g = ruby_rx_gpd_ring_cpu + sl * 16;
+ 
+         printf("RUBY USB RXGPD[%02u] f=%02x c=%02x len=%u next=%08x "
+             "buf=%08x\n", sl, g[0], g[1],
+@@ -4638,7 +4741,7 @@
+     }
+     for (i = 0; i < 4; i++) {
+         uint32_t sl = (ruby_rx_deq + i) % ruby_rx_ring_n;
+-        volatile uint8_t *g = ruby_rx_gpd_ring + sl * 16;
++        volatile uint8_t *g = ruby_rx_gpd_ring_cpu + sl * 16;
+ 
+         printf("RUBY USB RXGPDQ[%02u] f=%02x c=%02x len=%u next=%08x "
+             "buf=%08x\n", sl, g[0], g[1],
+@@ -4768,6 +4871,7 @@
+     }
+ 
+     ruby_ep2_rx_drain(mac);
++    ruby_rx_snapshot_update(mac);
+ 
+     /*
+      * 0146a-qmu: RXQ_EMPTY means the QMU ran out of GPDs and stopped.
+@@ -5270,7 +5374,7 @@
+     uint32_t otg = ruby_rd32(ippc, IPPC_OTG_STS_OFF);
+     uint32_t mac2 = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
+     uint32_t seq = ruby_battery_poll_seq();
+-    uint32_t rxcur = 0xffu, rxhwo = 0, ri;
++    uint32_t rxcur = 0xffu, rxhwo = 0;
+     uint32_t off;
+     int ext = ruby_battery_last_external();
+ 
+@@ -5288,13 +5392,34 @@
+         seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
+         ruby_rd32(mac, FRAME_NUM_OFF) & 0x7ffu,
+         ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
+-    /* 0260: read-only RX stall snapshot folded into the 5 s line. */
++    /*
++     * 0310: the heartbeat never touches the RX ring.  It reads the
++     * workloop's seqlock snapshot; an odd/stuck sequence is the soft
++     * ownership assertion (bounded print, no panic).
++     */
+     if (ruby_rx_ready) {
+-        ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
+-        for (ri = 0; ri < ruby_rx_ring_n; ri++)
+-            if (ruby_rx_gpd_ring[ri * 16] & 1u)
+-                rxhwo |= 1u << ri;
+-        rxcur = ruby_ep2_rx_cur_slot(mac);
++        uint32_t s1, s2, tries;
++
++        for (tries = 0; tries < 3; tries++) {
++            s1 = ruby_rx_snap_seq;
++            if (s1 & 1u)
++                continue;
++            __asm__ volatile("dmb sy" ::: "memory");
++            rxhwo = ruby_rx_snap_hwo;
++            rxcur = ruby_rx_snap_cur;
++            __asm__ volatile("dmb sy" ::: "memory");
++            s2 = ruby_rx_snap_seq;
++            if (s1 == s2)
++                break;
++        }
++        if (tries == 3) {
++            ruby_rx_snap_bad++;
++            if (ruby_rx_snap_bad <= 4)
++                printf("RUBY USB: 0310 rx snap busy seq=%08x\n",
++                    ruby_rx_snap_seq);
++            rxhwo = 0;
++            rxcur = 0xffu;
++        }
+     }
+     /* 0233: data-plane state for the ACM echo debug round. */
+     printf("RUBY USB ACM: ready=%u rx=%u echo=%u/%u drop=%u enq=%u deq=%u "
+@@ -5508,9 +5633,10 @@
+     uint32_t v[16];
+     uint32_t hwo = 0, i;
+ 
+-    ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++    if (!ruby_rx_uc)
++        ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+     for (i = 0; i < ruby_rx_ring_n; i++)
+-        if (ruby_rx_gpd_ring[i * 16] & 1u)
++        if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+             hwo |= 1u << i;
+ 
+     v[0] = 0x45503252u;         /* "EP2R" */
+@@ -5542,9 +5668,10 @@
+     uint32_t rqcpr, rqhiar, rqcsr, rx0, rx1, rx2, hwo = 0, cur, i;
+     uint32_t *g;
+ 
+-    ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++    if (!ruby_rx_uc)
++        ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+     for (i = 0; i < ruby_rx_ring_n; i++)
+-        if (ruby_rx_gpd_ring[i * 16] & 1u)
++        if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+             hwo |= 1u << i;
+ 
+     rqcpr = ruby_rd32(mac, RQCPR1_OFF);
+@@ -5569,13 +5696,13 @@
+         uint32_t prev = (cur + ruby_rx_ring_n - 1u) % ruby_rx_ring_n;
+         uint32_t next = (cur + 1u) % ruby_rx_ring_n;
+ 
+-        g = (uint32_t *)(ruby_rx_gpd_ring + cur * 16);
++        g = (uint32_t *)(ruby_rx_gpd_ring_cpu + cur * 16);
+         v[9] = g[0];
+         v[10] = g[1];
+         v[11] = g[2];
+         v[12] = g[3];
+-        v[13] = *(uint32_t *)(ruby_rx_gpd_ring + prev * 16 + 12);
+-        v[14] = *(uint32_t *)(ruby_rx_gpd_ring + next * 16 + 12);
++        v[13] = *(uint32_t *)(ruby_rx_gpd_ring_cpu + prev * 16 + 12);
++        v[14] = *(uint32_t *)(ruby_rx_gpd_ring_cpu + next * 16 + 12);
+     }
+     v[15] = (ruby_rx_zlp_err & 0xffffu) |
+         ((ruby_rx_stall_seen & 1u) << 16) |
+@@ -6152,6 +6279,7 @@
+     int rxgpdnum = 16;
+     int inflight = 16;
+     int rxslot = 2;
++    int rxuc = 1;
+     int cfgrst = 0;
+     int recover = 0;
+     int rxbuf = 512;
+@@ -6316,6 +6444,8 @@
+     if (rxslot > 7)
+         rxslot = 7;
+     ruby_rx_slot = (uint32_t)rxslot;
++    PE_parse_boot_argn("ruby_rxuc", &rxuc, sizeof(rxuc));
++    ruby_rx_uc = (rxuc != 0);
+     PE_parse_boot_argn("ruby_txfifo", &txfifo, sizeof(txfifo));
+     ruby_txfifo_en = (txfifo == 1);
+     PE_parse_boot_argn("ruby_cfgrst", &cfgrst, sizeof(cfgrst));
+@@ -6383,6 +6513,7 @@
+         "rxring=%u rxslot=%u txslot=%d\n",
+         ruby_tx_gpd_len, ruby_tx_ring_n, ruby_inflight_max,
+         ruby_rx_buf_size, ruby_rx_ring_n, ruby_rx_slot, ruby_txslot);
++    printf("RUBY USB: 0310 rxuc=%d\n", ruby_rx_uc);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

@@ -23,7 +23,7 @@ BASELINE_FILES=${BASELINE_FILES:-82}
 ALLOW_PUBLIC_UPSTREAM=${ALLOW_PUBLIC_UPSTREAM:-0}
 BASE_REPO=${BASE_REPO:-https://github.com/MakrSas/ios-topaz.git}
 BASE_SHA=${BASE_SHA:-5095ac19dbdcf37b64b81fe443f4027ad51b84bf}
-PATCHSET_SHA256=${PATCHSET_SHA256:-8c7b4ea1dfd41a60a2c82000d9bd19e136d33f53e0dab0e0f68e9273136d6aed}
+PATCHSET_SHA256=${PATCHSET_SHA256:-3aad8c991709bdc75f84616ec9a1430ba3f5442c8a89f50460ea605195bbca10}
 SKIP_PATCHES=${SKIP_PATCHES:-}
 PYTHON=${PYTHON:-python3}
 DEST=${1:-baseline}
@@ -179,6 +179,124 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0189-ruby-usb-state-start.patch" \
     "$ROOT/patches/0194-ruby-usb-golden-srctrl.patch" \
     "$ROOT/patches/0195-ruby-usb-acknowledgements.patch" \
+    "$ROOT/patches/0196-ruby-usb-irq-ep0.patch" \
+    "$ROOT/patches/0197-ruby-usb-qmu-irq.patch" \
+    "$ROOT/patches/0198-ruby-ep2-pad-frames.patch" \
+    "$ROOT/patches/0199-ruby-probe-clk-regions.patch" \
+    "$ROOT/patches/0200-sweetfb-dbg-gate.patch" \
+    "$ROOT/patches/0201-ruby-usb-gpd-stride16-apmixed.patch" \
+    "$ROOT/patches/0202-ruby-usb-frame-watchdog.patch" \
+    "$ROOT/patches/0203-ruby-usb-tphy-coldcycle.patch" \
+    "$ROOT/patches/0204-ruby-usb-gpd-uc.patch" \
+    "$ROOT/patches/0204b-ruby-usb-gpd-uc-alloc.patch" \
+    "$ROOT/patches/0206b-ruby-usb-single-gpd.patch" \
+    "$ROOT/patches/0207-ruby-usb-qcr0-off.patch" \
+    "$ROOT/patches/0211-ruby-usb-ep1.patch" \
+    "$ROOT/patches/0212-ruby-usb-ep1-qisar0.patch" \
+    "$ROOT/patches/0213-ruby-usb-ep1-qisar1-fastpath.patch" \
+    "$ROOT/patches/0214-ruby-usb-ep1-next-hwo-clear.patch" \
+    "$ROOT/patches/0215-ruby-usb-ep1-len-passthrough.patch" \
+    "$ROOT/patches/0216-ruby-usb-ep1-out-rx1.patch" \
+    "$ROOT/patches/0217-ruby-usb-ep1-backpressure-counters.patch" \
+    "$ROOT/patches/0218-ruby-usb-ep-layer.patch" \
+    "$ROOT/patches/0219-ruby-usb-desc-order.patch" \
+    "$ROOT/patches/0220-ruby-usb-qmu-init-order.patch" \
+    "$ROOT/patches/0221-ruby-usb-xfer-1to1.patch" \
+    "$ROOT/patches/0222-ruby-usb-xfer-workloop.patch" \
+    "$ROOT/patches/0223-ruby-usb-func-framework.patch" \
+    "$ROOT/patches/0224-ruby-usb-cdc-acm.patch" \
+    "$ROOT/patches/0225-ruby-usb-cdc-acm-full.patch" \
+    "$ROOT/patches/0226-ruby-usb-acm-real.patch" \
+    "$ROOT/patches/0227-ruby-usb-ep0-out-ack.patch" \
+    "$ROOT/patches/0228-ruby-usb-acm-out-rxpath.patch" \
+    "$ROOT/patches/0229-ruby-usb-acm-isolation.patch" \
+    "$ROOT/patches/0230-ruby-usb-acm-setup-ack.patch" \
+    "$ROOT/patches/0231-ruby-usb-acm-echo.patch" \
+    "$ROOT/patches/0232-ruby-usb-rx-irq.patch" \
+    "$ROOT/patches/0233-ruby-usb-acm-diag.patch" \
+    "$ROOT/patches/0234-ruby-usb-qmu-restart.patch" \
+    "$ROOT/patches/0235-ruby-usb-qcr0-cs.patch" \
+    "$ROOT/patches/0236-ruby-usb-qiesr0-rx.patch" \
+    "$ROOT/patches/0237-ruby-usb-qiesr0-mask.patch" \
+    "$ROOT/patches/0238-ruby-usb-resume-poll.patch" \
+    "$ROOT/patches/0239-ruby-usb-full-restart.patch" \
+    "$ROOT/patches/0240-ruby-usb-restart-diag.patch" \
+    "$ROOT/patches/0241-ruby-usb-tx-retry.patch" \
+    "$ROOT/patches/0242-ruby-usb-diag-decl.patch" \
+    "$ROOT/patches/0243-ruby-usb-tx-watchdog.patch" \
+    "$ROOT/patches/0244-ruby-usb-rx-watchdog.patch" \
+    "$ROOT/patches/0245-ruby-usb-force-restart.patch" \
+    "$ROOT/patches/0246-ruby-usb-cs-off.patch" \
+    "$ROOT/patches/0247-ruby-usb-rx-resident.patch" \
+    "$ROOT/patches/0248-ruby-usb-zero-chksum.patch" \
+    "$ROOT/patches/0249-ruby-usb-cs-off-zero-chk.patch" \
+    "$ROOT/patches/0251-ruby-usb-bit0-only.patch" \
+    "$ROOT/patches/0252-ruby-usb-dir-cs.patch" \
+    "$ROOT/patches/0253-ruby-usb-fifo-flush.patch" \
+    "$ROOT/patches/0254-ruby-usb-fifo-full-force.patch" \
+    "$ROOT/patches/0255-ruby-usb-vendor-zero-force.patch" \
+    "$ROOT/patches/0256-ruby-usb-fix-printf-esc.patch" \
+    "$ROOT/patches/0257-ruby-usb-rx-bits.patch" \
+    "$ROOT/patches/0258-ruby-usb-fifo-base.patch" \
+    "$ROOT/patches/0259-ruby-usb-slew4.patch" \
+    "$ROOT/patches/0260-ruby-usb-rx-diag.patch" \
+    "$ROOT/patches/0261-ruby-usb-rxbuf16k.patch" \
+    "$ROOT/patches/0262-ruby-usb-out-maxp512.patch" \
+    "$ROOT/patches/0263-ruby-usb-gpd-next-flush.patch" \
+    "$ROOT/patches/0264-ruby-usb-acm-maxp.patch" \
+    "$ROOT/patches/0265-ruby-usb-tx-probe.patch" \
+    "$ROOT/patches/0266-ruby-usb-rx-probe.patch" \
+    "$ROOT/patches/0267-ruby-usb-rx-skip.patch" \
+    "$ROOT/patches/0269-ruby-usb-tx-recover-layers.patch" \
+    "$ROOT/patches/0271-ruby-usb-idle-regs.patch" \
+    "$ROOT/patches/0272-ruby-usb-noise-off.patch" \
+    "$ROOT/patches/0273-ruby-usb-tx-restart.patch" \
+    "$ROOT/patches/0274-ruby-usb-txrdy-kick.patch" \
+    "$ROOT/patches/0275-ruby-usb-txrdy-fifo.patch" \
+    "$ROOT/patches/0276-ruby-usb-txrdy-notempty.patch" \
+    "$ROOT/patches/0277-ruby-usb-tx-replay.patch" \
+    "$ROOT/patches/0278-ruby-usb-txrecover-gate.patch" \
+    "$ROOT/patches/0279-ruby-usb-txdone-snap.patch" \
+    "$ROOT/patches/0280-ruby-usb-mac-snap-txkick.patch" \
+    "$ROOT/patches/0281-ruby-usb-mac-snap-move.patch" \
+    "$ROOT/patches/0283-ruby-usb-lpmhrwe.patch" \
+    "$ROOT/patches/0285-ruby-usb-usb2-parity.patch" \
+    "$ROOT/patches/0286-ruby-usb-epctl-slice.patch" \
+    "$ROOT/patches/0287-ruby-usb-lpm-mask.patch" \
+    "$ROOT/patches/0288-ruby-usb-tx-slot.patch" \
+    "$ROOT/patches/0289-ruby-usb-txfifo-trace.patch" \
+    "$ROOT/patches/0290-ruby-usb-clear-halt.patch" \
+    "$ROOT/patches/0291-ruby-usb-cfgrst-default.patch" \
+    "$ROOT/patches/0292-ruby-usb-txpio.patch" \
+    "$ROOT/patches/0293-ruby-usb-audit-switches.patch" \
+    "$ROOT/patches/0295-ruby-usb-pio-qstart.patch" \
+    "$ROOT/patches/0296-ruby-usb-pio-qstart-post.patch" \
+    "$ROOT/patches/0297-ruby-usb-pio-qstart-delay.patch" \
+    "$ROOT/patches/0298-ruby-usb-clr01-qstart-workloop.patch" \
+    "$ROOT/patches/0299-ruby-usb-rxbuf-qstartonly.patch" \
+    "$ROOT/patches/0300-ruby-usb-pure-qmu.patch" \
+    "$ROOT/patches/0301-ruby-usb-enum-zlp.patch" \
+    "$ROOT/patches/0302-ruby-usb-echo-decouple.patch" \
+    "$ROOT/patches/0303-ruby-usb-txep-param.patch" \
+    "$ROOT/patches/0304-ruby-usb-cfg-pre-qstart-bell.patch" \
+    "$ROOT/patches/0305-ruby-usb-txwatch-progress.patch" \
+    "$ROOT/patches/0308b-ruby-usb-acr3-bist.patch" \
+    "$ROOT/patches/0309-ruby-usb-throughput-axes.patch" \
+    "$ROOT/patches/0310-ruby-usb-rx-uc-ring.patch" \
+    "$ROOT/patches/0311-0328-cumulative.patch" \
+    "$ROOT/patches/0329a-ruby-usb-ep-split.patch" \
+    "$ROOT/patches/0329a2-ruby-usb-qmu-split.patch" \
+    "$ROOT/patches/0329a3-ruby-usb-qmu-engine.patch" \
+    "$ROOT/patches/0329a4-ruby-usb-rx-qmu.patch" \
+    "$ROOT/patches/0329a5-ruby-usb-plat.patch" \
+    "$ROOT/patches/0329a6-ruby-usb-port-gadget.patch" \
+    "$ROOT/patches/0330-ruby-usb-config.patch" \
+    "$ROOT/patches/0331-ruby-usb-ep-test.patch" \
+    "$ROOT/patches/0332-ruby-usb-bos-gated.patch" \
+    "$ROOT/patches/0332b-ruby-usb-msos-spec.patch" \
+    "$ROOT/patches/0332i-ruby-usb-msos1.patch" \
+    "$ROOT/patches/0333-ruby-usb-port-events.patch" \
+    "$ROOT/patches/0334-ruby-usb-ep-queues.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

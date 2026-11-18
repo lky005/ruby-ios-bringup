@@ -1,0 +1,118 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 7cc2327..0aade28 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1938,6 +1938,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define RUBY_QMU_QIER1_SET  (RUBY_QMU_TXQ_BITS | QISAR1_RXQ_EMPTY | \
+     RUBY_QMU_RXQ_ERR_BITS | QISAR1_RXQ_ZLPERR)
+ #define EP_RST_RX2_BIT      (1u << 2)
++#define EP_RST_RX1_BIT      (1u << 1)  /* EP1 OUT = our RX endpoint */
+ #define EP_RST_TX1_BIT      (1u << 17)  /* 0211: EP_RST(in, 1) = BIT(16) << 1 */
+ #define RUBY_RX_GPD_NUM 16
+ #define RUBY_RX_BUF     64
+@@ -2136,13 +2137,41 @@ ruby_gpd_clear(uint32_t i)
+  * 0238: back to the vendor resume semantics.  The 0234 "restart from deq"
+  * fallback wrote QMU_Q_START whenever the ACTIVE readback looked 0, which
+  * can restart a live queue under the QMU and lose descriptors.
++ * 0239: a queue that ran dry never revives with RESUME alone (node
++ * restart proved only a full re-program works); re-program the endpoint
++ * and START from the oldest unprocessed GPD when ACTIVE stays 0.
+  */
+ static void
+ ruby_ep2_resume(vm_offset_t mac)
+ {
++    static uint32_t restart_ms;
++    uint64_t pa;
++
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++    if (ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE) {
++        ruby_busy_ticks = 0;
++        return;
++    }
++    if ((uint32_t)(ruby_ms - restart_ms) < 20) {
++        ruby_busy_ticks = 0;
++        return;
++    }
++    restart_ms = ruby_ms;
++    pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++    (void)ruby_rd32(mac, EP_RST_OFF);
++    ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
++    ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
++    ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) |
++        (1u << 0) | (1u << 1));
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
++    ruby_wr32(mac, TQERRIESR0_OFF,
++        ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
++    ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
++    ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
++    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+     ruby_busy_ticks = 0;
+ }
+ 
+@@ -3348,7 +3377,7 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+         ~(RX_SENTSTALL_BIT | RX_RXPKTRDY_BIT);
+     csr = (csr & ~RX_SENDSTALL_BIT) | RX_SENTSTALL_BIT | RX_RXPKTRDY_BIT;
+     ruby_wr32(mac, RX1CSR0_OFF, csr);
+-    ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_RX1_BIT);
+     ruby_wr32(mac, EP_RST_OFF, 0);
+     ruby_seq("EPRST_RX", ruby_rd32(mac, RX1CSR0_OFF),
+         ruby_rd32(mac, RQCSR1_OFF));
+@@ -3441,9 +3470,33 @@ ruby_ep2_rx_cur_slot(vm_offset_t mac)
+ static void
+ ruby_ep2_rx_resume(vm_offset_t mac)
+ {
++    static uint32_t restart_ms;
++    uint64_t pa;
++
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+-    if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
++    if (ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE)
++        return;
++    /* 0239: same rule as TX: re-program the endpoint, then START. */
++    if ((uint32_t)(ruby_ms - restart_ms) < 20)
++        return;
++    restart_ms = ruby_ms;
++    pa = ruby_rx_gpd_pa[ruby_rx_deq % RUBY_RX_GPD_NUM];
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_RX1_BIT);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++    (void)ruby_rd32(mac, EP_RST_OFF);
++    ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
++    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
++    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
++    ruby_wr32(mac, QCR3_OFF,
++        (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
++    ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
++        QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
++    ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
++        QMU_RX_ZLP_ERR_BIT);
++    ruby_wr32(mac, RQSAR1_OFF, (uint32_t)pa);
++    ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
++    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
+ }
+ 
+ static int
+@@ -3938,14 +3991,14 @@ ruby_usb_rearm(vm_offset_t mac, uint32_t reason)
+      */
+     if (was_rx || (ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE)) {
+         if (ruby_ep2_rx_qmu_stop(mac) == 0) {
+-            ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
++            ruby_wr32(mac, EP_RST_OFF, EP_RST_RX1_BIT);
+             ruby_wr32(mac, EP_RST_OFF, 0);
+         } else {
+             printf("RUBY USB: EP2 RX stop timeout in rearm\n");
+         }
+     } else {
+         ruby_wr32(mac, RQCSR1_OFF, QMU_Q_STOP);
+-        ruby_wr32(mac, EP_RST_OFF, EP_RST_RX2_BIT);
++        ruby_wr32(mac, EP_RST_OFF, EP_RST_RX1_BIT);
+         ruby_wr32(mac, EP_RST_OFF, 0);
+     }
+     ruby_rx_ready = 0;

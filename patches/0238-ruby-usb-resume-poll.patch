@@ -1,0 +1,97 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 00b9f92..7cc2327 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2133,26 +2133,16 @@ ruby_gpd_clear(uint32_t i)
+ 
+ /* P9 timeout recovery: nudge the queue, never flush the endpoint FIFO. */
+ /*
+- * 0234: an idle QMU queue can leave ACTIVE=0 after it runs dry; RESUME
+- * alone does not bring it back on this silicon (console round: tq=0 rq=0
+- * while echo bytes were queued).  Restart from the oldest unprocessed GPD.
++ * 0238: back to the vendor resume semantics.  The 0234 "restart from deq"
++ * fallback wrote QMU_Q_START whenever the ACTIVE readback looked 0, which
++ * can restart a live queue under the QMU and lose descriptors.
+  */
+-static void
+-ruby_ep2_tx_start(vm_offset_t mac)
+-{
+-    uint64_t pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
+-
+-    ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
+-    ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
+-    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-}
+-
+ static void
+ ruby_ep2_resume(vm_offset_t mac)
+ {
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_ep2_tx_start(mac);
++        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+     ruby_busy_ticks = 0;
+ }
+ 
+@@ -3125,7 +3115,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+     ruby_dma_mb();              /* descriptor clean complete before doorbell */
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_ep2_tx_start(mac);
++        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+ 
+     if (ruby_rd32(mac, QISAR0_OFF) & RUBY_QMU_TX_DONE) {
+         ruby_ep2_q0_after_kick++;
+@@ -3448,22 +3438,12 @@ ruby_ep2_rx_cur_slot(vm_offset_t mac)
+     return (uint32_t)((cur_pa - ruby_rx_ring_pa) / 16u);
+ }
+ 
+-static void
+-ruby_ep2_rx_start(vm_offset_t mac)
+-{
+-    uint64_t pa = ruby_rx_gpd_pa[ruby_rx_deq % RUBY_RX_GPD_NUM];
+-
+-    ruby_wr32(mac, RQSAR1_OFF, (uint32_t)pa);
+-    ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
+-    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
+-}
+-
+ static void
+ ruby_ep2_rx_resume(vm_offset_t mac)
+ {
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_ep2_rx_start(mac);
++        ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+ }
+ 
+ static int
+@@ -4191,12 +4171,28 @@ ruby_usb_irq_lat_sample(uint32_t us)
+ static void
+ ruby_ep2_tick_assist(vm_offset_t mac)
+ {
++    static uint32_t poll_ms;
++
+     if (ruby_ep_ready && ruby_ep2log_on &&
+         sweet_log_position() != ruby_log_pos) {
+         ruby_qmu_push_req = 1;
+         ruby_qmu_primer_kicks++;
+         ruby_usb_irq_kick();
+     }
++    /*
++     * 0238: event-independent liveness.  RX-done/TX-done coverage on this
++     * silicon is not reliable enough to re-arm the rings on its own, so
++     * ask the workloop for a bounded push+drain pass every 5 ms.
++     */
++    if ((ruby_ep_ready || ruby_rx_ready) &&
++        (uint32_t)(ruby_ms - poll_ms) >= 5) {
++        poll_ms = ruby_ms;
++        if (ruby_ep_ready)
++            ruby_qmu_push_req = 1;
++        if (ruby_rx_ready)
++            ruby_qmu_rx_req = 1;
++        ruby_usb_irq_kick();
++    }
+     if (ruby_ep_ready &&
+         (ruby_rd32(mac, TX1CSR0_OFF) & TX_SENTSTALL)) {
+         ruby_qmu_stall_req = 1;

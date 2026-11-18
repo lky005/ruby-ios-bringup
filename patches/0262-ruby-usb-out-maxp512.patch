@@ -1,0 +1,41 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 39e1215..e01260c 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -495,9 +495,15 @@ ruby_ep_init(void)
+     ruby_eps[0].valid = 1; ruby_eps[0].addr = 0x00;
+     ruby_eps[0].dir = RUBY_EP_DIR_OUT; ruby_eps[0].type = RUBY_EP_TYPE_CTRL;
+     ruby_eps[0].mps = 64;
+-    /* 0216 live wire: EP1 OUT 0x01 MPS 64, EP2 OUT 0x02 MPS 64, EP1 IN 0x81 MPS 512 */
++    /* 0216 live wire: EP1 OUT 0x01 MPS 512, EP2 OUT 0x02 MPS 64, EP1 IN 0x81 MPS 512 */
++    /*
++     * 0262: vendor EP1 OUT is maxp 512.  With maxp 64 a 256-byte write is
++     * four full packets with no short packet/ZLP to terminate the transfer,
++     * so the QMU waits forever and the endpoint NAKs (ADB ZLP doc "stall").
++     * 512 turns 256 B into one short packet and 1000 B into 512 + 488.
++     */
+     ruby_eps[1].valid = 1; ruby_eps[1].addr = 0x01; ruby_eps[1].iface = 0;
+-    ruby_eps[1].dir = RUBY_EP_DIR_OUT; ruby_eps[1].type = RUBY_EP_TYPE_BULK; ruby_eps[1].mps = 64;
++    ruby_eps[1].dir = RUBY_EP_DIR_OUT; ruby_eps[1].type = RUBY_EP_TYPE_BULK; ruby_eps[1].mps = 512;
+     ruby_eps[2].valid = 1; ruby_eps[2].addr = 0x02; ruby_eps[2].iface = 0;
+     ruby_eps[2].dir = RUBY_EP_DIR_OUT; ruby_eps[2].type = RUBY_EP_TYPE_BULK; ruby_eps[2].mps = 64;
+     ruby_eps[3].valid = 1; ruby_eps[3].addr = 0x81; ruby_eps[3].iface = 0;
+@@ -3424,7 +3430,8 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     ruby_cmd_count = 0;
+     ruby_cmd_errors = 0;
+ 
+-    ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
++    /* 0262: RX maxp follows the descriptor (vendor ep1out maxp 512). */
++    ruby_wr32(mac, RX1CSR0_OFF, 512u | RX_DMAREQEN);
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     /* 0258: vendor RX FIFOADDR=0 (TWRP 0x00090000); 0x40 is not a 512 B unit. */
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+@@ -3471,7 +3478,7 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+ 
+     /* EP_RST may reset the per-endpoint configuration; restore it before
+      * re-arming the ring so every clean test starts from the same state. */
+-    ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
++    ruby_wr32(mac, RX1CSR0_OFF, 512u | RX_DMAREQEN);
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */

@@ -1,0 +1,187 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 2815b07..0c438f1 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2005,10 +2005,8 @@ static uint32_t ruby_ep2_tx_kick_ms;
+ static uint32_t ruby_ep2_rx_kicks;
+ static uint32_t ruby_ep2_rx_active_seen;
+ static uint32_t ruby_ep2_rx_kick_ms;
+-/* 0245: forced stop/start bookkeeping. */
++/* 0245: forced stop/start bookkeeping (TX only after 0247). */
+ static uint32_t ruby_ep2_tx_force_ms;
+-static uint32_t ruby_ep2_rx_progress_ms;
+-static uint32_t ruby_ep2_rx_last_pkts;
+ static uint32_t ruby_inflight;
+ static uint32_t ruby_ep2_host_seen;
+ static volatile uint32_t ruby_tx_busy;
+@@ -2181,9 +2179,8 @@ ruby_ep2_resume(vm_offset_t mac)
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
+-    /* 0246 experiment: CS engine off (GPDs may be checksum-skipped). */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) &
+-        ~((1u << 0) | (1u << 1)));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) |
++        (1u << 0) | (1u << 1));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -2362,9 +2359,8 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+      * the 16-byte mode a boot-enabled CS engine validates 32 bytes and
+      * silently skips every GPD.
+      */
+-    /* 0246 experiment: CS engine off (GPDs may be checksum-skipped). */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) &
+-        ~((1u << 0) | (1u << 1)));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) |
++        (1u << 0) | (1u << 1));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -2878,9 +2874,8 @@ ruby_ep2_tx_force(vm_offset_t mac)
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
+     ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
+-    /* 0246 experiment: CS engine off (GPDs may be checksum-skipped). */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) &
+-        ~((1u << 0) | (1u << 1)));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) |
++        (1u << 0) | (1u << 1));
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+@@ -2890,37 +2885,6 @@ ruby_ep2_tx_force(vm_offset_t mac)
+     ruby_ep2_tx_restarts++;
+ }
+ 
+-static void
+-ruby_ep2_rx_force(vm_offset_t mac)
+-{
+-    uint64_t pa = ruby_rx_gpd_pa[ruby_rx_deq % RUBY_RX_GPD_NUM];
+-    uint32_t i;
+-
+-    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_STOP);
+-    for (i = 0; i < 200; i++) {
+-        if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
+-            break;
+-        delay(10);
+-    }
+-    ruby_wr32(mac, EP_RST_OFF, EP_RST_RX1_BIT);
+-    ruby_wr32(mac, EP_RST_OFF, 0);
+-    (void)ruby_rd32(mac, EP_RST_OFF);
+-    ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
+-    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+-    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 17));
+-    ruby_wr32(mac, QCR3_OFF,
+-        (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+-    ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+-        QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
+-    ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
+-        QMU_RX_ZLP_ERR_BIT);
+-    ruby_wr32(mac, RQSAR1_OFF, (uint32_t)pa);
+-    ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
+-    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
+-    ruby_ep2_rx_restarts++;
+-}
+-
+ static void
+ ruby_ep2_tx_watchdog(vm_offset_t mac)
+ {
+@@ -2942,31 +2906,6 @@ ruby_ep2_tx_watchdog(vm_offset_t mac)
+     ruby_ep2_tx_kicks++;
+ }
+ 
+-static void
+-ruby_ep2_rx_watchdog(vm_offset_t mac)
+-{
+-    if (!ruby_rx_ready)
+-        return;
+-    if ((uint32_t)(ruby_ms - ruby_ep2_rx_kick_ms) < 20)
+-        return;
+-    ruby_ep2_rx_kick_ms = ruby_ms;
+-    if (ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE)
+-        ruby_ep2_rx_active_seen++;
+-    if (ruby_rx_packets != ruby_ep2_rx_last_pkts) {
+-        ruby_ep2_rx_last_pkts = ruby_rx_packets;
+-        ruby_ep2_rx_progress_ms = ruby_ms;
+-    }
+-    if ((uint32_t)(ruby_ms - ruby_ep2_rx_progress_ms) >= 200) {
+-        ruby_ep2_rx_force(mac);
+-        ruby_ep2_rx_progress_ms = ruby_ms;
+-    } else {
+-        ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+-        if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
+-            ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+-    }
+-    ruby_ep2_rx_kicks++;
+-}
+-
+ static void
+ ruby_ep2_push_log(vm_offset_t mac)
+ {
+@@ -3483,7 +3422,7 @@ ruby_ep2_rx_config(vm_offset_t mac)
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 17));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -3529,7 +3468,7 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+     ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 17));
++    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 17));
+     ruby_wr32(mac, QCR3_OFF,
+         (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+     ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+@@ -3611,34 +3550,9 @@ ruby_ep2_rx_cur_slot(vm_offset_t mac)
+ static void
+ ruby_ep2_rx_resume(vm_offset_t mac)
+ {
+-    static uint32_t restart_ms;
+-    uint64_t pa;
+-
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+-    if (ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE)
+-        return;
+-    /* 0239: same rule as TX: re-program the endpoint, then START. */
+-    if ((uint32_t)(ruby_ms - restart_ms) < 20)
+-        return;
+-    restart_ms = ruby_ms;
+-    ruby_ep2_rx_restarts++;
+-    pa = ruby_rx_gpd_pa[ruby_rx_deq % RUBY_RX_GPD_NUM];
+-    ruby_wr32(mac, EP_RST_OFF, EP_RST_RX1_BIT);
+-    ruby_wr32(mac, EP_RST_OFF, 0);
+-    (void)ruby_rd32(mac, EP_RST_OFF);
+-    ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
+-    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+-    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
+-    ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) & ~(1u << 17));
+-    ruby_wr32(mac, QCR3_OFF,
+-        (ruby_rd32(mac, QCR3_OFF) & ~QMU_RX_ZLP_BIT) | QMU_RX_COZ_BIT);
+-    ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
+-        QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
+-    ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
+-        QMU_RX_ZLP_ERR_BIT);
+-    ruby_wr32(mac, RQSAR1_OFF, (uint32_t)pa);
+-    ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
+-    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
++    if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
++        ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+ }
+ 
+ static int
+@@ -4051,8 +3965,7 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+      * The drain re-arms what completed; if the queue is still inactive,
+      * resume it so the next host OUT is not NAKed forever.
+      */
+-    if (ruby_rx_ready)
+-        ruby_ep2_rx_watchdog(mac);
++    /* 0247: no idle-time RX reset; the ring stays resident after config. */
+ }
+ 
+ /*

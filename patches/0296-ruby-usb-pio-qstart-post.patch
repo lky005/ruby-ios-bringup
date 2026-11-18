@@ -1,0 +1,71 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 3052205..0c08410 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -3423,27 +3423,15 @@ ruby_txpio_send(vm_offset_t mac, const uint8_t *buf, uint32_t len)
+             /*
+              * 0293 vendor tail (mtu3_qmu.c stop_tx ZLP): re-enable the
+              * QMU DMA and resume the queue after TXPKTRDY.
+-             * 0295: the PIO ring has no GPDs, so the QMU stops after each
+-             * packet.  RESUME is a no-op on a stopped queue (0273); mode 2
+-             * restarts it with Q_START from the programmed base instead.
++             * 0296: mode 2 defers the Q_START to after the TXPKTRDY wait,
++             * where the FIFO is non-empty and the QMU has stopped.
+              */
+             v = ruby_rd32(mac, TX1CSR0_OFF) | TX_DMAREQEN;
+             ruby_wr32(mac, TX1CSR0_OFF, v);
+             ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-            if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)) {
+-                if (ruby_txpiotail_en >= 2) {
+-                    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-                    ruby_txpio_start_cnt++;
+-                    if (ruby_txpio_start_cnt <= 8 ||
+-                        (ruby_txpio_start_cnt & 0x3fu) == 0)
+-                        printf("RUBY USB: 0295 pio qstart n=%u tq=%08x "
+-                            "tx0=%08x\n", ruby_txpio_start_cnt,
+-                            ruby_rd32(mac, TQCSR1_OFF),
+-                            ruby_rd32(mac, TX1CSR0_OFF));
+-                } else {
+-                    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-                }
+-            }
++            if (ruby_txpiotail_en < 2 &&
++                !(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
++                ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+             ruby_txpio_tail_cnt++;
+         }
+         /*
+@@ -3464,6 +3452,33 @@ ruby_txpio_send(vm_offset_t mac, const uint8_t *buf, uint32_t len)
+                     "len=%u\n", ruby_txpio_timeouts,
+                     ruby_rd32(mac, TX1CSR0_OFF), chunk);
+         }
++        if (ruby_txpiotail_en >= 2) {
++            /*
++             * 0296: the 0295 attempt restarted the QMU too early (it may
++             * still be ACTIVE).  Match the proven host sequence: wait for
++             * TXPKTRDY to clear, confirm the FIFO still holds a packet,
++             * wait for the QMU to stop, then Q_START.
++             */
++            uint32_t spins2 = 0;
++            uint32_t tq;
++
++            v = ruby_rd32(mac, TX1CSR0_OFF);
++            if (!(v & TX_FIFOEMPTY)) {
++                tq = ruby_rd32(mac, TQCSR1_OFF);
++                while ((tq & QMU_Q_ACTIVE) && spins2++ < 2000)
++                    tq = ruby_rd32(mac, TQCSR1_OFF);
++                if (!(tq & QMU_Q_ACTIVE)) {
++                    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++                    ruby_txpio_start_cnt++;
++                    if (ruby_txpio_start_cnt <= 8 ||
++                        (ruby_txpio_start_cnt & 0x3fu) == 0)
++                        printf("RUBY USB: 0296 pio qstart n=%u tq=%08x "
++                            "tx0=%08x\n", ruby_txpio_start_cnt,
++                            ruby_rd32(mac, TQCSR1_OFF),
++                            ruby_rd32(mac, TX1CSR0_OFF));
++                }
++            }
++        }
+         ruby_txpio_pkts++;
+         ruby_txpio_bytes += chunk;
+         off += chunk;

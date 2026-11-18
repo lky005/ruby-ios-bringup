@@ -53,6 +53,8 @@ order.
 | `0154-ruby-battery.patch` | current | `bsd/dev/ruby_battery.c`, `ruby_battery.h`, `iokit/Kernel/arm/SweetBattery.cpp`, `bsd/dev/ruby_probe.c` | MT6360 read-only battery/charger backend, I2C5 IOLock, last-valid fallback |
 | `0155-ruby-i2c5-share.patch` | historical | `bsd/dev/ruby_battery.c/h`, `bsd/dev/sweet_goodix_spi.c` | shared I2C5 arbiter; Goodix LDO section holds the lock; touch re-enabled |
 | `0156-0179` (current line, 24 files) | current | `bsd/dev/`, `iokit/Kernel/arm/` | 0156/0156b foundation/battery; 0157/0158 HAL/I2C; 0159-0167 EINT/IRQ/demux/diagnostics; 0168 SPI3 touch; 0169 KPD IRQ; 0171-0174 USB hotplug; 0175 RubyGIC/KPD; 0176 EINT B1; 0177 native EINT parent; 0178 child oneshot; 0179 retry/soft reset |
+| `0329a-0333` (split line) | current | `bsd/dev/ruby_usb*.c/h`, `bsd/conf/files` | 0329a + 0329a2-a6 split the driver into ep/qmu/plat/port/gadget; 0330 config/FIFO boundary; 0331 EP0 0x2E test channel; 0332 BOS/MS OS 2.0 behind `rubywinusb=0..3`; 0332b MS OS 2.0 layout fix; 0332i MS OS 1.0 WCID/WinUSB on bcdUSB 2.00 behind `rubywinusb=4` (default 0); 0333 IRQ port events/state machine/suspend-resume behind `rubyusb_hotplug`/`rubyusb_susp` (default 0) |
+| `0334-ruby-usb-ep-queues.patch` | current | `bsd/dev/ruby_usb*.c/h` | 0334 per-endpoint GPD rings (TX 1 KB / RX 256 B per slot, shared payload), vendor-formula per-EP CSR/QMU/HIAR offsets, T2 batch `t331 epmap/eptx/eprx/epall`, and actual FIFO segment allocation (`ruby_epfifo_map`, 3 units per EP at slot 2, oversell refused); inert unless `rubyep_test=1` commands run |
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the

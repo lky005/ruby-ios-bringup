@@ -1,0 +1,91 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -577,6 +577,71 @@
+     ruby_wr32(phy, PHY_U3_CHIP + 0x10, v);
+ }
+ 
++/*
++ * 0203: vendor u2_phy_instance_power_off cold-soak, phy-mtk-tphy.c
++ * :1362-1451.  MT6877 takes the CONFIG_MACH_MT6781=unset branch, so the
++ * full SUSPENDM/REV6/800us analog reset is compiled; avoid_rx_sen_
++ * degradation is false for generic-tphy-v2, so the :1433 block is skipped.
++ * This is the vendor cold-enable cycle never exercised here before (0189C
++ * only did microsecond pokes).  It runs before the board eye props so the
++ * golden REV6=2/ACR5 written afterwards wins over the transient REV6=1.
++ * REV6 is masked-then-set (not the vendor's bare |=) because the pre-soak
++ * REV6 is not guaranteed 0 on this board.
++ */
++static void
++ruby_usb_u2_phy_off(vm_offset_t phy)
++{
++    uint32_t v;
++
++    v = ruby_rd32(phy, PHY_U2_DTM0);              /* clear FORCE_UART_EN */
++    v &= ~DTM0_FORCE_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    v = ruby_rd32(phy, PHY_U2_DTM1);              /* clear RG_UART_EN */
++    v &= ~DTM1_RG_UART_EN;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR4);              /* clear GPIO mask */
++    v &= ~(ACR4_GPIO_CTL | ACR4_GPIO_MODE);
++    ruby_wr32(phy, PHY_U2_ACR4, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);              /* clear BC11 */
++    v &= ~ACR6_BC11_SW_EN;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);              /* OTG disable */
++    v &= ~ACR6_OTG_VBUSCMP_EN;
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++
++    v = ruby_rd32(phy, PHY_U2_DTM1);              /* VBUS/AVALID off */
++    v &= ~(DTM1_RG_VBUSVALID | DTM1_RG_AVALID);
++    v |= DTM1_RG_SESSEND;
++    ruby_wr32(phy, PHY_U2_DTM1, v);
++
++    v = ruby_rd32(phy, PHY_U2_DTM0);              /* force suspend */
++    v |= DTM0_RG_SUSPENDM | DTM0_FORCE_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    delay(2000);                                  /* vendor mdelay(2) */
++
++    v = ruby_rd32(phy, PHY_U2_DTM0);              /* XCVRSEL=1 + part */
++    v &= ~DTM0_FORCE_DATAIN;
++    v |= (1u << 4) | DTM0_PART_MASK;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    v = ruby_rd32(phy, PHY_U2_ACR6);              /* REV6=1 (transient) */
++    v = (v & ~ACR6_REV6_SEL) | (1u << 30);
++    ruby_wr32(phy, PHY_U2_ACR6, v);
++
++    delay(800);                                   /* vendor udelay(800) */
++
++    v = ruby_rd32(phy, PHY_U2_DTM0);              /* release suspend */
++    v &= ~DTM0_RG_SUSPENDM;
++    ruby_wr32(phy, PHY_U2_DTM0, v);
++
++    delay(1);                                     /* vendor udelay(1) */
++}
++
+ static void
+ ruby_usb_u2_phy_on(vm_offset_t phy)
+ {
+@@ -610,6 +675,15 @@
+     ruby_wr32(phy, PHY_U2_ACR6, v);
+ 
+     /*
++     * 0203: vendor cold-enable cycle.  Run the power_off cold-soak here,
++     * after instance_init and before the board eye props below, so the
++     * golden eye (REV6=2/ACR5) is the last write and overrides the soak's
++     * transient REV6=1.  Boot-enable only (reattach unchanged, single
++     * variable).
++     */
++    ruby_usb_u2_phy_off(phy);
++
++    /*
+      * 0185/0187: board eye tuning from ruby-mt6877.dtsi &u2port0
+      * (model "RUBY"): VRT=6, TERM=3, REV6=2, DISCTH=13, SQTH=2.
+      * Vendor order is instance_init -> efuse -> props_set -> power_on,

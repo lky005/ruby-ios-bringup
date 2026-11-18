@@ -1,0 +1,18 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 1c2a518..62fef2b 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2556,9 +2556,11 @@ ruby_ep2_config(vm_offset_t mac)
+      * 0236: this used to write TX-done alone, which replaced the probe
+      * mask and left only RXQ_EMPTY for RX: the console round showed
+      * rxpk=19 with rxdone=3, so GPDs were re-armed far too late and the
+-     * RX queue stopped.  Keep TX and both RX done enables set.
++     * RX queue stopped.
++     * 0237: QIESR0 readback is not reliable; OR-ing it produced an IRQ
++     * storm (pass rate jumped ~5x).  Write the fixed enable mask instead.
+      */
+-    ruby_wr32(mac, QIESR0_OFF, ruby_rd32(mac, QIESR0_OFF) |
++    ruby_wr32(mac, QIESR0_OFF,
+         RUBY_QMU_TX_DONE | QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1);
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,

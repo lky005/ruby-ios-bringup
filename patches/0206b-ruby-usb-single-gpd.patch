@@ -1,0 +1,201 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1664,9 +1664,17 @@
+ #define RUBY_PAD_TEXT   (RUBY_LOG_CHUNK - RUBY_HDR_LEN_V2)
+ #define RUBY_PAD_MAGIC  0x25u    /* 6-bit format tag, hdr[4] bits 15:10 */
+ 
++#define RUBY_BULK_FRAMES 32u
++#define RUBY_BULK_BYTES  (RUBY_LOG_CHUNK * RUBY_BULK_FRAMES)
+ static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+-static uint8_t ruby_log_buf[RUBY_GPD_NUM][RUBY_LOG_CHUNK]
+-    __attribute__((aligned(4096)));
++/*
++ * 0206B: single-GPD isolation.  One 16 KB cached payload per GPD;
++ * the QMU slices it into MPS packets.  MAC/PHY/QCR0 stay at 0204b
++ * (noise bit set, WTCHRP untouched, checksum enables intact).
++ */
++static uint8_t *ruby_bulk_buf[RUBY_GPD_NUM];
++static uint64_t ruby_bulk_pa[RUBY_GPD_NUM];
++static void *ruby_bulk_base;
+ static uint32_t ruby_gpd_enq;
+ static uint32_t ruby_gpd_deq;
+ static uint32_t ruby_inflight;
+@@ -1676,7 +1684,6 @@
+ static uint64_t ruby_log_pos;
+ static uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
+ static uint64_t ruby_ring_pa;
+-static uint64_t ruby_log_pa[RUBY_GPD_NUM];
+ /*
+  * 0204: CPU access to the TX GPD ring.  With rubydmauc=1 the ring
+  * is also mapped uncached; every CPU access then goes through that
+@@ -2123,18 +2130,40 @@
+             }
+         }
+     }
+-    for (i = 0; i < RUBY_GPD_NUM; i++) {
+-        ruby_log_pa[i] = ruby_dma_pa(ruby_log_buf[i]);
+-        if (!ruby_log_pa[i] || (ruby_log_pa[i] & 0x3fu) ||
+-            ((ruby_log_pa[i] & (PAGE_SIZE - 1u)) +
+-                RUBY_LOG_CHUNK > PAGE_SIZE)) {
++    /*
++     * 0206B: 64 x 16 KB cached payload buffers, one per ring slot.
++     * Payload stays cached; ruby_dc_civac cleans it before every push.
++     */
++    if (!ruby_bulk_base) {
++        vm_offset_t va = 0;
++
++        if (kmem_alloc(kernel_map, &va,
++            RUBY_GPD_NUM * RUBY_BULK_BYTES,
++            KMA_DATA | KMA_ZERO | KMA_PERMANENT,
++            VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++            printf("RUBY USB: EP2 bulk alloc failed\n");
+             ok = 0;
+-            bad_i = i;
++        } else {
++            ruby_bulk_base = (void *)va;
+         }
+     }
++    if (ruby_bulk_base) {
++        for (i = 0; i < RUBY_GPD_NUM; i++) {
++            ruby_bulk_buf[i] = (uint8_t *)ruby_bulk_base +
++                i * RUBY_BULK_BYTES;
++            ruby_bulk_pa[i] = ruby_dma_pa(ruby_bulk_buf[i]);
++            if (!ruby_bulk_pa[i] ||
++                (ruby_bulk_pa[i] & 0x3fu) ||
++                ((ruby_bulk_pa[i] & (PAGE_SIZE - 1u)) +
++                    RUBY_BULK_BYTES > PAGE_SIZE)) {
++                ok = 0;
++                bad_i = i;
++            }
++        }
++    }
+     if (!ok) {
+-        printf("RUBY USB: EP2 map bad i=%u ring=0x%llx log=0x%llx "
+-            "gpd=0x%llx\n", bad_i, ruby_ring_pa, ruby_log_pa[bad_i],
++        printf("RUBY USB: EP2 map bad i=%u ring=0x%llx bulk=0x%llx "
++            "gpd=0x%llx\n", bad_i, ruby_ring_pa, ruby_bulk_pa[bad_i],
+             ruby_gpd_pa[bad_i]);
+         ruby_ring_pa = 0;
+         return;
+@@ -2203,10 +2232,11 @@
+     ruby_ep_ready = 1;
+     ruby_seq("TXCFG_OUT", (uint32_t)ruby_ring_pa, ruby_ep_ready);
+     printf("RUBY USB: EP2 QMU ring pa=0x%llx gpd[0]=0x%llx gpd[%u]=0x%llx "
+-        "log[0]=0x%llx log[%u]=0x%llx\n",
++        "bulk[0]=0x%llx bulk[%u]=0x%llx frames=%u bytes=%u\n",
+         ruby_ring_pa, ruby_gpd_pa[0], (uint32_t)(RUBY_GPD_NUM - 1u),
+-        ruby_gpd_pa[RUBY_GPD_NUM - 1], ruby_log_pa[0],
+-        (uint32_t)(RUBY_GPD_NUM - 1u), ruby_log_pa[RUBY_GPD_NUM - 1]);
++        ruby_gpd_pa[RUBY_GPD_NUM - 1], ruby_bulk_pa[0],
++        (uint32_t)(RUBY_GPD_NUM - 1u), ruby_bulk_pa[RUBY_GPD_NUM - 1],
++        RUBY_BULK_FRAMES, RUBY_BULK_BYTES);
+     /* Fill the queue before the first host IN token; leave one slot free. */
+     ruby_ep2_push_log(mac);
+ }
+@@ -2338,11 +2368,10 @@
+ static void
+ ruby_ep2_push_log(vm_offset_t mac)
+ {
+-    uint32_t q0, q1, txq1, err, enq, i, csr0;
++    uint32_t q0, q1, txq1, err, enq, i, csr0, fi, frames, tqcsr;
+     uint64_t hwo = 0;
+     uint64_t pos, np, log_pa;
+     uint8_t *g, *buf;
+-    uint32_t *hdr;
+     uint32_t n, queued = 0, freed = 0;
+ 
+     if (!ruby_ep_ready || !ruby_ep2log_on)
+@@ -2504,16 +2533,39 @@
+         if (hwo & (1ull << enq))
+             break;              /* safety net: never rewrite an owned slot */
+ 
+-        buf = ruby_log_buf[enq];
+-        log_pa = ruby_log_pa[enq];
++        buf = ruby_bulk_buf[enq];
++        log_pa = ruby_bulk_pa[enq];
+         pos = ruby_log_pos;
+-        if (ruby_pad_mode)
+-            n = sweet_log_copy(&pos, (char *)buf + RUBY_HDR_LEN_V2,
+-                RUBY_PAD_TEXT);
+-        else
+-            n = sweet_log_copy(&pos, (char *)buf + RUBY_HDR_LEN,
+-                RUBY_LOG_TEXT);
+-        if (!n) {
++        frames = 0;
++        csr0 = ruby_rd32(mac, TX2CSR0_OFF);
++        if (csr0 & (1u << 22))  /* TX_SENTSTALL is W1C */
++            ruby_wr32(mac, TX2CSR0_OFF,
++                (csr0 & ~(1u << 22)) | (1u << 22));
++        tqcsr = ruby_rd32(mac, TQCSR2_OFF);
++        for (fi = 0; fi < RUBY_BULK_FRAMES; fi++) {
++            uint8_t *fbuf = buf + fi * RUBY_LOG_CHUNK;
++            uint32_t *fhdr = (uint32_t *)fbuf;
++
++            n = sweet_log_copy(&pos,
++                (char *)fbuf + RUBY_HDR_LEN_V2, RUBY_PAD_TEXT);
++            if (!n)
++                break;
++            fhdr[0] = (ruby_push_seq & 0xffffu) |
++                ((enq & 0x3fu) << 16) |
++                ((ruby_popcount64(hwo) & 0x3fu) << 22) |
++                ((ruby_stall_seen & 0xfu) << 28);
++            fhdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
++                ((tqcsr & 0xffffu) << 16);
++            fhdr[2] = err;
++            fhdr[3] = csr0;
++            fhdr[4] = (uint32_t)n | (RUBY_PAD_MAGIC << 10);
++            fhdr[5] = 0;
++            memset(fbuf + RUBY_HDR_LEN_V2 + n, 0,
++                (size_t)(RUBY_PAD_TEXT - n));
++            ruby_push_seq++;
++            frames++;
++        }
++        if (!frames) {
+             ruby_ep2_no_log++;
+             if (ruby_ep2_no_log <= 3 ||
+                 (ruby_ep2_no_log & 0x3f) == 0)
+@@ -2527,41 +2579,16 @@
+         }
+ 
+         np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
+-        hdr = (uint32_t *)buf;
+-        hdr[0] = (ruby_push_seq & 0xffffu) | ((enq & 0x3fu) << 16) |
+-            ((ruby_popcount64(hwo) & 0x3fu) << 22) |
+-            ((ruby_stall_seen & 0xfu) << 28);
+-        hdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
+-            ((ruby_rd32(mac, TQCSR2_OFF) & 0xffffu) << 16);
+-        hdr[2] = err;
+-        csr0 = ruby_rd32(mac, TX2CSR0_OFF);
+-        if (csr0 & (1u << 22))  /* TX_SENTSTALL is W1C */
+-            ruby_wr32(mac, TX2CSR0_OFF, (csr0 & ~(1u << 22)) | (1u << 22));
+-        hdr[3] = csr0;
+-        if (ruby_pad_mode) {
+-            /*
+-             * 0198 header v2: text length + 6-bit format tag, so the
+-             * host can split padded 512 B frames.  hdr[0..3] are
+-             * byte-identical to the legacy header.
+-             */
+-            hdr[4] = (uint32_t)n | (RUBY_PAD_MAGIC << 10);
+-            hdr[5] = 0;
+-            memset(buf + RUBY_HDR_LEN_V2 + n, 0,
+-                (size_t)(RUBY_PAD_TEXT - n));
+-        }
+-        ruby_push_seq++;
+-
+         ruby_gpd_clear(enq);
+         g[0] = 1u << 7;
+         g[2] = (uint8_t)(((log_pa >> 32) & 0xfu) |
+             (((np >> 32) & 0xfu) << 4));
+         *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+         *(volatile uint32_t *)(g + 8) = (uint32_t)log_pa;
+-        *(volatile uint16_t *)(g + 12) = (uint16_t)(ruby_pad_mode ?
+-            RUBY_LOG_CHUNK : (RUBY_HDR_LEN + n));
++        *(volatile uint32_t *)(g + 12) = frames * RUBY_LOG_CHUNK;
+         g[1] = ruby_gpd_chksum(g);
+-        /* Make the payload and all descriptor fields visible before HWO. */
+-        ruby_dc_civac(buf, RUBY_LOG_CHUNK);
++        /* Payload is cached: one clean covers all 32 frames. */
++        ruby_dc_civac(buf, RUBY_BULK_BYTES);
+         if (!ruby_dma_uc) {
+             ruby_dc_civac(g, RUBY_GPD_DESC);
+             ruby_dma_wmb();         /* fields before HWO */

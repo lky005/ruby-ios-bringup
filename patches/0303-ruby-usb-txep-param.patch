@@ -1,0 +1,173 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -583,6 +583,18 @@ static int ruby_enum_profile = 1;   /* 0 vendor, 1 ACM, 2 ACM-composite */
+ static int ruby_zlp_en;             /* 0 = no ACM echo ZLP (0301 default) */
+ /* 0302: echo behaviour is independent of the declared descriptor class. */
+ static int ruby_echo_en;
++/* 0303: TX endpoint/FIFO A/B axes (defaults keep the EP1 behaviour). */
++static int ruby_tx_ep_sel = 1;
++static uint8_t ruby_tx_ep_addr = 0x81;
++static uint32_t ruby_txfbase;
++static uint32_t ruby_tx_csr0_off = 0x0110;
++static uint32_t ruby_tx_csr1_off = 0x0114;
++static uint32_t ruby_tx_csr2_off = 0x0118;
++static uint32_t ruby_tq_csr_off = 0x0510;
++static uint32_t ruby_tq_sar_off = 0x0514;
++static uint32_t ruby_tq_cpr_off = 0x0518;
++static uint32_t ruby_tq_hiar_off = 0x0484;
++static uint32_t ruby_tx_done_bit = 1u << 1;
+ static int ruby_cfgrst_mode = 0;    /* 0291: default no config EP_RST */
+ /* 0300: TX ownership is pure QMU DMA.  Only the recovery/injection
+  * switches survive from the 0293 audit set. */
+@@ -1551,7 +1563,8 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+         if (index == 0x01)
+             ruby_clr01_reqs++;
+         if (wlen == 0 && value == 0) {
+-            if (index == 0x81 || index == 0x82) {
++            if (index == 0x81 || index == 0x82 ||
++                index == ruby_tx_ep_addr) {
+                 ruby_tx_halt_clear(mac);
+                 act = 1;
+             } else if (index == 0x02)
+@@ -1957,9 +1970,9 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ }
+ 
+ /* ---- EP2 bulk IN QMU log pipe (0094b) ---- */
+-#define TX1CSR0_OFF     0x0110
+-#define TX1CSR1_OFF     0x0114
+-#define TX1CSR2_OFF     0x0118
++#define TX1CSR0_OFF     ruby_tx_csr0_off
++#define TX1CSR1_OFF     ruby_tx_csr1_off
++#define TX1CSR2_OFF     ruby_tx_csr2_off
+ #define RX1CSR0_OFF     0x0210
+ #define RX1CSR1_OFF     0x0214
+ #define RX1CSR2_OFF     0x0218
+@@ -1967,10 +1980,10 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define QCR1_OFF        0x0404
+ #define QCR2_OFF        0x0408
+ #define QCR3_OFF        0x040c
+-#define TQCSR1_OFF      0x0510
+-#define TQSAR1_OFF      0x0514
+-#define TQCPR1_OFF      0x0518
+-#define TQHIAR1_OFF     0x0484
++#define TQCSR1_OFF      ruby_tq_csr_off
++#define TQSAR1_OFF      ruby_tq_sar_off
++#define TQCPR1_OFF      ruby_tq_cpr_off
++#define TQHIAR1_OFF     ruby_tq_hiar_off
+ #define RQCSR1_OFF      0x0610
+ #define RQSAR1_OFF      0x0614
+ #define RQCPR1_OFF      0x0618
+@@ -2038,7 +2051,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define QIESR0_OFF          0x0708
+ #define QIESR1_OFF          0x0718
+ #define QIER1_OFF           0x0714
+-#define RUBY_QMU_TX_DONE    (1u << 1)   /* 0211: EP1 TX done */
++#define RUBY_QMU_TX_DONE    ruby_tx_done_bit
+ #define RUBY_QMU_TXQ_BITS   (QISAR1_TXQ_EMPTY | QISAR1_TXQ_CSERR | \
+     QISAR1_TXQ_LENERR)
+ #define RUBY_QMU_RXQ_EMPTY_BITS (QISAR1_RXQ_EMPTY | QISAR1_RXQ_ZLPERR)
+@@ -2597,7 +2610,7 @@ ruby_ep2_qmu_prepare(vm_offset_t mac)
+      */
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
+-    ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
++    ruby_wr32(mac, TX1CSR2_OFF, (9u << 16) | ruby_txfbase);
+ 
+     /*
+      * 0235: the vendor core init enables QMU_CS16B_EN (QCR0 bit0) and
+@@ -2658,7 +2671,7 @@ ruby_ep2_tx_rebuild(vm_offset_t mac)
+      * first prepared GPD (ruby_ep2_qmu_prepare leaves the queue unstarted).
+      */
+     ruby_ep2_ring_reset(mac);
+-    txep = ruby_ep_for_addr(0x81);
++    txep = ruby_ep_for_addr(ruby_tx_ep_addr);
+     if (txep) {
+         lck_spin_lock(&txep->q_lock);
+         txep->q_head = NULL;
+@@ -2995,7 +3008,7 @@ ruby_ep2_config(vm_offset_t mac)
+      * 0x00090000).  P9's 0x200 is a legal mainline slot but not the
+      * address this SoC's allocator hands to the first bulk endpoint.
+      */
+-    ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
++    ruby_wr32(mac, TX1CSR2_OFF, (9u << 16) | ruby_txfbase);
+     ruby_seq("TXCFG_CR", ruby_rd32(mac, TX1CSR0_OFF),
+         ruby_rd32(mac, TX1CSR2_OFF));
+ 
+@@ -3140,7 +3153,7 @@ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+     }
+ 
+     if (freed) {
+-        struct ruby_ep *txep = ruby_ep_for_addr(0x81);
++        struct ruby_ep *txep = ruby_ep_for_addr(ruby_tx_ep_addr);
+         if (txep) {
+             /* 0222: dequeue the burst under one lock hold, run the
+              * completes AFTER the lock drops (they are currently
+@@ -3695,7 +3708,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+          * under ep lock, completed by ruby_ep2_drain -> ruby_ep_complete. */
+         ruby_txfifo_log(mac, "enq", enq);
+         {
+-            struct ruby_ep *txep = ruby_ep_for_addr(0x81);
++            struct ruby_ep *txep = ruby_ep_for_addr(ruby_tx_ep_addr);
+             struct ruby_req *rq = &ruby_xfer_reqs[enq];
+             rq->buf = buf; rq->len = actual_len; rq->done = NULL; rq->ctx = NULL;
+             if (txep)
+@@ -6051,6 +6064,36 @@ ruby_usb_probe(void)
+                 (ruby_acm_cmd != 0);
+         }
+     }
++    {
++        int txep = 1;
++        int txfbase = 0;
++
++        PE_parse_boot_argn("ruby_txep", &txep, sizeof(txep));
++        if (txep != 3)
++            txep = 1;
++        PE_parse_boot_argn("ruby_txfbase", &txfbase, sizeof(txfbase));
++        if (txfbase < 0)
++            txfbase = 0;
++        txfbase &= 0xffff;
++        if (ruby_enum_profile != 0) {
++            /* ACM keeps the notification EP3 and the EP1 data IN. */
++            txep = 1;
++            txfbase = 0;
++        }
++        ruby_tx_ep_sel = txep;
++        ruby_txfbase = (uint32_t)txfbase;
++        if (txep == 3) {
++            ruby_tx_ep_addr = 0x83;
++            ruby_tx_csr0_off = 0x0130;
++            ruby_tx_csr1_off = 0x0134;
++            ruby_tx_csr2_off = 0x0138;
++            ruby_tq_csr_off = 0x0530;
++            ruby_tq_sar_off = 0x0534;
++            ruby_tq_cpr_off = 0x0538;
++            ruby_tq_hiar_off = 0x048c;
++            ruby_tx_done_bit = 1u << 3;
++        }
++    }
+     for (uint32_t di = 0; di < sizeof(ruby_dev_desc); di++)
+         ruby_dev_desc[di] = ruby_dev_desc_base[di];
+     for (uint32_t si = 0; si < sizeof(ruby_str_ser); si++)
+@@ -6146,6 +6189,8 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0301 enum=%d zlp=%d\n",
+         ruby_enum_profile, ruby_zlp_en);
+     printf("RUBY USB: 0302 echo=%d\n", ruby_echo_en);
++    printf("RUBY USB: 0303 txep=0x%02x txfbase=0x%x\n",
++        ruby_tx_ep_addr, ruby_txfbase);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+@@ -6178,6 +6223,12 @@ ruby_usb_probe(void)
+     ruby_gpio_base = gpio;
+     ruby_ifrao_base = ifrao;
+     ruby_ep_init();  /* 0218: EP table + lock group + composite buf */
++    if (ruby_tx_ep_sel == 3) {
++        ruby_eps[3].addr = 0x83;
++        ruby_eps[3].mps = 512;
++        ruby_eps[3].type = RUBY_EP_TYPE_BULK;
++        ruby_eps[3].dir = RUBY_EP_DIR_IN;
++    }
+     /* 0199: clock-audit maps; a failed map just keeps the region closed. */
+     ruby_topckgen_base = ml_io_map(TOPCKGEN_PA, TOPCKGEN_SIZE);
+     ruby_apmixed_base = ml_io_map(APMIXED_PA, APMIXED_SIZE);

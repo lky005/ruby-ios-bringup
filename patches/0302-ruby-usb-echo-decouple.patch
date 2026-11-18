@@ -1,0 +1,126 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -581,6 +581,8 @@ static int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
+ /* 0301: zero-build enumeration/ZLP axes (cmdline selected). */
+ static int ruby_enum_profile = 1;   /* 0 vendor, 1 ACM, 2 ACM-composite */
+ static int ruby_zlp_en;             /* 0 = no ACM echo ZLP (0301 default) */
++/* 0302: echo behaviour is independent of the declared descriptor class. */
++static int ruby_echo_en;
+ static int ruby_cfgrst_mode = 0;    /* 0291: default no config EP_RST */
+ /* 0300: TX ownership is pure QMU DMA.  Only the recovery/injection
+  * switches survive from the 0293 audit set. */
+@@ -627,7 +629,7 @@ ruby_build_cfg_desc(uint8_t *out)
+             continue;
+         n_eps_total++;
+     }
+-    if (ruby_acm_cmd) {
++    if (ruby_enum_profile == 1 || ruby_enum_profile == 2) {
+         /* 0225 CDC-ACM full 75B: Config(9)+IAD(8)+Iface0(9)+CDC(19)+EP83(7)+Iface1(9)+EP01(7)+EP81(7) */
+         out[off++] = 9; out[off++] = 2; out[off++] = 0; out[off++] = 0;
+         out[off++] = 2; out[off++] = 1; out[off++] = 0; out[off++] = 0x80; out[off++] = 50;
+@@ -1495,7 +1497,7 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+         ruby_trace(t, RUBY_TR_CFG, ruby_config, 0, 0, 0);
+         /* 0290: mode 2 pulses EP_RST before the status ACK, i.e. before the
+          * host is told to reset its own IN toggle. */
+-        if (ruby_cfgrst_mode == 2 && (ruby_ep2log_on || ruby_acm_cmd) &&
++        if (ruby_cfgrst_mode == 2 && (ruby_ep2log_on || ruby_echo_en) &&
+             !ruby_ep_ready) {
+             ruby_ep2_eprst_tx(mac);
+             ruby_seq("EPRST_PRE", ruby_cfgrst_mode, ruby_cfg_seen);
+@@ -1509,7 +1511,7 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+          * host sees the same device identity.
+          * 0231: ACM mode still needs the TX QMU, but for raw echo.
+          */
+-        if (ruby_ep2log_on || ruby_acm_cmd)
++        if (ruby_ep2log_on || ruby_echo_en)
+             ruby_ep2_config(mac);
+         ruby_ep2_rx_config(mac);
+         /* 0225: EP3 (0x83) Interrupt IN NAK-enable. TX3 bank, MPS16, FIFO
+@@ -2719,7 +2721,7 @@ ruby_tx_reset_fire(vm_offset_t mac)
+         ruby_gpd_deq, ruby_gpd_enq, ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, TQCSR1_OFF),
+         ruby_txreset_en, ruby_txeprst_en);
+-    if (ruby_txreplay_en && ruby_acm_cmd)
++    if (ruby_txreplay_en && ruby_echo_en)
+         ruby_tx_replay_snapshot(mac);
+     ruby_ep2_tx_rebuild(mac);
+ }
+@@ -3329,7 +3331,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+     uint32_t actual_len = 0, acm_zlp = 0, zlp = 0;
+     /* 0217: obs-only backpressure counters (see ruby_0x21 diag) */
+ 
+-    if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_acm_cmd))
++    if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_echo_en))
+         return;
+     ruby_push_tries++;
+ 
+@@ -3561,7 +3563,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+                 (csr0 & ~(1u << 22)) | (1u << 22));
+         tqcsr = ruby_rd32(mac, TQCSR1_OFF);
+         acm_zlp = 0;
+-        if (ruby_acm_cmd) {
++        if (ruby_echo_en) {
+             /* 0231: raw echo bytes, no log frame header or padding. */
+             if (ruby_tx_replay_len > 0) {
+                 /* 0277: re-send payloads preserved across a TX rebuild. */
+@@ -3663,7 +3665,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+          * total is an exact 512 multiple (acm_zlp, computed at dequeue).
+          * The non-ACM log path keeps the per-frame 512 rule.
+          */
+-        if (ruby_acm_cmd)
++        if (ruby_echo_en)
+             zlp = acm_zlp;
+         else
+             zlp = ((actual_len % RUBY_LOG_CHUNK) == 0) ? 1u : 0u;
+@@ -3673,7 +3675,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+          * off); RX keeps a computed checksum. */
+         g[1] = 0;
+         /* Payload is cached; clean exactly the bytes this GPD exposes. */
+-        ruby_dc_civac(buf, ruby_acm_cmd ?
++        ruby_dc_civac(buf, ruby_echo_en ?
+             ((actual_len + 63u) & ~63u) : RUBY_BULK_BYTES);
+         if (!ruby_dma_uc) {
+             ruby_dc_civac(g, RUBY_GPD_DESC);
+@@ -4436,8 +4438,8 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+             ruby_rx_zlp++;
+         ruby_rx_last_len = len;
+         ruby_rx_crc = ruby_fnv1a(ruby_rx_crc, ruby_rx_buf[i], len);
+-        if (ruby_acm_cmd) {
+-            /* 0231: ACM data plane echoes; host chars are not commands. */
++        if (ruby_echo_en) {
++            /* 0231: echo data plane; host chars are not commands. */
+             ruby_acm_echo_enqueue(ruby_rx_buf[i], len);
+             if (ruby_acm_echo_dbg_rx < 8) {
+                 ruby_acm_echo_dbg_rx++;
+@@ -4470,7 +4472,7 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+     }
+     /* 0231: hand the echo bytes to the TX ring right away; the QMU workloop
+      * owns both ends, so this is the same-thread producer -> consumer step. */
+-    if (ruby_acm_cmd && ruby_acm_echo_head != ruby_acm_echo_tail)
++    if (ruby_echo_en && ruby_acm_echo_head != ruby_acm_echo_tail)
+         ruby_ep2_push_log(mac);
+ }
+ 
+@@ -6041,6 +6043,13 @@ ruby_usb_probe(void)
+         }
+         PE_parse_boot_argn("ruby_zlp", &zlp, sizeof(zlp));
+         ruby_zlp_en = (zlp == 1);
++        {
++            int echoarg = -1;
++
++            PE_parse_boot_argn("ruby_echo", &echoarg, sizeof(echoarg));
++            ruby_echo_en = (echoarg >= 0) ? (echoarg == 1) :
++                (ruby_acm_cmd != 0);
++        }
+     }
+     for (uint32_t di = 0; di < sizeof(ruby_dev_desc); di++)
+         ruby_dev_desc[di] = ruby_dev_desc_base[di];
+@@ -6136,6 +6145,7 @@ ruby_usb_probe(void)
+     /* 0301 content gate. */
+     printf("RUBY USB: 0301 enum=%d zlp=%d\n",
+         ruby_enum_profile, ruby_zlp_en);
++    printf("RUBY USB: 0302 echo=%d\n", ruby_echo_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

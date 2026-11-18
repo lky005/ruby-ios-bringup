@@ -1,0 +1,83 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index ea639e1..4b146ce 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2069,6 +2069,9 @@ static int ruby_txdeq_en;
+ static int ruby_noise_en;   /* 0272: 0185 noise quirk, default off */
+ static int ruby_txkick_en;  /* 0273: Q_START when the TX queue is stopped */
+ static uint32_t ruby_txkick_starts;
++static int ruby_txrdy_en = 1;   /* 0274: TXPKTRDY kick on a full FIFO */
++static uint32_t ruby_txrdy_kicks;
++static uint32_t ruby_txrdy_ms;
+ static uint32_t ruby_tx_reset_cnt;
+ static uint32_t ruby_tx_reset_ms;
+ static uint32_t ruby_tx_reset_tries;
+@@ -2606,6 +2609,24 @@ ruby_tx_reset_fire(vm_offset_t mac)
+ static void
+ ruby_tx_recover_poll(vm_offset_t mac)
+ {
++    uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
++
++    /* 0274: vendor ZLP-recovery style.  A FIFO holding data with
++     * TXPKTRDY clear never reaches the bus (console: tcsr=22000200,
++     * FIFOFULL, TXPKTRDY=0); stop the QMU DMA, assert TXPKTRDY, resume
++     * the DMA.  Bounded to one kick per 200 ms. */
++    if (ruby_txrdy_en && ruby_inflight != 0 &&
++        (tx0 & (1u << 25)) && !(tx0 & (1u << 16)) &&
++        (uint32_t)(ruby_ms - ruby_tx_progress_ms) >= 200 &&
++        (uint32_t)(ruby_ms - ruby_txrdy_ms) >= 200) {
++        uint32_t v = tx0 & ~(1u << 29);
++
++        ruby_wr32(mac, TX1CSR0_OFF, v | (1u << 16));
++        ruby_wr32(mac, TX1CSR0_OFF, v | (1u << 16) | (1u << 29));
++        ruby_txrdy_ms = ruby_ms;
++        ruby_txrdy_kicks++;
++    }
++
+     if (!ruby_txreset_en || ruby_inflight == 0)
+         return;
+     if (!(ruby_rd32(mac, TX1CSR0_OFF) & (1u << 25)))
+@@ -3137,7 +3158,7 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+     printf("RUBY USB TXSTALL inf=%u tcsr=%08x qcr0=%08x qcr1=%08x "
+         "qcr2=%08x qcr3=%08x tqcpr=%08x rqcpr=%08x q0=%08x q1=%08x "
+         "speed=%u tx1csr1=%08x tx1csr2=%08x rx1csr1=%08x rx1csr2=%08x "
+-        "rq=%08x tkstarts=%u\n", ruby_inflight,
++        "rq=%08x tkstarts=%u txrdy=%u\n", ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, QCR0_OFF),
+         ruby_rd32(mac, QCR1_OFF), ruby_rd32(mac, QCR2_OFF),
+         ruby_rd32(mac, QCR3_OFF), ruby_rd32(mac, TQCPR1_OFF),
+@@ -3146,7 +3167,8 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+         ruby_rd32(mac, DEVICE_CONF - MTU3_PA) & 0x7u,
+         ruby_rd32(mac, TX1CSR1_OFF), ruby_rd32(mac, TX1CSR2_OFF),
+         ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+-        ruby_rd32(mac, RQCSR1_OFF), ruby_txkick_starts);
++        ruby_rd32(mac, RQCSR1_OFF), ruby_txkick_starts,
++        ruby_txrdy_kicks);
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+@@ -5691,6 +5713,7 @@ ruby_usb_probe(void)
+     int txdeq = 0;
+     int noise = 0;
+     int txkick = 1;
++    int txrdy = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5719,6 +5742,8 @@ ruby_usb_probe(void)
+     ruby_noise_en = (noise == 1);
+     PE_parse_boot_argn("ruby_txkick", &txkick, sizeof(txkick));
+     ruby_txkick_en = (txkick == 1);
++    PE_parse_boot_argn("ruby_txrdy", &txrdy, sizeof(txrdy));
++    ruby_txrdy_en = (txrdy == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5730,6 +5755,7 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0272 noise quirk=%d (ruby_noise=1 restores 0185)\n",
+         ruby_noise_en);
+     printf("RUBY USB: 0273 tx kick start=%d\n", ruby_txkick_en);
++    printf("RUBY USB: 0274 txrdy kick=%d\n", ruby_txrdy_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

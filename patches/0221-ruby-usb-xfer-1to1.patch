@@ -1,0 +1,42 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -437,6 +437,11 @@
+ };
+ 
+ static struct ruby_ep ruby_eps[RUBY_EP_MAX];
++/* 0221: one req per TX GPD slot (1:1, no SG). Caller owns rq storage. */
++#ifndef RUBY_GPD_NUM
++#define RUBY_GPD_NUM 64
++#endif
++static struct ruby_req ruby_xfer_reqs[RUBY_GPD_NUM];
+ static lck_grp_t ruby_usb_lck_grp;
+ static volatile uint32_t ruby_usb_lck_init;
+ 
+@@ -2511,6 +2516,11 @@
+     }
+ 
+     if (freed) {
++        struct ruby_ep *txep = ruby_ep_for_addr(0x81);
++        if (txep) {
++            for (uint32_t ci = 0; ci < freed; ci++)
++                ruby_ep_complete(txep, 0);
++        }
+         ruby_txdone_count += freed;
+         ruby_ep2_drain_freed_total += freed;
+         if (freed > ruby_ep2_drain_max)
+@@ -2814,6 +2824,15 @@
+         g[0] = (1u << 0) | (1u << 7);
+         if (!ruby_dma_uc)
+             ruby_dc_civac(g, RUBY_GPD_DESC); /* publish HWO */
++        /* 0221: 1:1 req:GPD binding. One ruby_req owns this slot; queue
++         * under ep lock, completed by ruby_ep2_drain -> ruby_ep_complete. */
++        {
++            struct ruby_ep *txep = ruby_ep_for_addr(0x81);
++            struct ruby_req *rq = &ruby_xfer_reqs[enq];
++            rq->buf = buf; rq->len = actual_len; rq->done = NULL; rq->ctx = NULL;
++            if (txep)
++                ruby_ep_queue(txep, rq);
++        }
+         ruby_tx_prod_pos_total += actual_len;
+         ruby_log_pos = pos;
+         ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;

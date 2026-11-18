@@ -1,0 +1,87 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -223,6 +223,8 @@
+ #define MAC2_INTR_RESET      (1u << 2)
+ #define MAC2_INTR_RESUME     (1u << 1)
+ #define MAC2_INTR_SUSPEND    (1u << 0)
++/* 0202: USB2 frame number; advances on every SOF a live port delivers. */
++#define FRAME_NUM_OFF   0x243c          /* U3D_USB20_FRAME_NUM */
+ 
+ /*
+  * 0196: MAC level-1 groups (vendor mtu3_hw_regs.h).  LV1ISR is RU -- read
+@@ -1361,6 +1363,53 @@
+     }
+ }
+ 
++/*
++ * 0202: SOF-advancement watchdog.  A host port disable/enable cycle issues
++ * no bus reset the device can catch (measured: bus_resets frozen through the
++ * disable) and the MAC2 suspend interrupt never fires (suspend=0), so the
++ * device is left detached with its D+ enable bit still set and no event to
++ * recover on -- a physical replug was the only way back.  USB2 SOF is only
++ * delivered to enabled ports, so a frozen frame number while configured
++ * means the host port is gone; re-present the device with a full PHY
++ * re-attach so the host re-detects it when the port is re-enabled.
++ */
++#define RUBY_FRAME_WD_MS 500u           /* SOF frozen this long = port lost */
++
++static void
++ruby_usb_frame_watchdog(vm_offset_t mac)
++{
++    static uint32_t last_frame, last_change_ms, cooldown_until;
++    static int primed;
++    uint32_t frame;
++
++    if (!ruby_cfg_seen || mac == 0) {
++        primed = 0;
++        return;
++    }
++    frame = ruby_rd32(mac, FRAME_NUM_OFF) & 0x7ffu;
++    if (!primed) {
++        primed = 1;
++        last_frame = frame;
++        last_change_ms = ruby_ms;
++        return;
++    }
++    if (frame != last_frame) {
++        last_frame = frame;
++        last_change_ms = ruby_ms;
++        return;
++    }
++    if (ruby_ms < cooldown_until)
++        return;
++    if (ruby_ms - last_change_ms < RUBY_FRAME_WD_MS)
++        return;
++    cooldown_until = ruby_ms + 5000;
++    last_change_ms = ruby_ms;
++    printf("RUBY USB: t=%u SOF frozen %u ms (cfg=1 frame=%u), re-attach\n",
++        ruby_ms, RUBY_FRAME_WD_MS, frame);
++    ruby_usb_reattach_owned(mac, ruby_phy_base);
++    ruby_enum_assist_until = ruby_ms + 15000;
++}
++
+ static void
+ ruby_ep0_thread(void *arg, wait_result_t wr)
+ {
+@@ -1400,6 +1449,7 @@
+         }
+         ruby_cmd_tick(ruby_mac_base);
+         ruby_usb_attach_poll(ruby_mac_base, ruby_ippc_base);
++        ruby_usb_frame_watchdog(ruby_mac_base);
+         ruby_usb_heartbeat(ruby_mac_base, ruby_ippc_base);
+         if (ruby_qmu_irq_mode) {
+             /*
+@@ -3523,10 +3573,11 @@
+     next_ms = ruby_ms + 5000;
+     printf("RUBY USB HB: t=%u otg=%08x mac2=%08x acr3=%08x "
+         "dmon1=%08x batt_seq=%u ext=%d setups=%u cfg=%u busreset=%u "
+-        "assist=%u\n", ruby_ms, otg, mac2,
++        "frame=%u assist=%u\n", ruby_ms, otg, mac2,
+         ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_ACR3) : 0,
+         ruby_phy_base ? ruby_rd32(ruby_phy_base, PHY_U2_DMON1) : 0,
+         seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
++        ruby_rd32(mac, FRAME_NUM_OFF) & 0x7ffu,
+         ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
+     if (ruby_irq_mode) {
+         if (ruby_qmu_irq_mode)

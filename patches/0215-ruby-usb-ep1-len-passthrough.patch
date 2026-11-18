@@ -1,0 +1,32 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2372,6 +2372,7 @@
+     uint64_t pos, np, log_pa;
+     uint8_t *g, *buf;
+     uint32_t n, queued = 0, freed = 0;
++    uint32_t actual_len = 0;
+ 
+     if (!ruby_ep_ready || !ruby_ep2log_on)
+         return;
+@@ -2575,6 +2576,7 @@
+                 (size_t)(RUBY_PAD_TEXT - n));
+             ruby_push_seq++;
+             frames++;
++            actual_len += (RUBY_HDR_LEN_V2 + n);
+         }
+         if (!frames) {
+             ruby_ep2_no_log++;
+@@ -2601,7 +2603,12 @@
+             (((np >> 32) & 0xfu) << 4));
+         *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+         *(volatile uint32_t *)(g + 8) = (uint32_t)log_pa;
+-        *(volatile uint32_t *)(g + 12) = frames * RUBY_LOG_CHUNK;
++        /* 0215: variable length + ZLP tail flag on 512-multiples.
++         * qcr1 TX_ZLP is already on (0211 L1981); the tail ZLP needs the
++         * GPD flag itself. dw3 low 12 bits = byte count, BIT(29) mirrors
++         * vendor GPD_EXT_FLAG_ZLP for the ext flag (old IP path). */
++        *(volatile uint32_t *)(g + 12) =
++            (actual_len) | (((actual_len % RUBY_LOG_CHUNK) == 0) ? (1u << 29) : 0);
+         g[1] = ruby_gpd_chksum(g);
+         /* Payload is cached: one clean covers all 32 frames. */
+         ruby_dc_civac(buf, RUBY_BULK_BYTES);

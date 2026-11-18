@@ -2,8 +2,8 @@
 
 **English** · [中文](zh/README.md)
 
-> **Current line:** 0179 · `main 22cdb29` · `v0.5.0` ·
-> patchset `10b1e2e8…` (175 files) · exec-data `a4fb021e…` · image `d438ba47…`
+> **Current line:** 0334 · patchset `d87e666f…` (305 files) ·
+> exec-data `61c6b1a1…` · images `561f1026…` (default) / `b4b95789…` (lite)
 >
 > **Status legend:** `[measured]` = observed on the named build;
 > `[inferred]` = derived from evidence; `[historical]` = kept for the record.

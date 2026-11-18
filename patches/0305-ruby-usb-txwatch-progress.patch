@@ -1,0 +1,24 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -3787,6 +3787,13 @@
+         ruby_log_pos = pos;
+         ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+         ruby_inflight++;
++        /*
++         * 0305: the watchdog grace runs from the packet's enqueue.
++         * progress_ms is otherwise only set at drain and is still 0 after
++         * boot, so the first prepared packet was rebuilt (FIFO flushed) on
++         * the next tick.
++         */
++        ruby_tx_progress_ms = ruby_ms;
+         hwo |= 1ull << enq;
+         queued++;
+         ruby_tx_mtr_add(RUBY_MTR_TX_PUSH, (uint16_t)enq,
+@@ -6298,6 +6305,7 @@
+         "txbell=%d/%ums txeprst=0x%x\n",
+         ruby_cfg_pre, ruby_qstart_cfg, ruby_qstart_keep,
+         ruby_txbell_en, ruby_txbell_ms, ruby_tx_eprst_bit);
++    printf("RUBY USB: 0305 txwatch progress-init\n");
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

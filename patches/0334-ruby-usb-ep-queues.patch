@@ -1,0 +1,1124 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -248,6 +248,15 @@
+ uint32_t ruby_tq_csr_off = 0x0510;
+ uint32_t ruby_tq_sar_off = 0x0514;
+ uint32_t ruby_tx_done_bit = 1u << 1;
++/* 0334b2: RX/TX CSR offsets and per-endpoint RX selection. */
++uint32_t ruby_rx_csr0_off = 0x0210;
++uint32_t ruby_rx_csr1_off = 0x0214;
++uint32_t ruby_rx_csr2_off = 0x0218;
++uint32_t ruby_rq_csr_off = 0x0610;
++uint32_t ruby_rq_sar_off = 0x0614;
++uint32_t ruby_rq_cpr_off = 0x0618;
++uint32_t ruby_rq_hiar_off = 0x04c4;
++static int ruby_rx_ep_sel = 1;
+ /* 0304: independent config-order / queue-lifecycle / doorbell axes.
+  * Defaults reproduce the 0303 behaviour. */
+ int ruby_cfg_pre;
+@@ -726,7 +735,7 @@
+      * uses a dedicated, page-aligned allocation; the cached BSS ring
+      * remains the fallback.
+      */
+-    if (ruby_dma_uc && !ruby_gpd_ring_alloc) {
++    if (ruby_dma_uc && !ruby_gpd_ring_alloc && ruby_tx_ep_sel == 1) {
+         vm_offset_t va = 0;
+ 
+         if (kmem_alloc(kernel_map, &va, PAGE_SIZE,
+@@ -761,6 +770,8 @@
+                 } else {
+                     ruby_gpd_ring_cpu =
+                         (uint8_t *)ruby_gpd_ring_uc;
++                    ruby_txq_active->clean_cpu =
++                        (uint8_t *)ruby_gpd_ring_alloc;
+                 }
+             }
+         }
+@@ -770,15 +781,18 @@
+             ruby_gpd_pa[i] =
+                 ruby_ring_pa + i * RUBY_GPD_STRIDE;
+     } else {
++        uint8_t *base = ruby_txq_active->ring_cpu;
++
+         ruby_dma_uc = 0;
+-        ruby_gpd_ring_cpu = ruby_gpd_ring;
+-        ruby_ring_pa = ruby_dma_pa(ruby_gpd_ring);
++        ruby_gpd_ring_cpu = base;
++        ruby_txq_active->clean_cpu = base;
++        ruby_ring_pa = ruby_dma_pa(base);
+         if (!ruby_ring_pa || (ruby_ring_pa & 0x3fu) ||
+             ((ruby_ring_pa & (PAGE_SIZE - 1u)) +
+                 RUBY_GPD_RING_SZ > PAGE_SIZE))
+             ok = 0;
+         for (i = 0; i < RUBY_GPD_NUM; i++) {
+-            ruby_gpd_pa[i] = ruby_dma_pa(ruby_gpd_ring +
++            ruby_gpd_pa[i] = ruby_dma_pa(base +
+                 i * RUBY_GPD_STRIDE);
+             if (!ruby_gpd_pa[i] ||
+                 (ruby_ring_pa &&
+@@ -902,7 +916,7 @@
+         *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+     }
+     if (!ruby_dma_uc)
+-        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++        ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+     ruby_dma_mb();
+ 
+     /*
+@@ -1083,7 +1097,7 @@
+         ruby_rd32(mac, RQCSR1_OFF), ruby_txkick_starts,
+         ruby_txrdy_kicks);
+     if (!ruby_dma_uc)
+-        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++        ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+     for (i = 0; i < 4; i++) {
+         uint32_t sl = (d + i) % ruby_tx_ring_n;
+@@ -1311,7 +1325,7 @@
+      * vendor ring reserves one GPD for the same reason.
+      */
+     if (!ruby_dma_uc)
+-        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++        ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+     for (i = 0; i < ruby_tx_ring_n; i++)
+         if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+@@ -2159,16 +2173,30 @@
+         ruby_txfbase = (uint32_t)txfbase;
+         if (txep == 3) {
+             ruby_tx_ep_addr = 0x83;
+-            ruby_tx_csr0_off = 0x0130;
+-            ruby_tx_csr1_off = 0x0134;
+-            ruby_tx_csr2_off = 0x0138;
+-            ruby_tq_csr_off = 0x0530;
+-            ruby_tq_sar_off = 0x0534;
+-            ruby_tq_cpr_off = 0x0538;
+-            ruby_tq_hiar_off = 0x048c;
++            /* vendor: TX CSR/QMU/HIAR strides from the endpoint index. */
++            ruby_tx_csr0_off = 0x0110 + (txep - 1) * 0x10;
++            ruby_tx_csr1_off = 0x0114 + (txep - 1) * 0x10;
++            ruby_tx_csr2_off = 0x0118 + (txep - 1) * 0x10;
++            ruby_tq_csr_off = 0x0510 + (txep - 1) * 0x10;
++            ruby_tq_sar_off = 0x0514 + (txep - 1) * 0x10;
++            ruby_tq_cpr_off = 0x0518 + (txep - 1) * 0x10;
++            ruby_tq_hiar_off = 0x0484 + (txep - 1) * 4;
+             ruby_tx_done_bit = 1u << 3;
+         }
+     }
++    ruby_tx_ring_select((uint32_t)ruby_tx_ep_sel);
++    {
++        int rxep = 1;
++
++        PE_parse_boot_argn("ruby_rxep", &rxep, sizeof(rxep));
++        if (rxep < 1 || rxep > 16)
++            rxep = 1;
++        ruby_rx_ep_sel = rxep;
++        ruby_rx_ring_select((uint32_t)rxep);
++    }
++    printf("RUBY USB: 0334b2 txep=%d rxep=%d rxcsr=%04x rq=%04x "
++        "hiar=%04x\n", ruby_tx_ep_sel, ruby_rx_ep_sel,
++        ruby_rx_csr0_off, ruby_rq_csr_off, ruby_rq_hiar_off);
+     {
+         int cfgpre = 0, qcfg = 0, qkeep = 0, bell = 0;
+         uint32_t bellms = 1, eprstbit = 0;
+diff --git a/bsd/dev/ruby_usb_config.c b/bsd/dev/ruby_usb_config.c
+--- a/bsd/dev/ruby_usb_config.c
++++ b/bsd/dev/ruby_usb_config.c
+@@ -201,6 +201,29 @@
+             printf("RUBY CFG: 0330 rx fallback ENOSPC\n");
+     }
+ 
++    /* 0334b3: read-only FIFO budget probe.  It answers "can N extra
++     * endpoint units (one 512 B unit per direction each) fit after the
++     * EP0 reserve and the verified default pair?" without touching the
++     * hardware or the default allocation. */
++    {
++        int fifo_plan = 0;
++
++        PE_parse_boot_argn("ruby_fifo_plan", &fifo_plan,
++            sizeof(fifo_plan));
++        if (fifo_plan > 0) {
++            uint32_t need = (uint32_t)fifo_plan;
++            int txok = ftx.free_units >= need;
++            int rxok = frx.free_units >= need;
++
++            printf("RUBY CFG: 0334b3 fifo plan=%u tx=%s(%u) "
++                "rx=%s(%u)\n", need,
++                txok ? "ok" : "REJECT", ftx.free_units,
++                rxok ? "ok" : "REJECT", frx.free_units);
++            if (!txok || !rxok)
++                bad = 1;
++        }
++    }
++
+     printf("RUBY CFG: 0330 fifo unit=%u total_tx=%u total_rx=%u "
+         "ep0=%u free_tx=%u free_rx=%u caps=%u/%u/%u/info%u\n",
+         RUBY_USB_FIFO_UNIT, total_tx, total_rx, ep0_units * RUBY_USB_FIFO_UNIT,
+@@ -215,4 +238,91 @@
+         ruby_rx_buf_size, ruby_rx_ring_n, ruby_txslot, ruby_rx_slot);
+ }
+ 
++/*
++ * 0334b4: real per-endpoint FIFO allocation (vendor ep_fifo_alloc).
++ *
++ * CAP_EP0FFSZ is EP0's own FIFO block, so the per-direction pool below
++ * starts at its own address 0 -- which is exactly what the verified
++ * EP1 TX/RX CSR2 values (FIFOADDR 0, SEGSIZE 9) program today.  Each
++ * endpoint takes roundup_pow2(ceil(mps / 512)) * (slot + 1) units; the
++ * TWRP register dump shows this IP running slot 2, i.e. 3 units per
++ * endpoint, so only five endpoints fit per direction and the rest are
++ * refused with a bounded print instead of overlapping segments.
++ */
++uint32_t ruby_epfifo_addr[2][16];
++static int ruby_epfifo_mapped;
++/* 0334b4: 0 is a legal FIFO address (EP1 sits at 0), so "unallocated"
++ * needs its own sentinel. */
++#define RUBY_EPFIFO_NONE 0xffffffffu
++
++static int
++epfifo_find(const struct ruby_usb_fifo *f, uint32_t units)
++{
++    uint32_t start, i;
++
++    for (start = 0; start + units <= f->total_units; start++) {
++        for (i = 0; i < units; i++)
++            if (f->bitmap & (1u << (start + i)))
++                break;
++        if (i == units)
++            return (int)start;
++    }
++    return -1;
++}
++
++int
++ruby_epfifo_map(void)
++{
++    struct ruby_usb_fifo f[2];
++    uint32_t dir, ep, units, total;
++
++    if (ruby_epfifo_mapped)
++        return 0;
++    if (!ruby_usb_cfg_cap[1] || !ruby_usb_cfg_cap[2]) {
++        printf("RUBY CFG: 0334b4 epfifo no caps\n");
++        return -1;
++    }
++    for (dir = 0; dir < 2; dir++) {
++        for (ep = 0; ep < 16u; ep++)
++            ruby_epfifo_addr[dir][ep] = RUBY_EPFIFO_NONE;
++        total = ((dir == 0) ? ruby_usb_cfg_cap[1] :
++            ruby_usb_cfg_cap[2]) / RUBY_USB_FIFO_UNIT;
++        if (total == 0 || total > 32u)
++            return -1;
++        f[dir].total_units = total;
++        f[dir].ep0_units = 0;
++        f[dir].used_units = 0;
++        f[dir].free_units = total;
++        f[dir].bitmap = 0;
++    }
++    for (ep = 1; ep <= 8; ep++) {
++        for (dir = 0; dir < 2; dir++) {
++            uint32_t slot = (dir == 0) ? (uint32_t)ruby_txslot :
++                ruby_rx_slot;
++            int start;
++
++            units = slot + 1u;      /* vendor: seg 512 B x (slot + 1) */
++            start = epfifo_find(&f[dir], units);
++            if (start < 0) {
++                ruby_epfifo_addr[dir][ep] = RUBY_EPFIFO_NONE;
++                printf("RUBY CFG: 0334b4 epfifo %s ep%u REJECT "
++                    "units=%u free=%u\n", dir ? "rx" : "tx", ep,
++                    units, f[dir].free_units);
++                continue;
++            }
++            f[dir].bitmap |= ((1u << units) - 1u) << start;
++            f[dir].used_units += units;
++            f[dir].free_units -= units;
++            ruby_epfifo_addr[dir][ep] =
++                (uint32_t)start * RUBY_USB_FIFO_UNIT;
++            printf("RUBY CFG: 0334b4 epfifo %s ep%u addr=0x%x units=%u\n",
++                dir ? "rx" : "tx", ep, ruby_epfifo_addr[dir][ep], units);
++        }
++    }
++    ruby_epfifo_mapped = 1;
++    printf("RUBY CFG: 0334b4 epfifo tx_free=%u rx_free=%u ep0_cap=%u\n",
++        f[0].free_units, f[1].free_units, ruby_usb_cfg_cap[0]);
++    return 0;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+\ No newline at end of file
+diff --git a/bsd/dev/ruby_usb_config.h b/bsd/dev/ruby_usb_config.h
+--- a/bsd/dev/ruby_usb_config.h
++++ b/bsd/dev/ruby_usb_config.h
+@@ -41,6 +41,15 @@
+ /* CAP snapshot taken once, when validate() runs at boot. */
+ extern uint32_t ruby_usb_cfg_cap[4];   /* ep0, tx, rx, info */
+ 
++/*
++ * 0334b4: actual per-endpoint FIFO segment table.  Vendor
++ * ep_fifo_alloc() semantics: one 512 B bit per segment size class,
++ * multiplied by (slot + 1) for this IP's two superspeed slots.  Built
++ * lazily by the 0331 test channel; the default path never reads it.
++ */
++extern uint32_t ruby_epfifo_addr[2][16];   /* [0]=TX [1]=RX, index = ep */
++int ruby_epfifo_map(void);
++
+ void ruby_usb_config_validate(vm_offset_t mac);
+ 
+ #endif /* _RUBY_USB_CONFIG_H_ */
+\ No newline at end of file
+diff --git a/bsd/dev/ruby_usb_ep_test.c b/bsd/dev/ruby_usb_ep_test.c
+--- a/bsd/dev/ruby_usb_ep_test.c
++++ b/bsd/dev/ruby_usb_ep_test.c
+@@ -25,9 +25,6 @@
+ 
+ int ruby_ep_test_on;
+ 
+-extern uint32_t ruby_inflight;
+-extern uint32_t ruby_gpd_enq;
+-extern uint32_t ruby_gpd_deq;
+ extern volatile uint32_t ruby_ep_ready;
+ extern volatile uint32_t ruby_rx_ready;
+ extern uint32_t ruby_rx_packets;
+@@ -35,7 +32,6 @@
+ extern uint32_t ruby_rx_errors;
+ extern uint32_t ruby_rx_crc;
+ extern uint32_t ruby_rx_zlp;
+-extern uint32_t ruby_rx_deq;
+ extern int ruby_echo_en;
+ extern int ruby_qmu_irq_mode;
+ extern int ruby_usb_irq_kick(void);
+@@ -44,6 +40,8 @@
+ static uint32_t ruby_ep_test_box[16];
+ static uint32_t ruby_ep_test_seq;
+ static uint8_t ruby_ep_test_buf[RUBY_EP_TEST_BUF];
++/* 0334b4: DMA-visible source for the per-endpoint T2 transfers. */
++static uint8_t ruby_ep_test_dma[512] __attribute__((aligned(64)));
+ 
+ static uint32_t
+ t331_fill(uint32_t code, uint32_t status)
+@@ -240,6 +238,186 @@
+     t331_put(4, ruby_inflight);
+     t331_put(5, spins);
+     (void)mac;
++}
++
++/*
++ * 0334b4 T2 batch: bring up every endpoint slot once, queue one 512 B
++ * short packet on each TX slot and arm each RX slot, then restore the
++ * default EP1 pair so the verified data path stays live for this boot.
++ */
++static void
++t331_epmap(void)
++{
++    int rc = ruby_epfifo_map();
++    uint32_t i;
++
++    t331_fill(RUBY_EP_TEST_EPMAP, (rc == 0) ? 0u : 5u);
++    for (i = 1; i <= 8; i++)
++        t331_put(3 + i, ruby_epfifo_addr[0][i]);
++    for (i = 1; i <= 4; i++)
++        t331_put(11 + i, ruby_epfifo_addr[1][i]);
++    printf("RUBY EP TEST: 0334b4 epmap tx=%02x/%02x/%02x/%02x "
++        "rx=%02x/%02x/%02x/%02x\n", ruby_epfifo_addr[0][1] >> 9,
++        ruby_epfifo_addr[0][2] >> 9, ruby_epfifo_addr[0][3] >> 9,
++        ruby_epfifo_addr[0][4] >> 9, ruby_epfifo_addr[1][1] >> 9,
++        ruby_epfifo_addr[1][2] >> 9, ruby_epfifo_addr[1][3] >> 9,
++        ruby_epfifo_addr[1][4] >> 9);
++}
++
++static void
++t331_epfill(uint32_t len)
++{
++    uint32_t i;
++
++    if (len > sizeof(ruby_ep_test_dma))
++        len = sizeof(ruby_ep_test_dma);
++    for (i = 0; i < len; i++)
++        ruby_ep_test_dma[i] = (uint8_t)((i * 7u + 3u) & 0xffu);
++}
++
++static uint32_t
++t331_eptx_one(vm_offset_t mac, uint32_t ep, uint32_t len)
++{
++    uint64_t pa = ruby_dma_pa(ruby_ep_test_dma);
++    uint32_t addr = ruby_epfifo_addr[0][ep];
++    int rc;
++
++    /* 0309 rule: stay one byte under MPS so the GPD ends on a short
++     * packet; an exact 512 B frame needs a ZLP the test path does not
++     * pipeline. */
++    if (len > 511u)
++        len = 511u;
++    if (ep == 0 || ep > 8u || addr == 0xffffffffu || !pa)
++        return 22u;
++    rc = ruby_ep_tx_begin(mac, ep, addr);
++    if (rc == 0)
++        rc = ruby_ep_tx_send(mac, ep, ruby_ep_test_dma, pa, len, 100u);
++    return (uint32_t)rc;
++}
++
++static int
++t331_ep_restore_default(vm_offset_t mac)
++{
++    int rc = 0;
++
++    if (ruby_ep_tx_begin(mac, 1, ruby_epfifo_addr[0][1]) != 0)
++        rc = 5;
++    if (ruby_ep_rx_begin(mac, 1, ruby_epfifo_addr[1][1]) != 0)
++        rc = (rc == 0) ? 5 : rc;
++    return rc;
++}
++
++static void
++t331_eptx(vm_offset_t mac, const char *p)
++{
++    uint32_t ep, len = 512u, st;
++
++    if (t331_u32(&p, &ep)) {
++        t331_fill(RUBY_EP_TEST_EPTX, 22);
++        return;
++    }
++    (void)t331_u32(&p, &len);
++    if (len == 0 || len > 512u)
++        len = 512u;
++    if (ruby_epfifo_map() != 0) {
++        t331_fill(RUBY_EP_TEST_EPTX, 5);
++        return;
++    }
++    t331_epfill(len);
++    st = t331_eptx_one(mac, ep, len);
++    t331_fill(RUBY_EP_TEST_EPTX, st);
++    t331_put(4, ep);
++    t331_put(5, ruby_epfifo_addr[0][ep]);
++    t331_put(6, ruby_rd32(mac, TQCSR1_OFF));
++    t331_put(7, ruby_rd32(mac, QISAR0_OFF));
++    t331_put(8, ruby_rd32(mac, TQCPR1_OFF));
++    printf("RUBY EP TEST: 0334b4 eptx ep=%u addr=0x%x st=%u "
++        "tq=%08x q0=%08x\n", ep, ruby_epfifo_addr[0][ep], st,
++        ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, QISAR0_OFF));
++}
++
++static void
++t331_eprx(vm_offset_t mac, const char *p)
++{
++    uint32_t ep, st;
++
++    if (t331_u32(&p, &ep)) {
++        t331_fill(RUBY_EP_TEST_EPRX, 22);
++        return;
++    }
++    if (ruby_epfifo_map() != 0) {
++        t331_fill(RUBY_EP_TEST_EPRX, 5);
++        return;
++    }
++    if (ep == 0 || ep > 8u || ruby_epfifo_addr[1][ep] == 0xffffffffu) {
++        t331_fill(RUBY_EP_TEST_EPRX, 22);
++        return;
++    }
++    st = (uint32_t)ruby_ep_rx_begin(mac, ep, ruby_epfifo_addr[1][ep]);
++    t331_fill(RUBY_EP_TEST_EPRX, st);
++    t331_put(4, ep);
++    t331_put(5, ruby_epfifo_addr[1][ep]);
++    t331_put(6, ruby_rd32(mac, RQCSR1_OFF));
++    t331_put(7, ruby_rd32(mac, RX1CSR2_OFF));
++    printf("RUBY EP TEST: 0334b4 eprx ep=%u addr=0x%x st=%u rq=%08x\n",
++        ep, ruby_epfifo_addr[1][ep], st, ruby_rd32(mac, RQCSR1_OFF));
++}
++
++static void
++t331_epall(vm_offset_t mac, const char *p)
++{
++    uint32_t len = 512u, ep, st, ok_tx = 0, tmo_tx = 0, err_tx = 0;
++    uint32_t ok_rx = 0, err_rx = 0, rst;
++
++    (void)t331_u32(&p, &len);
++    if (len == 0 || len > 512u)
++        len = 512u;
++    if (ruby_epfifo_map() != 0) {
++        t331_fill(RUBY_EP_TEST_EPALL, 5);
++        return;
++    }
++    t331_epfill(len);
++    for (ep = 1; ep <= 8u; ep++) {
++        if (ruby_epfifo_addr[0][ep] == 0xffffffffu) {
++            err_tx |= 1u << ep;
++            continue;
++        }
++        st = t331_eptx_one(mac, ep, len);
++        if (st == 0)
++            ok_tx |= 1u << ep;
++        else if (st == 110u)
++            tmo_tx |= 1u << ep;
++        else
++            err_tx |= 1u << ep;
++        printf("RUBY EP TEST: 0334b4 epall tx ep=%u addr=0x%x st=%u\n",
++            ep, ruby_epfifo_addr[0][ep], st);
++    }
++    for (ep = 1; ep <= 8u; ep++) {
++        if (ruby_epfifo_addr[1][ep] == 0xffffffffu) {
++            err_rx |= 1u << ep;
++            continue;
++        }
++        st = (uint32_t)ruby_ep_rx_begin(mac, ep,
++            ruby_epfifo_addr[1][ep]);
++        if (st == 0)
++            ok_rx |= 1u << ep;
++        else
++            err_rx |= 1u << ep;
++        printf("RUBY EP TEST: 0334b4 epall rx ep=%u addr=0x%x st=%u\n",
++            ep, ruby_epfifo_addr[1][ep], st);
++    }
++    rst = (uint32_t)t331_ep_restore_default(mac);
++    t331_fill(RUBY_EP_TEST_EPALL, rst);
++    t331_put(4, ok_tx);
++    t331_put(5, tmo_tx);
++    t331_put(6, err_tx);
++    t331_put(7, ok_rx);
++    t331_put(8, err_rx);
++    t331_put(9, ruby_rd32(mac, TQCSR1_OFF));
++    t331_put(10, ruby_rd32(mac, RQCSR1_OFF));
++    printf("RUBY EP TEST: 0334b4 epall done ok_tx=%02x tmo_tx=%02x "
++        "err_tx=%02x ok_rx=%02x err_rx=%02x restore=%u\n",
++        ok_tx, tmo_tx, err_tx, ok_rx, err_rx, rst);
+ }
+ 
+ int
+@@ -293,6 +471,14 @@
+     } else if (t331_word(p, "rxreset")) {
+         ruby_ep2_rx_reset(mac, 1);
+         t331_fill(RUBY_EP_TEST_RXRESET, 0);
++    } else if (t331_word(p, "epmap")) {
++        t331_epmap();
++    } else if (t331_pref(p, "eptx ")) {
++        t331_eptx(mac, p + 5);
++    } else if (t331_pref(p, "eprx ")) {
++        t331_eprx(mac, p + 5);
++    } else if (t331_pref(p, "epall")) {
++        t331_epall(mac, p + 5);
+     } else if (t331_pref(p, "owner ")) {
+         const char *q = t331_skip(p + 6);
+         if (t331_word(q, "echo")) {
+@@ -311,7 +497,8 @@
+         t331_fill(0, 22);
+         printf("RUBY EP TEST: 0331 usage: t331 caps|stat|resetcrc|"
+             "crc|conf r i g|queue n|drain ms|halt|clear|stop|start|"
+-            "rxreset|owner echo|tty|raw\n");
++            "rxreset|epmap|eptx ep len|eprx ep|epall len|"
++            "owner echo|tty|raw\n");
+     }
+     return 1;
+ }
+diff --git a/bsd/dev/ruby_usb_ep_test.h b/bsd/dev/ruby_usb_ep_test.h
+--- a/bsd/dev/ruby_usb_ep_test.h
++++ b/bsd/dev/ruby_usb_ep_test.h
+@@ -27,6 +27,10 @@
+ #define RUBY_EP_TEST_DRAIN  11
+ #define RUBY_EP_TEST_OWNER  12
+ #define RUBY_EP_TEST_RXRESET 13
++#define RUBY_EP_TEST_EPMAP  14
++#define RUBY_EP_TEST_EPTX   15
++#define RUBY_EP_TEST_EPRX   16
++#define RUBY_EP_TEST_EPALL  17
+ 
+ extern int ruby_ep_test_on;
+ 
+diff --git a/bsd/dev/ruby_usb_qmu.c b/bsd/dev/ruby_usb_qmu.c
+--- a/bsd/dev/ruby_usb_qmu.c
++++ b/bsd/dev/ruby_usb_qmu.c
+@@ -78,26 +78,44 @@
+ #define RUBY_GPD_RING_SZ (RUBY_GPD_NUM * RUBY_GPD_STRIDE)
+ 
+ uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+-
+-uint32_t ruby_gpd_enq;
+-uint32_t ruby_gpd_deq;
+-
+-uint32_t ruby_inflight;
+-
+-uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
+-uint64_t ruby_ring_pa;
+-/*
+- * 0204: CPU access to the TX GPD ring.  With rubydmauc=1 the ring
+- * is also mapped uncached; every CPU access then goes through that
+- * alias.  The cached BSS alias is touched once, to clean it before
+- * the switch, and never afterwards.  The QMU always uses
+- * ruby_ring_pa.
+- */
+-uint8_t *ruby_gpd_ring_cpu = ruby_gpd_ring;
++/* 0334b4: one cached ring per TX slot so the T2 batch can bring up
++ * every endpoint without inheriting another slot's cursor.  Slot 1
++ * keeps the verified BSS/UC ring above; the array entry is unused. */
++uint8_t ruby_gpd_ring_slots[RUBY_TXQ_MAX][RUBY_GPD_RING_SZ]
++    __attribute__((aligned(64)));
++
++/*
++ * One ring-state slot per endpoint.  Slot 1 is the default
++ * (ruby_tx_ep_sel=1) and starts on the verified BSS ring; config
++ * upgrades it to the UC alias.  Other slots get the cached alt ring.
++ */
++struct ruby_ep_txq ruby_txqs[RUBY_TXQ_MAX] = {
++    [1] = { .ring_cpu = ruby_gpd_ring, .clean_cpu = ruby_gpd_ring },
++};
++struct ruby_ep_txq *ruby_txq_active = &ruby_txqs[1];
++
++void
++ruby_tx_ring_select(uint32_t sel)
++{
++    struct ruby_ep_txq *q;
++    uint32_t i;
++
++    if (sel >= RUBY_TXQ_MAX)
++        return;
++    q = &ruby_txqs[sel];
++    if (sel != 1 && !q->ring_cpu) {
++        q->ring_cpu = ruby_gpd_ring_slots[sel];
++        q->clean_cpu = ruby_gpd_ring_slots[sel];
++        q->ring_pa = ruby_dma_pa(q->ring_cpu);
++        for (i = 0; i < RUBY_GPD_NUM; i++)
++            q->gpd_pa[i] = ruby_dma_pa(q->ring_cpu + i * RUBY_GPD_STRIDE);
++    }
++    ruby_txq_active = q;
++}
++
+ vm_offset_t ruby_gpd_ring_uc;
+ void *ruby_gpd_ring_alloc;
+ int ruby_dma_uc;
+-#define RUBY_GPD_SLOT(i) (ruby_gpd_ring_cpu + (i) * RUBY_GPD_STRIDE)
+ 
+ /*
+  * 0310: RX GPD ring ownership.  ruby_rxuc=1 (default) maps the ring's own
+@@ -116,8 +134,11 @@
+ };
+ static struct ruby_rx_gpd_page ruby_rx_gpd_store
+     __attribute__((aligned(RUBY_RX_PAGE_SIZE)));
++/* 0334b4: one cached 256 B ring per non-default RX slot. */
++static struct {
++    uint8_t ring[RUBY_RX_GPD_RING_SZ];
++} ruby_rx_ring_slots[RUBY_TXQ_MAX] __attribute__((aligned(64)));
+ #define ruby_rx_gpd_ring (ruby_rx_gpd_store.ring)
+-uint8_t *ruby_rx_gpd_ring_cpu = ruby_rx_gpd_ring;
+ vm_offset_t ruby_rx_gpd_ring_uc;
+ int ruby_rx_uc = 1;
+ volatile uint32_t ruby_rx_snap_seq;
+@@ -126,10 +147,28 @@
+ uint32_t ruby_rx_snap_bad;
+ uint8_t ruby_rx_buf[RUBY_RX_GPD_NUM][RUBY_RX_BUF_MAX]
+     __attribute__((aligned(4096)));
+-uint64_t ruby_rx_gpd_pa[RUBY_RX_GPD_NUM];
+ uint64_t ruby_rx_buf_pa[RUBY_RX_GPD_NUM];
+-uint64_t ruby_rx_ring_pa;
+-uint32_t ruby_rx_deq;
++struct ruby_ep_rxq ruby_rxqs[RUBY_TXQ_MAX] = {
++    [1] = { .ring_cpu = ruby_rx_gpd_store.ring,
++            .clean_cpu = ruby_rx_gpd_store.ring },
++};
++struct ruby_ep_rxq *ruby_rxq_active = &ruby_rxqs[1];
++
++void
++ruby_rx_ring_select(uint32_t sel)
++{
++    if (sel < RUBY_TXQ_MAX) {
++        ruby_rxq_active = &ruby_rxqs[sel];
++        /* vendor: MU3D_EP_RXCR0/1/2 and USB_QMU_RQ* strides. */
++        ruby_rx_csr0_off = 0x0210 + (sel - 1) * 0x10;
++        ruby_rx_csr1_off = 0x0214 + (sel - 1) * 0x10;
++        ruby_rx_csr2_off = 0x0218 + (sel - 1) * 0x10;
++        ruby_rq_csr_off = 0x0610 + (sel - 1) * 0x10;
++        ruby_rq_sar_off = 0x0614 + (sel - 1) * 0x10;
++        ruby_rq_cpr_off = 0x0618 + (sel - 1) * 0x10;
++        ruby_rq_hiar_off = 0x04c4 + (sel - 1) * 4;
++    }
++}
+ volatile uint32_t ruby_rx_ready;
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+@@ -215,7 +254,7 @@
+     uint32_t i;
+ 
+     if (!ruby_dma_uc)
+-        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++        ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+     for (i = 0; i < ruby_tx_ring_n; i++)
+         if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+@@ -250,22 +289,45 @@
+ int
+ ruby_rx_ring_setup(void)
+ {
+-    if (ruby_rx_gpd_ring_uc) {
+-        ruby_rx_gpd_ring_cpu = (uint8_t *)ruby_rx_gpd_ring_uc;
+-        return ruby_rx_ring_pa != 0;
+-    }
+-    if (ruby_rx_uc) {
+-        uint64_t pa = ruby_dma_pa(ruby_rx_gpd_ring);
++    struct ruby_ep_rxq *q = ruby_rxq_active;
++    uint32_t sel = (uint32_t)(q - ruby_rxqs);
++    int dflt = (sel == 1u);
++    uint8_t *bss = dflt ? ruby_rx_gpd_store.ring :
++        ruby_rx_ring_slots[sel].ring;
++    void *store = dflt ? (void *)&ruby_rx_gpd_store :
++        (void *)&ruby_rx_ring_slots[sel];
++
++    q->uc = 0;
++    if (dflt && ruby_rx_gpd_ring_uc) {
++        uint64_t pa = ruby_dma_pa(bss);
++
++        if (pa) {
++            q->ring_pa = pa;
++            q->ring_cpu = (uint8_t *)ruby_rx_gpd_ring_uc;
++            q->clean_cpu = bss;
++            q->uc = 1;
++            printf("RUBY USB: 0334b3 rx ring sel=%u pa=0x%llx uc\n",
++                sel, (unsigned long long)pa);
++            return 1;
++        }
++        return 0;
++    }
++    if (dflt && ruby_rx_uc) {
++        uint64_t pa = ruby_dma_pa(bss);
+         vm_offset_t uc;
+ 
+         if (pa && !(pa & (PAGE_SIZE - 1u))) {
+             /* clean the cached alias of the whole exclusive page */
+-            ruby_dc_civac(&ruby_rx_gpd_store, RUBY_RX_PAGE_SIZE);
++            ruby_dc_civac(store, RUBY_RX_PAGE_SIZE);
+             uc = ml_io_map((vm_offset_t)pa, PAGE_SIZE);
+             if (uc) {
+-                ruby_rx_ring_pa = pa;
++                q->ring_pa = pa;
++                q->ring_cpu = (uint8_t *)uc;
++                q->clean_cpu = bss;
++                q->uc = 1;
+                 ruby_rx_gpd_ring_uc = uc;
+-                ruby_rx_gpd_ring_cpu = (uint8_t *)uc;
++                printf("RUBY USB: 0334b3 rx ring sel=%u pa=0x%llx uc\n",
++                    sel, (unsigned long long)pa);
+                 return 1;
+             }
+             printf("RUBY USB: 0310 rx ring uc map failed pa=0x%llx\n",
+@@ -276,9 +338,12 @@
+         }
+         ruby_rx_uc = 0;
+     }
+-    ruby_rx_gpd_ring_cpu = ruby_rx_gpd_ring;
+-    ruby_rx_ring_pa = ruby_dma_pa(ruby_rx_gpd_ring);
+-    return ruby_rx_ring_pa != 0;
++    q->ring_cpu = bss;
++    q->clean_cpu = bss;
++    q->ring_pa = ruby_dma_pa(bss);
++    printf("RUBY USB: 0334b3 rx ring sel=%u pa=0x%llx cached\n",
++        sel, (unsigned long long)q->ring_pa);
++    return q->ring_pa != 0;
+ }
+ 
+ uint32_t
+@@ -308,7 +373,7 @@
+ 
+     if (!ruby_rx_ready)
+         return;
+-    if (!ruby_rx_uc)
++    if (!ruby_rxq_active->uc)
+         ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+     for (i = 0; i < ruby_rx_ring_n; i++)
+         if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+@@ -426,7 +491,7 @@
+         *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+     }
+     if (!ruby_dma_uc)
+-        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++        ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+ }
+ 
+ /*
+@@ -565,7 +630,7 @@
+ 
+     ruby_tx_replay_len = 0;
+     if (!ruby_dma_uc)
+-        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++        ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+     for (i = ruby_gpd_deq; i != ruby_gpd_enq; i = (i + 1u) % ruby_tx_ring_n) {
+         uint32_t len = *(volatile uint16_t *)(RUBY_GPD_SLOT(i) + 12) &
+             0xfffu;
+@@ -852,7 +917,7 @@
+         ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, TQCPR1_OFF),
+         ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, QISAR0_OFF));
+     if (!ruby_dma_uc)
+-        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++        ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+     for (i = first; i <= last && i < ruby_tx_ring_n; i++) {
+         volatile uint8_t *g = RUBY_GPD_SLOT(i);
+ 
+@@ -980,7 +1045,7 @@
+     g[0] = (1u << 0) | (1u << 7);
+ 
+     ruby_dc_civac(ruby_rx_buf[i], RUBY_RX_BUF_MAX);
+-    if (!ruby_rx_uc) {
++    if (!ruby_rxq_active->uc) {
+         ruby_dc_civac(g, 16);
+         /* 0263: publish the next GPD the QMU reads after this one. */
+         ruby_dc_civac(ruby_rx_gpd_ring_cpu +
+@@ -1015,7 +1080,7 @@
+     }
+     for (i = 0; i < ruby_rx_ring_n; i++) {
+         ruby_rx_buf_pa[i] = ruby_dma_pa(ruby_rx_buf[i]);
+-        ruby_rx_gpd_pa[i] = ruby_rx_uc ?
++        ruby_rx_gpd_pa[i] = ruby_rxq_active->uc ?
+             ruby_rx_ring_pa + i * 16u :
+             ruby_dma_pa(ruby_rx_gpd_ring_cpu + i * 16);
+     }
+@@ -1183,7 +1248,7 @@
+ 
+     if (!ruby_rx_ready)
+         return;
+-    if (!ruby_rx_uc)
++    if (!ruby_rxq_active->uc)
+         ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+     for (i = 0; i < ruby_rx_ring_n; i++)
+         if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+@@ -1367,7 +1432,7 @@
+     if (!ruby_rx_ready)
+         return;
+ 
+-    if (!ruby_rx_uc)
++    if (!ruby_rxq_active->uc)
+         ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+     for (i = 0; i < ruby_rx_ring_n; i++)
+         if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+@@ -1462,7 +1527,7 @@
+     if (done) {
+         /* 0263: the QMU reads the GPD at cur right after resume; make its
+          * armed state visible before the doorbell (U-Boot 044d7003a7). */
+-        if (!ruby_rx_uc)
++        if (!ruby_rxq_active->uc)
+             ruby_dc_civac(ruby_rx_gpd_ring_cpu + cur * 16, 16);
+         if (full_lap) {
+             ruby_rx_full_laps++;
+@@ -1484,4 +1549,174 @@
+         ruby_ep2_push_log(mac);
+ }
+ 
++/*
++ * 0334b4 T2 per-endpoint bring-up.  Offsets follow the vendor strides
++ * (mtu3 mtu3_core.c MU3D_EP_TXCR/RXCR + USB_QMU_TQ/RQ macros); the FIFO
++ * segment comes from the documented allocation table.  Default EP1 keeps
++ * the exact register values the verified path writes.
++ */
++void
++ruby_ep_tx_offsets(uint32_t ep)
++{
++    if (ep < 1u)
++        ep = 1u;
++    if (ep > 8u)
++        ep = 8u;
++    ruby_tx_csr0_off = 0x0110 + (ep - 1u) * 0x10;
++    ruby_tx_csr1_off = 0x0114 + (ep - 1u) * 0x10;
++    ruby_tx_csr2_off = 0x0118 + (ep - 1u) * 0x10;
++    ruby_tq_csr_off = 0x0510 + (ep - 1u) * 0x10;
++    ruby_tq_sar_off = 0x0514 + (ep - 1u) * 0x10;
++    ruby_tq_cpr_off = 0x0518 + (ep - 1u) * 0x10;
++    ruby_tq_hiar_off = 0x0484 + (ep - 1u) * 4;
++    ruby_tx_done_bit = 1u << ep;
++}
++
++void
++ruby_ep_rx_offsets(uint32_t ep)
++{
++    if (ep < 1u)
++        ep = 1u;
++    if (ep > 8u)
++        ep = 8u;
++    ruby_rx_csr0_off = 0x0210 + (ep - 1u) * 0x10;
++    ruby_rx_csr1_off = 0x0214 + (ep - 1u) * 0x10;
++    ruby_rx_csr2_off = 0x0218 + (ep - 1u) * 0x10;
++    ruby_rq_csr_off = 0x0610 + (ep - 1u) * 0x10;
++    ruby_rq_sar_off = 0x0614 + (ep - 1u) * 0x10;
++    ruby_rq_cpr_off = 0x0618 + (ep - 1u) * 0x10;
++    ruby_rq_hiar_off = 0x04c4 + (ep - 1u) * 4;
++}
++
++int
++ruby_ep_tx_begin(vm_offset_t mac, uint32_t ep, uint32_t fifo_addr)
++{
++    uint32_t i;
++
++    ruby_ep_tx_offsets(ep);
++    ruby_tx_ring_select(ep);
++    if (!ruby_ring_pa)
++        return 5;
++    if (ruby_ep2_qmu_stop(mac) != 0)
++        return 5;
++    ruby_ep2_ring_reset(mac);
++    for (i = 0; i < ruby_tx_ring_n; i++) {
++        if (!ruby_txq_active->gpd_pa[i])
++            return 5;
++    }
++    ruby_wr32(mac, TX1CSR0_OFF, 512u | TX_DMAREQEN);
++    ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
++    ruby_wr32(mac, TX1CSR2_OFF, (9u << 16) | (fifo_addr >> 4));
++    ruby_wr32(mac, QCR0_OFF, 1u);
++    /* vendor mtu3_qmu_start: TX-ZLP per endpoint. */
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << ep));
++    ruby_wr32(mac, TQERRIESR0_OFF,
++        ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
++    ruby_wr32(mac, TQSAR1_OFF, (uint32_t)ruby_ring_pa);
++    ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((ruby_ring_pa >> 32) & 0xfu));
++    ruby_tx_queue_started = 0;
++    ruby_ep_ready = 1;
++    return 0;
++}
++
++int
++ruby_ep_tx_send(vm_offset_t mac, uint32_t ep, const void *buf, uint64_t pa,
++    uint32_t len, uint32_t ms)
++{
++    struct ruby_ep_txq *q = ruby_txq_active;
++    uint8_t *g = q->ring_cpu;
++    uint64_t np = q->gpd_pa[1u % ruby_tx_ring_n];
++    uint32_t t0, cpr0;
++
++    if (!pa || ((pa & 0x3fu) != 0) || len == 0 || len > 512u)
++        return 22;
++    if (!ruby_dma_uc)
++        ruby_dc_civac(buf, (len + 63u) & ~63u);
++    ruby_gpd_clear(0);
++    g[0] = 1u << 7;
++    g[2] = (uint8_t)(((pa >> 32) & 0xfu) | (((np >> 32) & 0xfu) << 4));
++    *(volatile uint32_t *)(g + 4) = (uint32_t)np;
++    *(volatile uint32_t *)(g + 8) = (uint32_t)pa;
++    *(volatile uint16_t *)(g + 12) = (uint16_t)(len & 0xfffu);
++    /* 0249: the CS engine is off; the checksum byte stays zero. */
++    g[1] = 0;
++    if (!ruby_dma_uc)
++        ruby_dc_civac(q->clean_cpu, RUBY_GPD_RING_SZ);
++    ruby_dma_mb();
++
++    cpr0 = ruby_rd32(mac, TQCPR1_OFF);
++    q->enq = 1;
++    q->inflight = 1;
++    ruby_tx_queue_started = 1;
++    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
++        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++
++    t0 = ruby_ms;
++    while ((uint32_t)(ruby_ms - t0) < ms) {
++        /*
++         * With rubyqmuirq=1 the 1 ms QMU path may consume and clear the
++         * QISAR0 done bit first, so a moved consumer pointer is the
++         * primary completion evidence; the done bit stays as fallback.
++         */
++        if (ruby_rd32(mac, TQCPR1_OFF) != cpr0) {
++            q->deq = 1;
++            q->inflight = 0;
++            return 0;
++        }
++        if (ruby_rd32(mac, QISAR0_OFF) & (1u << ep)) {
++            ruby_wr32(mac, QISAR0_OFF, 1u << ep);
++            q->deq = 1;
++            q->inflight = 0;
++            return 0;
++        }
++        if (ruby_rd32(mac, TQERRIR0_OFF))
++            return 5;
++        delay(1000);
++    }
++    return 110;
++}
++
++int
++ruby_ep_rx_begin(vm_offset_t mac, uint32_t ep, uint32_t fifo_addr)
++{
++    uint32_t i;
++
++    ruby_ep_rx_offsets(ep);
++    ruby_rx_ring_select(ep);
++    if (ruby_ep2_rx_qmu_stop(mac) != 0)
++        return 5;
++    ruby_rx_ready = 0;
++    if (!ruby_rx_ring_setup())
++        return 5;
++    for (i = 0; i < ruby_rx_ring_n; i++) {
++        ruby_rx_buf_pa[i] = ruby_dma_pa(ruby_rx_buf[i]);
++        ruby_rx_gpd_pa[i] = ruby_rxq_active->uc ?
++            ruby_rx_ring_pa + i * 16u :
++            ruby_dma_pa(ruby_rx_gpd_ring_cpu + i * 16);
++        if (!ruby_rx_buf_pa[i] || !ruby_rx_gpd_pa[i])
++            return 5;
++    }
++    ruby_wr32(mac, RX1CSR0_OFF, 512u | RX_DMAREQEN);
++    ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(ruby_rx_slot) | RX_TYPE(0));
++    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(fifo_addr >> 4) |
++        RX_FIFOSEGSIZE(9));
++    ruby_wr32(mac, QCR0_OFF, 1u);
++    /* vendor mtu3_qmu_start: RX-COZ ("move on ZLP") per endpoint. */
++    ruby_wr32(mac, QCR3_OFF,
++        (ruby_rd32(mac, QCR3_OFF) & ~0x00000007u) | 0x00060000u |
++        (1u << (16u + ep)));
++    ruby_wr32(mac, RQERRIESR0_OFF, ruby_rd32(mac, RQERRIESR0_OFF) |
++        QMU_RX_LEN_ERR_BIT | QMU_RX_CS_ERR_BIT);
++    ruby_wr32(mac, RQERRIESR1_OFF, ruby_rd32(mac, RQERRIESR1_OFF) |
++        QMU_RX_ZLP_ERR_BIT);
++    ruby_wr32(mac, RQSAR1_OFF, (uint32_t)ruby_rx_ring_pa);
++    ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((ruby_rx_ring_pa >> 32) & 0xfu));
++    ruby_rx_deq = 0;
++    for (i = 0; i < ruby_rx_ring_n; i++)
++        ruby_ep2_rx_arm(i);
++    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
++    ruby_rx_ready = 1;
++    return 0;
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ruby_usb_qmu.h b/bsd/dev/ruby_usb_qmu.h
+--- a/bsd/dev/ruby_usb_qmu.h
++++ b/bsd/dev/ruby_usb_qmu.h
+@@ -36,38 +36,61 @@
+ extern uint32_t ruby_tq_hiar_off;
+ #define TQCPR1_OFF      ruby_tq_cpr_off
+ #define TQHIAR1_OFF     ruby_tq_hiar_off
+-#define RQCPR1_OFF      0x0618
+-#define RQHIAR1_OFF     0x04c4
+-
+-/* TX GPD ring state shared with the producer/drain paths. */
++#define RQCPR1_OFF      ruby_rq_cpr_off
++#define RQHIAR1_OFF     ruby_rq_hiar_off
++
++/* TX GPD ring storage: ruby_gpd_ring is the slot-1 buffer; every other
++ * endpoint uses its own static ring from ruby_gpd_ring_slots. */
+ extern uint8_t ruby_gpd_ring[];
+-extern uint8_t *ruby_gpd_ring_cpu;
++extern uint8_t ruby_gpd_ring_slots[][RUBY_GPD_RING_SZ];
+ extern vm_offset_t ruby_gpd_ring_uc;
+ extern void *ruby_gpd_ring_alloc;
+ extern int ruby_dma_uc;
+-extern uint64_t ruby_gpd_pa[];
+-extern uint64_t ruby_ring_pa;
+-extern uint32_t ruby_gpd_enq;
+-extern uint32_t ruby_gpd_deq;
+-extern uint32_t ruby_inflight;
+-
+-#define RUBY_GPD_SLOT(i) (ruby_gpd_ring_cpu + (i) * RUBY_GPD_STRIDE)
++
++/*
++ * 0334a/0334b: per-endpoint TX ring state and storage.  Slot 1 keeps the
++ * verified BSS/UC ring; other slots get an independent static ring so
++ * switching ruby_tx_ep_sel cannot inherit cursor or GPD contents.
++ * Payload buffers remain shared; only one TX ring is active at a time.
++ */
++#define RUBY_TXQ_MAX 16
++struct ruby_ep_txq {
++    uint32_t enq;
++    uint32_t deq;
++    uint32_t inflight;
++    uint8_t *ring_cpu;
++    uint8_t *clean_cpu;
++    uint64_t ring_pa;
++    uint64_t gpd_pa[RUBY_GPD_NUM];
++};
++extern struct ruby_ep_txq ruby_txqs[RUBY_TXQ_MAX];
++extern struct ruby_ep_txq *ruby_txq_active;
++void ruby_tx_ring_select(uint32_t sel);
++
++#define ruby_gpd_enq   (ruby_txq_active->enq)
++#define ruby_gpd_deq   (ruby_txq_active->deq)
++#define ruby_inflight  (ruby_txq_active->inflight)
++#define ruby_gpd_ring_cpu (ruby_txq_active->ring_cpu)
++#define ruby_ring_pa      (ruby_txq_active->ring_pa)
++#define ruby_gpd_pa       (ruby_txq_active->gpd_pa)
++
++#define RUBY_GPD_SLOT(i) (ruby_txq_active->ring_cpu + (i) * RUBY_GPD_STRIDE)
+ 
+ /* ---- EP2 bulk IN QMU log pipe (0094b) ---- */
+ #define TX1CSR0_OFF     ruby_tx_csr0_off
+ #define TX1CSR1_OFF     ruby_tx_csr1_off
+ #define TX1CSR2_OFF     ruby_tx_csr2_off
+-#define RX1CSR0_OFF     0x0210
+-#define RX1CSR1_OFF     0x0214
+-#define RX1CSR2_OFF     0x0218
++#define RX1CSR0_OFF     ruby_rx_csr0_off
++#define RX1CSR1_OFF     ruby_rx_csr1_off
++#define RX1CSR2_OFF     ruby_rx_csr2_off
+ #define QCR0_OFF        0x0400
+ #define QCR1_OFF        0x0404
+ #define QCR2_OFF        0x0408
+ #define QCR3_OFF        0x040c
+ #define TQCSR1_OFF      ruby_tq_csr_off
+ #define TQSAR1_OFF      ruby_tq_sar_off
+-#define RQCSR1_OFF      0x0610
+-#define RQSAR1_OFF      0x0614
++#define RQCSR1_OFF      ruby_rq_csr_off
++#define RQSAR1_OFF      ruby_rq_sar_off
+ #define TQERRIESR0_OFF  0x0788
+ #define RQERRIR0_OFF    0x07c0
+ #define RQERRIESR0_OFF  0x07c8
+@@ -144,7 +167,6 @@
+ #define EP_RST_TX1_BIT      (1u << 17)  /* 0211: EP_RST(in, 1) = BIT(16) << 1 */
+ 
+ /* RX GPD ring and payload state shared with the drain path. */
+-extern uint8_t *ruby_rx_gpd_ring_cpu;
+ extern vm_offset_t ruby_rx_gpd_ring_uc;
+ extern int ruby_rx_uc;
+ extern volatile uint32_t ruby_rx_snap_seq;
+@@ -152,11 +174,38 @@
+ extern volatile uint32_t ruby_rx_snap_cur;
+ extern uint32_t ruby_rx_snap_bad;
+ extern uint8_t ruby_rx_buf[RUBY_RX_GPD_NUM][RUBY_RX_BUF_MAX];
+-extern uint64_t ruby_rx_gpd_pa[RUBY_RX_GPD_NUM];
+ extern uint64_t ruby_rx_buf_pa[RUBY_RX_GPD_NUM];
+-extern uint64_t ruby_rx_ring_pa;
+-extern uint32_t ruby_rx_deq;
++
++/*
++ * 0334b3: per-endpoint RX ring storage.  Slot 1 keeps the verified
++ * BSS/UC page; non-default slots use an independent cached alt page.
++ * Payload buffers remain shared; only one RX ring is active at a time.
++ */
++struct ruby_ep_rxq {
++    uint32_t deq;
++    int uc;
++    uint8_t *ring_cpu;
++    uint8_t *clean_cpu;
++    uint64_t ring_pa;
++    uint64_t gpd_pa[RUBY_RX_GPD_NUM];
++};
++extern struct ruby_ep_rxq ruby_rxqs[RUBY_TXQ_MAX];
++extern struct ruby_ep_rxq *ruby_rxq_active;
++void ruby_rx_ring_select(uint32_t sel);
++#define ruby_rx_deq        (ruby_rxq_active->deq)
++#define ruby_rx_gpd_ring_cpu (ruby_rxq_active->ring_cpu)
++#define ruby_rx_ring_pa    (ruby_rxq_active->ring_pa)
++#define ruby_rx_gpd_pa     (ruby_rxq_active->gpd_pa)
+ extern volatile uint32_t ruby_rx_ready;
++
++/* 0334b2: RX/TX CSR and queue offsets, set by the selected endpoint. */
++extern uint32_t ruby_rx_csr0_off;
++extern uint32_t ruby_rx_csr1_off;
++extern uint32_t ruby_rx_csr2_off;
++extern uint32_t ruby_rq_csr_off;
++extern uint32_t ruby_rq_sar_off;
++extern uint32_t ruby_rq_cpr_off;
++extern uint32_t ruby_rq_hiar_off;
+ 
+ uint64_t ruby_dma_pa(const void *va);
+ void ruby_dc_civac(const void *va, uint32_t len);
+@@ -250,6 +299,19 @@
+ void ruby_ep2_dump_gpd(vm_offset_t mac, uint32_t first, uint32_t last);
+ void ruby_tx_halt_clear(vm_offset_t mac);
+ 
++/*
++ * 0334b4: per-endpoint bring-up for the T2 batch.  ruby_ep_tx_begin()
++ * selects the slot ring, resets it and programs the vendor CSR/QMU set
++ * from the allocated FIFO segment; ruby_ep_tx_send() publishes one GPD
++ * of <= 512 B and waits for the endpoint's QISAR0 done bit.
++ */
++void ruby_ep_tx_offsets(uint32_t ep);
++void ruby_ep_rx_offsets(uint32_t ep);
++int  ruby_ep_tx_begin(vm_offset_t mac, uint32_t ep, uint32_t fifo_addr);
++int  ruby_ep_tx_send(vm_offset_t mac, uint32_t ep, const void *buf,
++    uint64_t pa, uint32_t len, uint32_t ms);
++int  ruby_ep_rx_begin(vm_offset_t mac, uint32_t ep, uint32_t fifo_addr);
++
+ #define RUBY_TX_SRC_PUSH    0u
+ #define RUBY_TX_SRC_STALL   1u
+ #define RUBY_TX_SRC_RECOVER 2u

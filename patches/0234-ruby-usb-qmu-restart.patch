@@ -1,0 +1,66 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 46542e6..3e15b78 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2132,12 +2132,27 @@ ruby_gpd_clear(uint32_t i)
+ }
+ 
+ /* P9 timeout recovery: nudge the queue, never flush the endpoint FIFO. */
++/*
++ * 0234: an idle QMU queue can leave ACTIVE=0 after it runs dry; RESUME
++ * alone does not bring it back on this silicon (console round: tq=0 rq=0
++ * while echo bytes were queued).  Restart from the oldest unprocessed GPD.
++ */
++static void
++ruby_ep2_tx_start(vm_offset_t mac)
++{
++    uint64_t pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
++
++    ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
++    ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
++    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++}
++
+ static void
+ ruby_ep2_resume(vm_offset_t mac)
+ {
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++        ruby_ep2_tx_start(mac);
+     ruby_busy_ticks = 0;
+ }
+ 
+@@ -3093,7 +3108,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+     ruby_dma_mb();              /* descriptor clean complete before doorbell */
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++        ruby_ep2_tx_start(mac);
+ 
+     if (ruby_rd32(mac, QISAR0_OFF) & RUBY_QMU_TX_DONE) {
+         ruby_ep2_q0_after_kick++;
+@@ -3412,12 +3427,22 @@ ruby_ep2_rx_cur_slot(vm_offset_t mac)
+     return (uint32_t)((cur_pa - ruby_rx_ring_pa) / 16u);
+ }
+ 
++static void
++ruby_ep2_rx_start(vm_offset_t mac)
++{
++    uint64_t pa = ruby_rx_gpd_pa[ruby_rx_deq % RUBY_RX_GPD_NUM];
++
++    ruby_wr32(mac, RQSAR1_OFF, (uint32_t)pa);
++    ruby_wr32(mac, RQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
++    ruby_wr32(mac, RQCSR1_OFF, QMU_Q_START);
++}
++
+ static void
+ ruby_ep2_rx_resume(vm_offset_t mac)
+ {
+     ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
+     if (!(ruby_rd32(mac, RQCSR1_OFF) & QMU_Q_ACTIVE))
+-        ruby_wr32(mac, RQCSR1_OFF, QMU_Q_RESUME);
++        ruby_ep2_rx_start(mac);
+ }
+ 
+ static int

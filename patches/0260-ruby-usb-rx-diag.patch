@@ -1,0 +1,135 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index e85f7f6..cf102c7 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2089,6 +2089,10 @@ static uint32_t ruby_rx_bypasses;
+ static uint32_t ruby_rx_ext_bad;
+ static uint32_t ruby_rx_zlp_err;
+ static uint32_t ruby_rx_stall_seen;
++/* 0260: RX stall diagnostics (read-only snapshot requests). */
++static uint32_t ruby_rx_last_pkt_ms;
++static uint32_t ruby_rx_diag_ms;
++static volatile uint32_t ruby_rx_diag_req;
+ 
+ #define RUBY_FNV_OFFSET 2166136261u
+ 
+@@ -3876,6 +3880,7 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+             len = RUBY_RX_BUF;
+ 
+         ruby_rx_packets++;
++        ruby_rx_last_pkt_ms = ruby_ms;   /* 0260: stall window anchor */
+         ruby_rx_bytes += len;
+         if (len == 0)
+             ruby_rx_zlp++;
+@@ -3914,6 +3919,41 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+         ruby_ep2_push_log(mac);
+ }
+ 
++/* 0260: read-only RX stall snapshot.  No queue mutation. */
++static void
++ruby_ep2_rx_stall_dump(vm_offset_t mac)
++{
++    uint32_t i, cur, hwo = 0;
++
++    if (!ruby_rx_ready)
++        return;
++    ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++    for (i = 0; i < RUBY_RX_GPD_NUM; i++)
++        if (ruby_rx_gpd_ring[i * 16] & 1u)
++            hwo |= 1u << i;
++    cur = ruby_ep2_rx_cur_slot(mac);
++    printf("RUBY USB RXSTALL pk=%u done=%u deq=%u cur=%02x rqcsr=%08x "
++        "rqhiar=%08x rqcpr=%08x hwo=%04x q0=%08x q1=%08x zlperr=%u "
++        "rxerr=%u sentstall=%u\n",
++        ruby_rx_packets, ruby_rx_done_events, ruby_rx_deq, cur,
++        ruby_rd32(mac, RQCSR1_OFF), ruby_rd32(mac, RQHIAR1_OFF),
++        ruby_rd32(mac, RQCPR1_OFF), hwo,
++        ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
++        ruby_rx_zlp_err, ruby_rx_errors, ruby_rx_stall_seen);
++    if (cur == 0xffu)
++        return;
++    for (i = 0; i < 4; i++) {
++        uint32_t sl = (cur + i) % RUBY_RX_GPD_NUM;
++        volatile uint8_t *g = ruby_rx_gpd_ring + sl * 16;
++
++        printf("RUBY USB RXGPD[%02u] f=%02x c=%02x len=%u next=%08x "
++            "buf=%08x\n", sl, g[0], g[1],
++            (uint32_t)(*(volatile uint16_t *)(g + 12)),
++            *(volatile uint32_t *)(g + 4),
++            *(volatile uint32_t *)(g + 8));
++    }
++}
++
+ static void
+ ruby_ep2_rx_poll(vm_offset_t mac)
+ {
+@@ -3930,6 +3970,7 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+         QISAR1_RXQ_LENERR | QISAR1_RXQ_ZLPERR);
+     if (rxq) {
+         ruby_wr32(mac, QISAR1_OFF, rxq);
++        ruby_ep2_rx_stall_dump(mac);    /* 0260: snapshot before recover */
+         if (rxq & QISAR1_RXQ_EMPTY)
+             ruby_rx_empty++;
+         if (rxq & (QISAR1_RXQ_CSERR | QISAR1_RXQ_LENERR)) {
+@@ -4260,6 +4301,10 @@ ruby_usb_irq_service_work(void)
+         ruby_qmu_diag_req = 0;
+         ruby_ep2_stall_dump(mac);
+     }
++    if (ruby_rx_diag_req) {
++        ruby_rx_diag_req = 0;
++        ruby_ep2_rx_stall_dump(mac);
++    }
+ }
+ 
+ /* 0197 G7: primary-pass occupancy, sampled by the C++ irqAction wrapper. */
+@@ -4289,6 +4334,15 @@ ruby_ep2_tick_assist(vm_offset_t mac)
+         ruby_qmu_diag_req = 1;
+         ruby_usb_irq_kick();
+     }
++    /* 0260: 1 Hz RX snapshot for 5 s after the last received packet. */
++    if (ruby_rx_ready && ruby_rx_packets > 0 &&
++        (uint32_t)(ruby_ms - ruby_rx_last_pkt_ms) < 5000 &&
++        (uint32_t)(ruby_ms - ruby_rx_last_pkt_ms) >= 1000 &&
++        (uint32_t)(ruby_ms - ruby_rx_diag_ms) >= 1000) {
++        ruby_rx_diag_ms = ruby_ms;
++        ruby_rx_diag_req = 1;
++        ruby_usb_irq_kick();
++    }
+     if (ruby_ep_ready && ruby_ep2log_on &&
+         sweet_log_position() != ruby_log_pos) {
+         ruby_qmu_push_req = 1;
+@@ -4389,6 +4443,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+     uint32_t otg = ruby_rd32(ippc, IPPC_OTG_STS_OFF);
+     uint32_t mac2 = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
+     uint32_t seq = ruby_battery_poll_seq();
++    uint32_t rxcur = 0xffu, rxhwo = 0, ri;
+     int ext = ruby_battery_last_external();
+ 
+     if (primed && ruby_ms < next_ms && otg == last_otg &&
+@@ -4405,9 +4460,18 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         seq, ext, ruby_ep0_setups, ruby_cfg_seen, ruby_bus_resets,
+         ruby_rd32(mac, FRAME_NUM_OFF) & 0x7ffu,
+         ruby_enum_assist_until != 0 && ruby_ms < ruby_enum_assist_until);
++    /* 0260: read-only RX stall snapshot folded into the 5 s line. */
++    if (ruby_rx_ready) {
++        ruby_dc_civac(ruby_rx_gpd_ring, sizeof(ruby_rx_gpd_ring));
++        for (ri = 0; ri < RUBY_RX_GPD_NUM; ri++)
++            if (ruby_rx_gpd_ring[ri * 16] & 1u)
++                rxhwo |= 1u << ri;
++        rxcur = ruby_ep2_rx_cur_slot(mac);
++    }
+     /* 0233: data-plane state for the ACM echo debug round. */
+     printf("RUBY USB ACM: ready=%u rx=%u echo=%u/%u drop=%u enq=%u deq=%u "
+         "inf=%u rxpk=%u rxdone=%u rxerr=%u zlp=%u "
++        "rxcur=%02x rxdeq=%02x rqhiar=%08x rxhwo=%04x "
+         "txr=%u rxr=%u act=%u kick=%u rxact=%u rxkick=%u "
+         "tqerr=%08x tcsr=%08x qcr0=%08x qcr1=%08x qcr2=%08x qcr3=%08x "
+         "tqcpr=%08x rqcpr=%08x "
+@@ -4418,6 +4482,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+         ruby_rx_packets, ruby_rx_done_events,
+         ruby_rx_errors, ruby_rx_zlp_err,
++        rxcur, ruby_rx_deq, ruby_rd32(mac, RQHIAR1_OFF), rxhwo,
+         ruby_ep2_tx_restarts, ruby_ep2_rx_restarts,
+         ruby_ep2_active_seen, ruby_ep2_tx_kicks,
+         ruby_ep2_rx_active_seen, ruby_ep2_rx_kicks,

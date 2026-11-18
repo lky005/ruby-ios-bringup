@@ -1,0 +1,60 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 14e4f1b..f953fff 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2066,6 +2066,7 @@ static uint32_t ruby_bulk_dup_b;
+ static int ruby_txreset_en;
+ static int ruby_txeprst_en;
+ static int ruby_txdeq_en;
++static int ruby_noise_en;   /* 0272: 0185 noise quirk, default off */
+ static uint32_t ruby_tx_reset_cnt;
+ static uint32_t ruby_tx_reset_ms;
+ static uint32_t ruby_tx_reset_tries;
+@@ -5674,6 +5675,7 @@ ruby_usb_probe(void)
+     int txreset = 0;
+     int txeprst = 0;
+     int txdeq = 0;
++    int noise = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5698,6 +5700,8 @@ ruby_usb_probe(void)
+     ruby_txreset_en = (txreset == 1);
+     ruby_txeprst_en = (txeprst == 1);
+     ruby_txdeq_en = (txdeq == 1);
++    PE_parse_boot_argn("ruby_noise", &noise, sizeof(noise));
++    ruby_noise_en = (noise == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5706,6 +5710,8 @@ ruby_usb_probe(void)
+         ruby_rx_skip_en);
+     printf("RUBY USB: 0269 tx reset=%d ep=%d deq=%d\n",
+         ruby_txreset_en, ruby_txeprst_en, ruby_txdeq_en);
++    printf("RUBY USB: 0272 noise quirk=%d (ruby_noise=1 restores 0185)\n",
++        ruby_noise_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+@@ -5832,12 +5838,16 @@ ruby_usb_probe(void)
+         (v | (1u << 5)) & ~((1u << 6) | (1u << 0)));
+     ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 0);
+ 
+-    /* 0185: vendor ruby quirk: keep transfers going under line noise. */
++    /* 0185/0272: the vendor runs with bit21 clear; the old noise quirk
++     * stays behind ruby_noise=1 for A/B. */
+     v = ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA);
+-    ruby_wr32(mac, BUS_PERFORMANCE - MTU3_PA,
+-        v | BUS_PERF_NOISE_STILL_TR);
+-    printf("RUBY USB: bus perf 0x%08x\n",
+-        ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA));
++    if (ruby_noise_en)
++        v |= BUS_PERF_NOISE_STILL_TR;
++    else
++        v &= ~BUS_PERF_NOISE_STILL_TR;
++    ruby_wr32(mac, BUS_PERFORMANCE - MTU3_PA, v);
++    printf("RUBY USB: bus perf 0x%08x (noise=%d)\n",
++        ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA), ruby_noise_en);
+ 
+     v = ruby_rd32(ippc, 0x50);
+     ruby_wr32(ippc, 0x50, v & ~U2_OTG_SEL);

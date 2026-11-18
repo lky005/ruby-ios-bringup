@@ -1,0 +1,62 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -557,6 +557,11 @@
+  * Vendor mode (default): single vendor 0xFF interface (0223 shape).
+  */
+ static int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
++/* 0226: real ACM state — EP0 OUT 7B stored, GET returns stored value */
++static uint8_t ruby_acm_line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
++static uint16_t ruby_acm_control_state;
++static uint32_t ruby_acm_line_coding_set;
++static uint32_t ruby_acm_control_state_set;
+ static uint32_t
+ ruby_build_cfg_desc(uint8_t *out)
+ {
+@@ -1574,15 +1579,34 @@
+     else if (st[0] == 0x40 && st[1] == 0x2e)
+         ruby_ep0_vendor_cmd(mac, t, value, index, len);
+     else if (st[0] == 0x21 && st[1] == 0x20) {
+-        /* CDC SET_LINE_CODING: 7 bytes incoming -> ZLP ACK (length validated by host) */
++        /* 0226 CDC SET_LINE_CODING: read 7B from EP0 FIFO, validate, store, DATAEND/ACK */
++        uint8_t lc[7];
++        ruby_ep0_read_fifo_bytes(mac, lc, 7);
++        {
++            uint32_t baud = lc[0] | (lc[1] << 8) | (lc[2] << 16) | (lc[3] << 24);
++            uint8_t fmt = lc[4], par = lc[5], bits = lc[6];
++            int ok = (baud == 300 || baud == 1200 || baud == 2400 || baud == 4800 ||
++                      baud == 9600 || baud == 38400 || baud == 57600 || baud == 115200) &&
++                     fmt <= 2 && par <= 2 &&
++                     (bits == 5 || bits == 6 || bits == 7 || bits == 8 || bits == 16);
++            if (ok) {
++                ruby_acm_line_coding[0]=lc[0]; ruby_acm_line_coding[1]=lc[1];
++                ruby_acm_line_coding[2]=lc[2]; ruby_acm_line_coding[3]=lc[3];
++                ruby_acm_line_coding[4]=lc[4]; ruby_acm_line_coding[5]=lc[5];
++                ruby_acm_line_coding[6]=lc[6];
++                ruby_acm_line_coding_set++;
++            }
++        }
++        /* EP0 FIFO cleared by read; send DATAEND via ACK */
+         ruby_ep0_ack(mac, t, key, len);
+     } else if (st[0] == 0x21 && st[1] == 0x22) {
+-        /* CDC SET_CONTROL_LINE_STATE: DTR/RTS -> ZLP ACK */
++        /* CDC SET_CONTROL_LINE_STATE: store DTR/RTS from wValue */
++        ruby_acm_control_state = (uint16_t)value;
++        ruby_acm_control_state_set++;
+         ruby_ep0_ack(mac, t, key, len);
+     } else if (st[0] == 0xA1 && st[1] == 0x21) {
+-        /* CDC GET_LINE_CODING: 115200 8N1 (7B) */
+-        static const uint8_t lc[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
+-        ruby_ep0_send(mac, t, key, lc, 7, len);
++        /* CDC GET_LINE_CODING: return stored 7B (not constant) */
++        ruby_ep0_send(mac, t, key, ruby_acm_line_coding, 7, len);
+     } else if (st[0] == 0xA1 && st[1] == 0x20) {
+         ruby_ep0_stall(mac, t, key, len);
+     } else
+@@ -4849,6 +4873,7 @@
+         pad);
+     printf("RUBY USB: EP2 ring dma %s (rubydmauc=%d)\n",
+         ruby_dma_uc ? "uncached" : "cached", dmauc);
++    printf("RUBY USB: ACM=%d lc=%u lc_set=%u cs_set=%u\n", ruby_acm_cmd, ruby_acm_line_coding[0] | (ruby_acm_line_coding[1] << 8) | (ruby_acm_line_coding[2] << 16) | (ruby_acm_line_coding[3] << 24), ruby_acm_line_coding_set, ruby_acm_control_state_set);
+     if (ruby_irq_mode)
+         printf("RUBY USB: QMU irq %s (rubyqmuirq=%d)\n",
+             ruby_qmu_irq_mode ? "on" : "off", qmuirq);

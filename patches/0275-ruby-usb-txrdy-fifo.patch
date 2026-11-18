@@ -1,0 +1,37 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 4b146ce..825066c 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2611,11 +2611,12 @@ ruby_tx_recover_poll(vm_offset_t mac)
+ {
+     uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+ 
+-    /* 0274: vendor ZLP-recovery style.  A FIFO holding data with
++    /* 0274/0275: vendor ZLP-recovery style.  A FIFO holding data with
+      * TXPKTRDY clear never reaches the bus (console: tcsr=22000200,
+-     * FIFOFULL, TXPKTRDY=0); stop the QMU DMA, assert TXPKTRDY, resume
+-     * the DMA.  Bounded to one kick per 200 ms. */
+-    if (ruby_txrdy_en && ruby_inflight != 0 &&
++     * FIFOFULL, TXPKTRDY=0).  The QMU consumes the GPDs immediately
++     * (inflight 0), so gate on the FIFO state only: stop the QMU DMA,
++     * assert TXPKTRDY, resume the DMA, at most once per 200 ms. */
++    if (ruby_txrdy_en &&
+         (tx0 & (1u << 25)) && !(tx0 & (1u << 16)) &&
+         (uint32_t)(ruby_ms - ruby_tx_progress_ms) >= 200 &&
+         (uint32_t)(ruby_ms - ruby_txrdy_ms) >= 200) {
+@@ -4927,6 +4928,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         "inf=%u rxpk=%u rxdone=%u rxerr=%u zlp=%u "
+         "rxcur=%02x rxdeq=%02x rqhiar=%08x rxhwo=%04x "
+         "txr=%u rxr=%u act=%u kick=%u rxact=%u rxkick=%u "
++        "txk=%u txrdy=%u "
+         "tqerr=%08x tcsr=%08x qcr0=%08x qcr1=%08x qcr2=%08x qcr3=%08x "
+         "tqcpr=%08x rqcpr=%08x "
+         "speed=%u tx1csr1=%08x tx1csr2=%08x rx1csr1=%08x rx1csr2=%08x "
+@@ -4940,6 +4942,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_ep2_tx_restarts, ruby_ep2_rx_restarts,
+         ruby_ep2_active_seen, ruby_ep2_tx_kicks,
+         ruby_ep2_rx_active_seen, ruby_ep2_rx_kicks,
++        ruby_txkick_starts, ruby_txrdy_kicks,
+         ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, TX1CSR0_OFF),
+         ruby_rd32(mac, QCR0_OFF), ruby_rd32(mac, QCR1_OFF),
+         ruby_rd32(mac, QCR2_OFF),

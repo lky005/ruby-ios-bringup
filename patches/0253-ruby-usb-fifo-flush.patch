@@ -1,0 +1,55 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 34640de..82275da 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2860,6 +2860,22 @@ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
+  * readback still claims ACTIVE (console: act == kick, inf stuck), so a
+  * pseudo-active queue has to be stopped and rebuilt.
+  */
++/* 0253: vendor stop() flushes the TX FIFO and waits FIFOEMPTY; an
++ * aborted transfer leaves bytes in the FIFO and later GPDs are dropped. */
++static void
++ruby_ep2_tx_fifo_drain(vm_offset_t mac)
++{
++    uint32_t i;
++
++    ruby_wr32(mac, TX1CSR0_OFF,
++        ruby_rd32(mac, TX1CSR0_OFF) | TX_FLUSHFIFO);
++    for (i = 0; i < 100; i++) {
++        if (ruby_rd32(mac, TX1CSR0_OFF) & TX_FIFOEMPTY)
++            break;
++        delay(10);
++    }
++}
++
+ static void
+ ruby_ep2_tx_force(vm_offset_t mac)
+ {
+@@ -2885,6 +2901,7 @@ ruby_ep2_tx_force(vm_offset_t mac)
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
++    ruby_ep2_tx_fifo_drain(mac);
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
+     ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+@@ -2894,11 +2911,18 @@ ruby_ep2_tx_force(vm_offset_t mac)
+ static void
+ ruby_ep2_tx_watchdog(vm_offset_t mac)
+ {
+-    if (ruby_inflight == 0)
++    /* 0253: an idle software ring can still hold bytes in the TX FIFO. */
++    if (ruby_inflight == 0 &&
++        (ruby_rd32(mac, TX1CSR0_OFF) & TX_FIFOEMPTY))
+         return;
+     if ((uint32_t)(ruby_ms - ruby_ep2_tx_kick_ms) < 20)
+         return;
+     ruby_ep2_tx_kick_ms = ruby_ms;
++    if (ruby_inflight == 0) {
++        ruby_ep2_tx_fifo_drain(mac);
++        ruby_ep2_tx_kicks++;
++        return;
++    }
+     if (ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)
+         ruby_ep2_active_seen++;
+     if ((uint32_t)(ruby_ms - ruby_ep2_tx_force_ms) >= 100) {

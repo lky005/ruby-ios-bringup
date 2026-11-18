@@ -1,0 +1,49 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1833,7 +1833,7 @@
+         ruby_wr32(mac, TX1CSR0_OFF,
+             (csr & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+ 
+-    ruby_wr32(mac, QISAR0_OFF, 1u << 2);      /* TX EP2 done */
++    ruby_wr32(mac, QISAR0_OFF, RUBY_QMU_TX_DONE); /* 0212: TX EP1 done */
+     ruby_wr32(mac, QISAR1_OFF,
+         QISAR1_TXQ_EMPTY | QISAR1_TXQ_CSERR | QISAR1_TXQ_LENERR);
+ 
+@@ -2331,7 +2331,7 @@
+         ruby_ep2_drain_freed_total += freed;
+         if (freed > ruby_ep2_drain_max)
+             ruby_ep2_drain_max = freed;
+-        if (!(q0 & (1u << 2)))
++        if (!(q0 & RUBY_QMU_TX_DONE))
+             ruby_ep2_drain_noq0++;
+     }
+ 
+@@ -2382,8 +2382,8 @@
+     err = ruby_rd32(mac, TQERRIR0_OFF);
+     ruby_q1_last = q1;
+     ruby_err_last = err;
+-    if (q0 & (1u << 2)) {
+-        ruby_wr32(mac, QISAR0_OFF, 1u << 2);
++    if (q0 & RUBY_QMU_TX_DONE) {
++        ruby_wr32(mac, QISAR0_OFF, RUBY_QMU_TX_DONE);
+         /* First TX done means the host has issued an IN token. */
+         ruby_ep2_host_seen = 1;
+         ruby_ep2_last_in_ms = ruby_ms;
+@@ -2396,7 +2396,7 @@
+     if (freed)
+         ruby_busy_ticks = 0;
+ 
+-    if (q0 & (1u << 2)) {
++    if (q0 & RUBY_QMU_TX_DONE) {
+         uint32_t cur;
+ 
+         if (freed == 0 && ruby_inflight > 0) {
+@@ -2618,7 +2618,7 @@
+     if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+         ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+ 
+-    if (ruby_rd32(mac, QISAR0_OFF) & (1u << 2)) {
++    if (ruby_rd32(mac, QISAR0_OFF) & RUBY_QMU_TX_DONE) {
+         ruby_ep2_q0_after_kick++;
+         if (ruby_ep2_q0_after_kick <= 3 ||
+             (ruby_ep2_q0_after_kick & 0x3f) == 0)

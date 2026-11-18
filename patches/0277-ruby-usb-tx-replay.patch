@@ -1,0 +1,144 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 3f7bc75..fa35420 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2072,6 +2072,11 @@ static uint32_t ruby_txkick_starts;
+ static int ruby_txrdy_en = 1;   /* 0274: TXPKTRDY kick on a full FIFO */
+ static uint32_t ruby_txrdy_kicks;
+ static uint32_t ruby_txrdy_ms;
++static int ruby_txreplay_en = 1;    /* 0277: replay preserved TX payloads */
++static uint8_t ruby_tx_replay_buf[4096];
++static uint32_t ruby_tx_replay_len;
++static uint32_t ruby_tx_replay_bytes;
++static uint32_t ruby_tx_replay_drops;
+ static uint32_t ruby_tx_reset_cnt;
+ static uint32_t ruby_tx_reset_ms;
+ static uint32_t ruby_tx_reset_tries;
+@@ -2590,6 +2595,42 @@ ruby_ep2_tx_rebuild(vm_offset_t mac)
+         ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
+ }
+ 
++/*
++ * 0277: the destructive rebuild clears the ring, but the payload of GPDs
++ * the QMU has not fetched is still in the slot buffers.  Copy it out
++ * first so it can be replayed; bytes already inside the jammed FIFO
++ * cannot be read back and stay lost (bounded by the FIFO depth).
++ */
++static void
++ruby_tx_replay_snapshot(vm_offset_t mac)
++{
++    uint32_t i, off = 0;
++    (void)mac;
++
++    ruby_tx_replay_len = 0;
++    if (!ruby_dma_uc)
++        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++    for (i = ruby_gpd_deq; i != ruby_gpd_enq; i = (i + 1u) % RUBY_GPD_NUM) {
++        uint32_t len = *(volatile uint16_t *)(RUBY_GPD_SLOT(i) + 12) &
++            0xfffu;
++        uint32_t n;
++
++        if (!len)
++            continue;
++        n = len;
++        if (n > (uint32_t)sizeof(ruby_tx_replay_buf) - off) {
++            ruby_tx_replay_drops +=
++                n - ((uint32_t)sizeof(ruby_tx_replay_buf) - off);
++            n = (uint32_t)sizeof(ruby_tx_replay_buf) - off;
++        }
++        if (!n)
++            break;
++        memcpy(ruby_tx_replay_buf + off, ruby_bulk_buf[i], n);
++        off += n;
++    }
++    ruby_tx_replay_len = off;
++}
++
+ static void
+ ruby_tx_reset_fire(vm_offset_t mac)
+ {
+@@ -2603,6 +2644,8 @@ ruby_tx_reset_fire(vm_offset_t mac)
+         ruby_gpd_deq, ruby_gpd_enq, ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, TQCSR1_OFF),
+         ruby_txreset_en, ruby_txeprst_en, ruby_txdeq_en);
++    if (ruby_txreplay_en && ruby_acm_cmd)
++        ruby_tx_replay_snapshot(mac);
+     ruby_ep2_tx_rebuild(mac);
+ }
+ 
+@@ -3404,6 +3447,24 @@ ruby_ep2_push_log(vm_offset_t mac)
+         tqcsr = ruby_rd32(mac, TQCSR1_OFF);
+         if (ruby_acm_cmd) {
+             /* 0231: raw echo bytes, no log frame header or padding. */
++            if (ruby_tx_replay_len > 0) {
++                /* 0277: re-send payloads preserved across a TX rebuild. */
++                n = ruby_tx_replay_len;
++                if (n > RUBY_BULK_BYTES)
++                    n = RUBY_BULK_BYTES;
++                memcpy(buf, ruby_tx_replay_buf, n);
++                memmove(ruby_tx_replay_buf, ruby_tx_replay_buf + n,
++                    ruby_tx_replay_len - n);
++                ruby_tx_replay_len -= n;
++                ruby_tx_replay_bytes += n;
++                if (ruby_acm_echo_dbg_tx < 12) {
++                    ruby_acm_echo_dbg_tx++;
++                    printf("RUBY USB ACM TXREP n=%u left=%u bytes=%u\n",
++                        n, ruby_tx_replay_len, ruby_tx_replay_bytes);
++                }
++                actual_len = n;
++                frames = 1;
++            } else {
+             n = ruby_acm_echo_dequeue(buf, RUBY_BULK_BYTES);
+             if (!n)
+                 break;
+@@ -3414,6 +3475,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+             }
+             actual_len = n;
+             frames = 1;
++            }
+         } else {
+             for (fi = 0; fi < RUBY_BULK_FRAMES; fi++) {
+                 uint8_t *fbuf = buf + fi * RUBY_LOG_CHUNK;
+@@ -4929,7 +4991,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         "inf=%u rxpk=%u rxdone=%u rxerr=%u zlp=%u "
+         "rxcur=%02x rxdeq=%02x rqhiar=%08x rxhwo=%04x "
+         "txr=%u rxr=%u act=%u kick=%u rxact=%u rxkick=%u "
+-        "txk=%u txrdy=%u "
++        "txk=%u txrdy=%u txrep=%u "
+         "tqerr=%08x tcsr=%08x qcr0=%08x qcr1=%08x qcr2=%08x qcr3=%08x "
+         "tqcpr=%08x rqcpr=%08x "
+         "speed=%u tx1csr1=%08x tx1csr2=%08x rx1csr1=%08x rx1csr2=%08x "
+@@ -4943,7 +5005,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_ep2_tx_restarts, ruby_ep2_rx_restarts,
+         ruby_ep2_active_seen, ruby_ep2_tx_kicks,
+         ruby_ep2_rx_active_seen, ruby_ep2_rx_kicks,
+-        ruby_txkick_starts, ruby_txrdy_kicks,
++        ruby_txkick_starts, ruby_txrdy_kicks, ruby_tx_replay_bytes,
+         ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, TX1CSR0_OFF),
+         ruby_rd32(mac, QCR0_OFF), ruby_rd32(mac, QCR1_OFF),
+         ruby_rd32(mac, QCR2_OFF),
+@@ -5718,6 +5780,7 @@ ruby_usb_probe(void)
+     int noise = 0;
+     int txkick = 1;
+     int txrdy = 1;
++    int txreplay = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5748,6 +5811,8 @@ ruby_usb_probe(void)
+     ruby_txkick_en = (txkick == 1);
+     PE_parse_boot_argn("ruby_txrdy", &txrdy, sizeof(txrdy));
+     ruby_txrdy_en = (txrdy == 1);
++    PE_parse_boot_argn("ruby_txreplay", &txreplay, sizeof(txreplay));
++    ruby_txreplay_en = (txreplay == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5760,6 +5825,7 @@ ruby_usb_probe(void)
+         ruby_noise_en);
+     printf("RUBY USB: 0273 tx kick start=%d\n", ruby_txkick_en);
+     printf("RUBY USB: 0274 txrdy kick=%d\n", ruby_txrdy_en);
++    printf("RUBY USB: 0277 tx replay=%d\n", ruby_txreplay_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

@@ -1,0 +1,785 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index c857f5e..e8873d2 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -116,6 +116,7 @@ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
+ bsd/dev/ruby_usb.c			standard
+ bsd/dev/ruby_usb_ep.c			standard
++bsd/dev/ruby_usb_qmu.c			standard
+ bsd/dev/ruby_usb_io.c			standard
+ bsd/dev/ruby_tty.c			standard
+ bsd/dev/ruby_raw.c			standard
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 788757c..3aa9a89 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -262,6 +262,7 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ #define RUBY_EP0_TXBUF 512
+ #include "ruby_usb_io.h"
+ #include "ruby_usb_ep.h"
++#include "ruby_usb_qmu.h"
+ 
+ /* 0147: one command line, both on EP2 OUT and EP0 0x2E. */
+ #define RUBY_CMD_MAX 64
+@@ -483,8 +484,6 @@ static uint32_t ruby_tx_csr1_off = 0x0114;
+ static uint32_t ruby_tx_csr2_off = 0x0118;
+ static uint32_t ruby_tq_csr_off = 0x0510;
+ static uint32_t ruby_tq_sar_off = 0x0514;
+-static uint32_t ruby_tq_cpr_off = 0x0518;
+-static uint32_t ruby_tq_hiar_off = 0x0484;
+ static uint32_t ruby_tx_done_bit = 1u << 1;
+ /* 0304: independent config-order / queue-lifecycle / doorbell axes.
+  * Defaults reproduce the 0303 behaviour. */
+@@ -1892,12 +1891,8 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define QCR3_OFF        0x040c
+ #define TQCSR1_OFF      ruby_tq_csr_off
+ #define TQSAR1_OFF      ruby_tq_sar_off
+-#define TQCPR1_OFF      ruby_tq_cpr_off
+-#define TQHIAR1_OFF     ruby_tq_hiar_off
+ #define RQCSR1_OFF      0x0610
+ #define RQSAR1_OFF      0x0614
+-#define RQCPR1_OFF      0x0618
+-#define RQHIAR1_OFF     0x04c4
+ #define TQERRIESR0_OFF  0x0788
+ #define RQERRIR0_OFF    0x07c0
+ #define RQERRIESR0_OFF  0x07c8
+@@ -1972,34 +1967,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define EP_RST_RX2_BIT      (1u << 2)
+ #define EP_RST_RX1_BIT      (1u << 1)  /* EP1 OUT = our RX endpoint */
+ #define EP_RST_TX1_BIT      (1u << 17)  /* 0211: EP_RST(in, 1) = BIT(16) << 1 */
+-#define RUBY_RX_GPD_NUM 16
+-#define RUBY_RX_GPD_RING_SZ (RUBY_RX_GPD_NUM * 16u)
+-#define RUBY_RX_PAGE_SIZE (1u << 14)   /* PAGE_MAX_SHIFT: exclusive 16 KB page */
+-/*
+- * 0299: RX GPD declared buflen is runtime (ruby_rx_buf_size, boot-arg
+- * ruby_rxbuf, default 512 = wMaxPacketSize).  docs/113 pinned the
+- * full-packet choke: a transfer of exactly one MPS (no short tail) never
+- * settles a 16384-declared GPD (neither short-packet nor bytes==buflen),
+- * so the RX queue wedged into the undocumented rqcsr=0x00078500 state.
+- * 512 makes the full-packet case settle on the buflen condition; larger
+- * transfers span GPDs at 512-byte granularity ? vendor mtu3_qmu.c:300
+- * declares buflen = req->length the same way.  Physical slot storage
+- * stays 16 KiB so ruby_rxbuf=16384 restores the 0261 behaviour for A/B.
+- */
+-#define RUBY_RX_BUF_MAX 16384
+ static uint32_t ruby_rx_buf_size = 512;
+-#define RUBY_GPD_NUM    64
+-#define RUBY_GPD_DESC   16
+-/*
+- * 0201: vendor mtu3 uses a contiguous 16-byte GPD ring (docs/82 item 3,
+- * never tested until now).  The ring stays 64 slots = 1 KB, inside one
+- * page; four GPDs now share a 64-byte cache line, which is safe because
+- * the same-line neighbours of a published GPD are always in the free
+- * region (64 slots - 16 in-flight) and the whole-ring clean+read at the
+- * top of the push path re-loads those lines from DRAM first.
+- */
+-#define RUBY_GPD_STRIDE 16
+-#define RUBY_GPD_RING_SZ (RUBY_GPD_NUM * RUBY_GPD_STRIDE)
+ #define RUBY_EP2_MAX_INFLIGHT 16u
+ #define RUBY_EP2_STUCK_TICKS  2000u     /* ~2 s at 1 ms */
+ #define RUBY_EP2_IN_IDLE_MS   5000u     /* no host IN this long = not stuck */
+@@ -2028,7 +1996,6 @@ static uint32_t ruby_rx_buf_size = 512;
+ 
+ #define RUBY_BULK_FRAMES 32u
+ #define RUBY_BULK_BYTES  (RUBY_LOG_CHUNK * RUBY_BULK_FRAMES)
+-static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+ /*
+  * 0206B: single-GPD isolation.  One 16 KB cached payload per GPD;
+  * the QMU slices it into MPS packets.  MAC/PHY/QCR0 stay at 0204b
+@@ -2037,8 +2004,6 @@ static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
+ static uint8_t *ruby_bulk_buf[RUBY_GPD_NUM];
+ static uint64_t ruby_bulk_pa[RUBY_GPD_NUM];
+ static void *ruby_bulk_base;
+-static uint32_t ruby_gpd_enq;
+-static uint32_t ruby_gpd_deq;
+ /* 0242: restart counters (declared before their first use in resume). */
+ static uint32_t ruby_ep2_tx_restarts;
+ static uint32_t ruby_ep2_rx_restarts;
+@@ -2095,8 +2060,8 @@ static int ruby_lpmmask_en = 1;     /* 0287: vendor LPM mask / U3 exit parity */
+ static int ruby_txslot = 2;         /* 0288: EP1 IN TX FIFO slot (A/B) */
+ /* 0309: throughput axes; defaults reproduce the 0308 steady state. */
+ static uint32_t ruby_tx_gpd_len = RUBY_TX_MPS;    /* TX bytes per GPD */
+-static uint32_t ruby_tx_ring_n = RUBY_GPD_NUM;    /* TX GPD slots in use */
+-static uint32_t ruby_rx_ring_n = RUBY_RX_GPD_NUM; /* RX GPD slots in use */
++uint32_t ruby_tx_ring_n = RUBY_GPD_NUM;    /* TX GPD slots in use */
++uint32_t ruby_rx_ring_n = RUBY_RX_GPD_NUM; /* RX GPD slots in use */
+ static uint32_t ruby_inflight_max = RUBY_EP2_MAX_INFLIGHT;
+ static uint32_t ruby_rx_slot = 2;
+ static int ruby_txfifo_en = 1;      /* 0289: per-GPD TX FIFO trace */
+@@ -2151,24 +2116,9 @@ static uint32_t ruby_rx_skip_cnt;
+ /* 0255: read-only stall diagnostics. */
+ static volatile uint32_t ruby_qmu_diag_req;
+ static uint32_t ruby_qmu_diag_ms;
+-static uint32_t ruby_inflight;
+ static uint32_t ruby_ep2_host_seen;
+ static volatile uint32_t ruby_tx_busy;
+ static uint64_t ruby_log_pos;
+-static uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
+-static uint64_t ruby_ring_pa;
+-/*
+- * 0204: CPU access to the TX GPD ring.  With rubydmauc=1 the ring
+- * is also mapped uncached; every CPU access then goes through that
+- * alias.  The cached BSS alias is touched once, to clean it before
+- * the switch, and never afterwards.  The QMU always uses
+- * ruby_ring_pa.
+- */
+-static uint8_t *ruby_gpd_ring_cpu = ruby_gpd_ring;
+-static vm_offset_t ruby_gpd_ring_uc;
+-static void *ruby_gpd_ring_alloc;
+-static int ruby_dma_uc;
+-#define RUBY_GPD_SLOT(i) (ruby_gpd_ring_cpu + (i) * RUBY_GPD_STRIDE)
+ static uint32_t ruby_push_seq;
+ static uint32_t ruby_push_tries;
+ static uint32_t ruby_stall_seen;
+@@ -2204,38 +2154,6 @@ static uint32_t ruby_tx_empty_strikes;    /* # of empty-after-bulk */
+ static uint32_t ruby_tx_empty_last_ms;    /* ruby_ms at last empty */
+ static uint32_t ruby_txdone_count;
+ 
+-/*
+- * 0310: RX GPD ring ownership.  ruby_rxuc=1 (default) maps the ring's own
+- * PAGE_MAX_SHIFT (16 KB) BSS page as an uncached alias: the page holds the
+- * 256 B ring plus explicit padding and nothing else, so the QMU keeps the
+- * same physical ring address that worked in 0309 while the CPU never
+- * shares a cache line with DMA.  ruby_rxuc=0 keeps the cached BSS path for
+- * A/B.  All ring mutations and the diagnostic snapshot are workloop-only.
+- * The 1ms EP0 thread reads the seqlock snapshot (and the read-only
+- * 0xC0/0x23/24 diag may read the ring); it never mutates the ring or runs
+- * dc civac on the UC alias.
+- */
+-struct ruby_rx_gpd_page {
+-    uint8_t ring[RUBY_RX_GPD_RING_SZ];
+-    uint8_t pad[RUBY_RX_PAGE_SIZE - RUBY_RX_GPD_RING_SZ];
+-};
+-static struct ruby_rx_gpd_page ruby_rx_gpd_store
+-    __attribute__((aligned(RUBY_RX_PAGE_SIZE)));
+-#define ruby_rx_gpd_ring (ruby_rx_gpd_store.ring)
+-static uint8_t *ruby_rx_gpd_ring_cpu = ruby_rx_gpd_ring;
+-static vm_offset_t ruby_rx_gpd_ring_uc;
+-static int ruby_rx_uc = 1;
+-static volatile uint32_t ruby_rx_snap_seq;
+-static volatile uint32_t ruby_rx_snap_hwo;
+-static volatile uint32_t ruby_rx_snap_cur;
+-static uint32_t ruby_rx_snap_bad;
+-static uint8_t ruby_rx_buf[RUBY_RX_GPD_NUM][RUBY_RX_BUF_MAX]
+-    __attribute__((aligned(4096)));
+-static uint64_t ruby_rx_gpd_pa[RUBY_RX_GPD_NUM];
+-static uint64_t ruby_rx_buf_pa[RUBY_RX_GPD_NUM];
+-static uint64_t ruby_rx_ring_pa;
+-static uint32_t ruby_rx_deq;
+-static volatile uint32_t ruby_rx_ready;
+ static uint32_t ruby_rx_packets;
+ static uint32_t ruby_rx_bytes;
+ static uint32_t ruby_rx_zlp;
+@@ -2257,70 +2175,13 @@ static volatile uint32_t ruby_rx_diag_req;
+ static uint32_t ruby_rx_choke_latched;
+ static volatile uint32_t ruby_rx_stall_dump_req;
+ 
+-#define RUBY_FNV_OFFSET 2166136261u
+-
+-extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+-extern pmap_t kernel_pmap;
++/* Transitional: sweet log producer used by the log pipe below. */
+ extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+ extern uint64_t sweet_log_position(void);
+ 
+-static uint64_t
+-ruby_dma_pa(const void *va)
+-{
+-    ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)(uintptr_t)va);
+-
+-    if (!pn)
+-        return 0;
+-    return ptoa_64(pn) + ((uintptr_t)va & (PAGE_SIZE - 1));
+-}
+-
+-static void
+-ruby_dc_civac(const void *va, uint32_t len)
+-{
+-    uintptr_t p = (uintptr_t)va & ~(uintptr_t)63;
+-    uintptr_t e = (uintptr_t)va + len;
+-
+-    /* 0263: stores must reach the cache before the clean/invalidate. */
+-    __asm__ volatile("dsb sy" ::: "memory");
+-    for (; p < e; p += 64)
+-        __asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
+-    __asm__ volatile("dsb sy" ::: "memory");
+-}
+-
+-static inline void
+-ruby_dma_wmb(void)
+-{
+-    __asm__ volatile("dmb sy" ::: "memory");
+-}
++#define RUBY_FNV_OFFSET 2166136261u
+ 
+-static inline void
+-ruby_dma_mb(void)
+-{
+-    __asm__ volatile("dsb sy" ::: "memory");
+-}
+ 
+-static uint8_t
+-ruby_gpd_chksum(uint8_t *g)
+-{
+-    /*
+-     * 0248: vendor GPD trace (mtu3_prepare_gpd) shows dw0 byte1 = 0x00 on
+-     * every working ep3in/ep2out descriptor: this kernel leaves the
+-     * checksum byte zero (validation off).  A non-zero byte made the QMU
+-     * silently skip descriptors after the first one.  Match the vendor.
+-     */
+-    (void)g;
+-    return 0;
+-}
+-
+-static void
+-ruby_gpd_clear(uint32_t i)
+-{
+-    uint8_t *g = RUBY_GPD_SLOT(i);
+-    uint32_t k;
+-
+-    for (k = 0; k < RUBY_GPD_DESC; k++)
+-        g[k] = 0;
+-}
+ 
+ /* P9 timeout recovery: nudge the queue, never flush the endpoint FIFO. */
+ /*
+@@ -3057,52 +2918,6 @@ ruby_ep2_config(vm_offset_t mac)
+     ruby_ep2_push_log(mac);
+ }
+ 
+-static uint32_t
+-ruby_ep2_cur_slot(vm_offset_t mac)
+-{
+-    uint64_t cur_pa;
+-    uint32_t txcpr, txhiar;
+-
+-    txcpr = ruby_rd32(mac, TQCPR1_OFF);
+-    txhiar = ruby_rd32(mac, TQHIAR1_OFF);
+-    cur_pa = ((uint64_t)((txhiar >> 8) & 0xfu) << 32) | txcpr;
+-    if (cur_pa < ruby_ring_pa ||
+-        cur_pa >= ruby_ring_pa + RUBY_GPD_RING_SZ)
+-        return 0xffu;
+-    return (uint32_t)((cur_pa - ruby_ring_pa) / RUBY_GPD_STRIDE);
+-}
+-
+-static uint64_t
+-ruby_ep2_hwo_bits(void)
+-{
+-    uint64_t hwo = 0;
+-    uint32_t i;
+-
+-    if (!ruby_dma_uc)
+-        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+-    for (i = 0; i < ruby_tx_ring_n; i++)
+-        if (RUBY_GPD_SLOT(i)[0] & 1u)
+-            hwo |= 1ull << i;
+-    return hwo;
+-}
+-
+-static uint32_t
+-ruby_popcount64(uint64_t v)
+-{
+-    uint32_t n = 0;
+-
+-    while (v) {
+-        n += (uint32_t)(v & 1u);
+-        v >>= 1;
+-    }
+-    return n;
+-}
+-
+-static uint32_t
+-ruby_ep2_ring_dist(uint32_t from, uint32_t to)
+-{
+-    return (to + ruby_tx_ring_n - from) % ruby_tx_ring_n;
+-}
+ 
+ /*
+  * Walk completed GPDs up to the QMU's current pointer, like the vendor
+@@ -3948,46 +3763,6 @@ ruby_ep2_rx_arm(uint32_t i)
+     }
+ }
+ 
+-/*
+- * 0310: set up the RX GPD ring.  ruby_rxuc=1 maps the ring's own 4 KB BSS
+- * page as an uncached alias (same physical address as 0309; the ring
+- * occupies the first 256 B and the tail is padding).  ruby_rxuc=0 keeps
+- * the legacy cached BSS ring for zero-build A/B.  Returns 1 when
+- * ruby_rx_ring_pa is valid.
+- */
+-static int
+-ruby_rx_ring_setup(void)
+-{
+-    if (ruby_rx_gpd_ring_uc) {
+-        ruby_rx_gpd_ring_cpu = (uint8_t *)ruby_rx_gpd_ring_uc;
+-        return ruby_rx_ring_pa != 0;
+-    }
+-    if (ruby_rx_uc) {
+-        uint64_t pa = ruby_dma_pa(ruby_rx_gpd_ring);
+-        vm_offset_t uc;
+-
+-        if (pa && !(pa & (PAGE_SIZE - 1u))) {
+-            /* clean the cached alias of the whole exclusive page */
+-            ruby_dc_civac(&ruby_rx_gpd_store, RUBY_RX_PAGE_SIZE);
+-            uc = ml_io_map((vm_offset_t)pa, PAGE_SIZE);
+-            if (uc) {
+-                ruby_rx_ring_pa = pa;
+-                ruby_rx_gpd_ring_uc = uc;
+-                ruby_rx_gpd_ring_cpu = (uint8_t *)uc;
+-                return 1;
+-            }
+-            printf("RUBY USB: 0310 rx ring uc map failed pa=0x%llx\n",
+-                (unsigned long long)pa);
+-        } else {
+-            printf("RUBY USB: 0310 rx ring pa bad 0x%llx\n",
+-                (unsigned long long)pa);
+-        }
+-        ruby_rx_uc = 0;
+-    }
+-    ruby_rx_gpd_ring_cpu = ruby_rx_gpd_ring;
+-    ruby_rx_ring_pa = ruby_dma_pa(ruby_rx_gpd_ring);
+-    return ruby_rx_ring_pa != 0;
+-}
+ 
+ static void
+ ruby_ep2_rx_config(vm_offset_t mac)
+@@ -4163,46 +3938,6 @@ ruby_ep2_rx_halt_clear(vm_offset_t mac)
+     ruby_ep2_rx_reset(mac, 0);
+ }
+ 
+-static uint32_t
+-ruby_ep2_rx_cur_slot(vm_offset_t mac)
+-{
+-    uint64_t cur_pa;
+-    uint32_t rqcpr, rqhiar;
+-
+-    rqcpr = ruby_rd32(mac, RQCPR1_OFF);
+-    rqhiar = ruby_rd32(mac, RQHIAR1_OFF);
+-    cur_pa = ((uint64_t)((rqhiar >> 8) & 0xfu) << 32) | rqcpr;
+-    if (cur_pa < ruby_rx_ring_pa ||
+-        cur_pa >= ruby_rx_ring_pa + (ruby_rx_ring_n * 16u))
+-        return 0xffu;
+-    return (uint32_t)((cur_pa - ruby_rx_ring_pa) / 16u);
+-}
+-
+-/*
+- * 0310: RX ring snapshot, workloop-only.  The seqlock lets the 1ms
+- * heartbeat read HWO/cur without touching the ring; a stuck odd sequence
+- * is counted by the reader (ruby_rx_snap_bad).
+- */
+-static void
+-ruby_rx_snapshot_update(vm_offset_t mac)
+-{
+-    uint32_t i, hwo = 0, cur;
+-
+-    if (!ruby_rx_ready)
+-        return;
+-    if (!ruby_rx_uc)
+-        ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
+-    for (i = 0; i < ruby_rx_ring_n; i++)
+-        if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
+-            hwo |= 1u << i;
+-    cur = ruby_ep2_rx_cur_slot(mac);
+-    ruby_rx_snap_seq++;
+-    __asm__ volatile("dmb sy" ::: "memory");
+-    ruby_rx_snap_hwo = hwo;
+-    ruby_rx_snap_cur = cur;
+-    __asm__ volatile("dmb sy" ::: "memory");
+-    ruby_rx_snap_seq++;
+-}
+ 
+ static void
+ ruby_ep2_rx_resume(vm_offset_t mac)
+diff --git a/bsd/dev/ruby_usb_qmu.c b/bsd/dev/ruby_usb_qmu.c
+new file mode 100644
+index 0000000..42b9c2f
+--- /dev/null
++++ b/bsd/dev/ruby_usb_qmu.c
+@@ -0,0 +1,305 @@
++/*
++ * 0329a2: L3 QMU ring ownership moved verbatim from ruby_usb.c.
++ *
++ * The GPD ring pages, their physical addresses and uncached aliases, the
++ * cache/GPD primitives and the QMU slot math move here unchanged.  The
++ * producer/drain state machine and every register write stay in
++ * ruby_usb.c, so this slice is a pure relocation and the default build
++ * must keep the 0329a behaviour.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++
++#include "ruby_hal.h"
++#include "ruby_usb_qmu.h"
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++/* Boot-tunable ring sizes still defined in ruby_usb.c. */
++extern uint32_t ruby_tx_ring_n;
++extern uint32_t ruby_rx_ring_n;
++
++uint32_t ruby_tq_cpr_off = 0x0518;
++uint32_t ruby_tq_hiar_off = 0x0484;
++
++#define RUBY_RX_GPD_NUM 16
++#define RUBY_RX_GPD_RING_SZ (RUBY_RX_GPD_NUM * 16u)
++#define RUBY_RX_PAGE_SIZE (1u << 14)   /* PAGE_MAX_SHIFT: exclusive 16 KB page */
++
++/*
++ * 0299: RX GPD declared buflen is runtime (ruby_rx_buf_size, boot-arg
++ * ruby_rxbuf, default 512 = wMaxPacketSize).  docs/113 pinned the
++ * full-packet choke: a transfer of exactly one MPS (no short tail) never
++ * settles a 16384-declared GPD (neither short-packet nor bytes==buflen),
++ * so the RX queue wedged into the undocumented rqcsr=0x00078500 state.
++ * 512 makes the full-packet case settle on the buflen condition; larger
++ * transfers span GPDs at 512-byte granularity ? vendor mtu3_qmu.c:300
++ * declares buflen = req->length the same way.  Physical slot storage
++ * stays 16 KiB so ruby_rxbuf=16384 restores the 0261 behaviour for A/B.
++ */
++#define RUBY_RX_BUF_MAX 16384
++
++#define RUBY_GPD_NUM    64
++#define RUBY_GPD_DESC   16
++/*
++ * 0201: vendor mtu3 uses a contiguous 16-byte GPD ring (docs/82 item 3,
++ * never tested until now).  The ring stays 64 slots = 1 KB, inside one
++ * page; four GPDs now share a 64-byte cache line, which is safe because
++ * the same-line neighbours of a published GPD are always in the free
++ * region (64 slots - 16 in-flight) and the whole-ring clean+read at the
++ * top of the push path re-loads those lines from DRAM first.
++ */
++#define RUBY_GPD_STRIDE 16
++#define RUBY_GPD_RING_SZ (RUBY_GPD_NUM * RUBY_GPD_STRIDE)
++
++uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
++
++uint32_t ruby_gpd_enq;
++uint32_t ruby_gpd_deq;
++
++uint32_t ruby_inflight;
++
++uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
++uint64_t ruby_ring_pa;
++/*
++ * 0204: CPU access to the TX GPD ring.  With rubydmauc=1 the ring
++ * is also mapped uncached; every CPU access then goes through that
++ * alias.  The cached BSS alias is touched once, to clean it before
++ * the switch, and never afterwards.  The QMU always uses
++ * ruby_ring_pa.
++ */
++uint8_t *ruby_gpd_ring_cpu = ruby_gpd_ring;
++vm_offset_t ruby_gpd_ring_uc;
++void *ruby_gpd_ring_alloc;
++int ruby_dma_uc;
++#define RUBY_GPD_SLOT(i) (ruby_gpd_ring_cpu + (i) * RUBY_GPD_STRIDE)
++
++/*
++ * 0310: RX GPD ring ownership.  ruby_rxuc=1 (default) maps the ring's own
++ * PAGE_MAX_SHIFT (16 KB) BSS page as an uncached alias: the page holds the
++ * 256 B ring plus explicit padding and nothing else, so the QMU keeps the
++ * same physical ring address that worked in 0309 while the CPU never
++ * shares a cache line with DMA.  ruby_rxuc=0 keeps the cached BSS path for
++ * A/B.  All ring mutations and the diagnostic snapshot are workloop-only.
++ * The 1ms EP0 thread reads the seqlock snapshot (and the read-only
++ * 0xC0/0x23/24 diag may read the ring); it never mutates the ring or runs
++ * dc civac on the UC alias.
++ */
++struct ruby_rx_gpd_page {
++    uint8_t ring[RUBY_RX_GPD_RING_SZ];
++    uint8_t pad[RUBY_RX_PAGE_SIZE - RUBY_RX_GPD_RING_SZ];
++};
++static struct ruby_rx_gpd_page ruby_rx_gpd_store
++    __attribute__((aligned(RUBY_RX_PAGE_SIZE)));
++#define ruby_rx_gpd_ring (ruby_rx_gpd_store.ring)
++uint8_t *ruby_rx_gpd_ring_cpu = ruby_rx_gpd_ring;
++vm_offset_t ruby_rx_gpd_ring_uc;
++int ruby_rx_uc = 1;
++volatile uint32_t ruby_rx_snap_seq;
++volatile uint32_t ruby_rx_snap_hwo;
++volatile uint32_t ruby_rx_snap_cur;
++uint32_t ruby_rx_snap_bad;
++uint8_t ruby_rx_buf[RUBY_RX_GPD_NUM][RUBY_RX_BUF_MAX]
++    __attribute__((aligned(4096)));
++uint64_t ruby_rx_gpd_pa[RUBY_RX_GPD_NUM];
++uint64_t ruby_rx_buf_pa[RUBY_RX_GPD_NUM];
++uint64_t ruby_rx_ring_pa;
++uint32_t ruby_rx_deq;
++volatile uint32_t ruby_rx_ready;
++
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern pmap_t kernel_pmap;
++
++uint64_t
++ruby_dma_pa(const void *va)
++{
++    ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)(uintptr_t)va);
++
++    if (!pn)
++        return 0;
++    return ptoa_64(pn) + ((uintptr_t)va & (PAGE_SIZE - 1));
++}
++
++void
++ruby_dc_civac(const void *va, uint32_t len)
++{
++    uintptr_t p = (uintptr_t)va & ~(uintptr_t)63;
++    uintptr_t e = (uintptr_t)va + len;
++
++    /* 0263: stores must reach the cache before the clean/invalidate. */
++    __asm__ volatile("dsb sy" ::: "memory");
++    for (; p < e; p += 64)
++        __asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
++    __asm__ volatile("dsb sy" ::: "memory");
++}
++
++void
++ruby_dma_wmb(void)
++{
++    __asm__ volatile("dmb sy" ::: "memory");
++}
++
++void
++ruby_dma_mb(void)
++{
++    __asm__ volatile("dsb sy" ::: "memory");
++}
++
++uint8_t
++ruby_gpd_chksum(uint8_t *g)
++{
++    /*
++     * 0248: vendor GPD trace (mtu3_prepare_gpd) shows dw0 byte1 = 0x00 on
++     * every working ep3in/ep2out descriptor: this kernel leaves the
++     * checksum byte zero (validation off).  A non-zero byte made the QMU
++     * silently skip descriptors after the first one.  Match the vendor.
++     */
++    (void)g;
++    return 0;
++}
++
++void
++ruby_gpd_clear(uint32_t i)
++{
++    uint8_t *g = RUBY_GPD_SLOT(i);
++    uint32_t k;
++
++    for (k = 0; k < RUBY_GPD_DESC; k++)
++        g[k] = 0;
++}
++
++uint32_t
++ruby_ep2_cur_slot(vm_offset_t mac)
++{
++    uint64_t cur_pa;
++    uint32_t txcpr, txhiar;
++
++    txcpr = ruby_rd32(mac, TQCPR1_OFF);
++    txhiar = ruby_rd32(mac, TQHIAR1_OFF);
++    cur_pa = ((uint64_t)((txhiar >> 8) & 0xfu) << 32) | txcpr;
++    if (cur_pa < ruby_ring_pa ||
++        cur_pa >= ruby_ring_pa + RUBY_GPD_RING_SZ)
++        return 0xffu;
++    return (uint32_t)((cur_pa - ruby_ring_pa) / RUBY_GPD_STRIDE);
++}
++
++uint64_t
++ruby_ep2_hwo_bits(void)
++{
++    uint64_t hwo = 0;
++    uint32_t i;
++
++    if (!ruby_dma_uc)
++        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++    for (i = 0; i < ruby_tx_ring_n; i++)
++        if (RUBY_GPD_SLOT(i)[0] & 1u)
++            hwo |= 1ull << i;
++    return hwo;
++}
++
++uint32_t
++ruby_popcount64(uint64_t v)
++{
++    uint32_t n = 0;
++
++    while (v) {
++        n += (uint32_t)(v & 1u);
++        v >>= 1;
++    }
++    return n;
++}
++
++uint32_t
++ruby_ep2_ring_dist(uint32_t from, uint32_t to)
++{
++    return (to + ruby_tx_ring_n - from) % ruby_tx_ring_n;
++}
++
++/*
++ * 0310: set up the RX GPD ring.  ruby_rxuc=1 maps the ring's own 4 KB BSS
++ * page as an uncached alias (same physical address as 0309; the ring
++ * occupies the first 256 B and the tail is padding).  ruby_rxuc=0 keeps
++ * the legacy cached BSS ring for zero-build A/B.  Returns 1 when
++ * ruby_rx_ring_pa is valid.
++ */
++int
++ruby_rx_ring_setup(void)
++{
++    if (ruby_rx_gpd_ring_uc) {
++        ruby_rx_gpd_ring_cpu = (uint8_t *)ruby_rx_gpd_ring_uc;
++        return ruby_rx_ring_pa != 0;
++    }
++    if (ruby_rx_uc) {
++        uint64_t pa = ruby_dma_pa(ruby_rx_gpd_ring);
++        vm_offset_t uc;
++
++        if (pa && !(pa & (PAGE_SIZE - 1u))) {
++            /* clean the cached alias of the whole exclusive page */
++            ruby_dc_civac(&ruby_rx_gpd_store, RUBY_RX_PAGE_SIZE);
++            uc = ml_io_map((vm_offset_t)pa, PAGE_SIZE);
++            if (uc) {
++                ruby_rx_ring_pa = pa;
++                ruby_rx_gpd_ring_uc = uc;
++                ruby_rx_gpd_ring_cpu = (uint8_t *)uc;
++                return 1;
++            }
++            printf("RUBY USB: 0310 rx ring uc map failed pa=0x%llx\n",
++                (unsigned long long)pa);
++        } else {
++            printf("RUBY USB: 0310 rx ring pa bad 0x%llx\n",
++                (unsigned long long)pa);
++        }
++        ruby_rx_uc = 0;
++    }
++    ruby_rx_gpd_ring_cpu = ruby_rx_gpd_ring;
++    ruby_rx_ring_pa = ruby_dma_pa(ruby_rx_gpd_ring);
++    return ruby_rx_ring_pa != 0;
++}
++
++uint32_t
++ruby_ep2_rx_cur_slot(vm_offset_t mac)
++{
++    uint64_t cur_pa;
++    uint32_t rqcpr, rqhiar;
++
++    rqcpr = ruby_rd32(mac, RQCPR1_OFF);
++    rqhiar = ruby_rd32(mac, RQHIAR1_OFF);
++    cur_pa = ((uint64_t)((rqhiar >> 8) & 0xfu) << 32) | rqcpr;
++    if (cur_pa < ruby_rx_ring_pa ||
++        cur_pa >= ruby_rx_ring_pa + (ruby_rx_ring_n * 16u))
++        return 0xffu;
++    return (uint32_t)((cur_pa - ruby_rx_ring_pa) / 16u);
++}
++
++/*
++ * 0310: RX ring snapshot, workloop-only.  The seqlock lets the 1ms
++ * heartbeat read HWO/cur without touching the ring; a stuck odd sequence
++ * is counted by the reader (ruby_rx_snap_bad).
++ */
++void
++ruby_rx_snapshot_update(vm_offset_t mac)
++{
++    uint32_t i, hwo = 0, cur;
++
++    if (!ruby_rx_ready)
++        return;
++    if (!ruby_rx_uc)
++        ruby_dc_civac(ruby_rx_gpd_ring_cpu, RUBY_RX_GPD_RING_SZ);
++    for (i = 0; i < ruby_rx_ring_n; i++)
++        if (ruby_rx_gpd_ring_cpu[i * 16] & 1u)
++            hwo |= 1u << i;
++    cur = ruby_ep2_rx_cur_slot(mac);
++    ruby_rx_snap_seq++;
++    __asm__ volatile("dmb sy" ::: "memory");
++    ruby_rx_snap_hwo = hwo;
++    ruby_rx_snap_cur = cur;
++    __asm__ volatile("dmb sy" ::: "memory");
++    ruby_rx_snap_seq++;
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ruby_usb_qmu.h b/bsd/dev/ruby_usb_qmu.h
+new file mode 100644
+index 0000000..9639fec
+--- /dev/null
++++ b/bsd/dev/ruby_usb_qmu.h
+@@ -0,0 +1,74 @@
++#ifndef _RUBY_USB_QMU_H_
++#define _RUBY_USB_QMU_H_
++
++#include <mach/vm_types.h>
++#include <sys/types.h>
++
++/*
++ * 0329a2: L3 QMU ring ownership.  GPD ring pages, physical addresses,
++ * cache/GPD primitives and slot math move here verbatim from ruby_usb.c;
++ * the producer/drain state machine still lives in ruby_usb.c until the
++ * next slice, so this is a pure relocation.
++ */
++#define RUBY_GPD_NUM    64
++#define RUBY_GPD_DESC   16
++#define RUBY_GPD_STRIDE 16
++#define RUBY_GPD_RING_SZ (RUBY_GPD_NUM * RUBY_GPD_STRIDE)
++
++#define RUBY_RX_GPD_NUM 16
++#define RUBY_RX_GPD_RING_SZ (RUBY_RX_GPD_NUM * 16u)
++#define RUBY_RX_PAGE_SIZE (1u << 14)
++#define RUBY_RX_BUF_MAX 16384
++
++/* QMU TX/RX queue pointer registers read by the slot math. */
++extern uint32_t ruby_tq_cpr_off;
++extern uint32_t ruby_tq_hiar_off;
++#define TQCPR1_OFF      ruby_tq_cpr_off
++#define TQHIAR1_OFF     ruby_tq_hiar_off
++#define RQCPR1_OFF      0x0618
++#define RQHIAR1_OFF     0x04c4
++
++/* TX GPD ring state shared with the producer/drain paths. */
++extern uint8_t ruby_gpd_ring[];
++extern uint8_t *ruby_gpd_ring_cpu;
++extern vm_offset_t ruby_gpd_ring_uc;
++extern void *ruby_gpd_ring_alloc;
++extern int ruby_dma_uc;
++extern uint64_t ruby_gpd_pa[];
++extern uint64_t ruby_ring_pa;
++extern uint32_t ruby_gpd_enq;
++extern uint32_t ruby_gpd_deq;
++extern uint32_t ruby_inflight;
++
++#define RUBY_GPD_SLOT(i) (ruby_gpd_ring_cpu + (i) * RUBY_GPD_STRIDE)
++
++/* RX GPD ring and payload state shared with the drain path. */
++extern uint8_t *ruby_rx_gpd_ring_cpu;
++extern vm_offset_t ruby_rx_gpd_ring_uc;
++extern int ruby_rx_uc;
++extern volatile uint32_t ruby_rx_snap_seq;
++extern volatile uint32_t ruby_rx_snap_hwo;
++extern volatile uint32_t ruby_rx_snap_cur;
++extern uint32_t ruby_rx_snap_bad;
++extern uint8_t ruby_rx_buf[RUBY_RX_GPD_NUM][RUBY_RX_BUF_MAX];
++extern uint64_t ruby_rx_gpd_pa[RUBY_RX_GPD_NUM];
++extern uint64_t ruby_rx_buf_pa[RUBY_RX_GPD_NUM];
++extern uint64_t ruby_rx_ring_pa;
++extern uint32_t ruby_rx_deq;
++extern volatile uint32_t ruby_rx_ready;
++
++uint64_t ruby_dma_pa(const void *va);
++void ruby_dc_civac(const void *va, uint32_t len);
++void ruby_dma_wmb(void);
++void ruby_dma_mb(void);
++uint8_t ruby_gpd_chksum(uint8_t *g);
++void ruby_gpd_clear(uint32_t i);
++uint32_t ruby_ep2_cur_slot(vm_offset_t mac);
++uint64_t ruby_ep2_hwo_bits(void);
++uint32_t ruby_popcount64(uint64_t v);
++uint32_t ruby_ep2_ring_dist(uint32_t from, uint32_t to);
++int ruby_rx_ring_setup(void);
++uint32_t ruby_ep2_rx_cur_slot(vm_offset_t mac);
++void ruby_rx_snapshot_update(vm_offset_t mac);
++
++#endif /* _RUBY_USB_QMU_H_ */
+\ No newline at end of file

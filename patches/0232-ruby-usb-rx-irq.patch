@@ -1,0 +1,43 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index de96725..b29a4c4 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -3802,9 +3802,13 @@ ruby_ep2_rx_poll(vm_offset_t mac)
+     }
+ 
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+-    if (q0 & QMU_RX_DONE_BIT_EP1) {
+-        ruby_wr32(mac, QISAR0_OFF, QMU_RX_DONE_BIT_EP1);
+-        ruby_rx_done_events++;
++    /* 0232: EP1 RX done is BIT(16) << 1; acknowledge both done bits so the
++     * QMU group line drops even if EP2's bit was enabled by the old mask. */
++    if (q0 & (QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1)) {
++        ruby_wr32(mac, QISAR0_OFF,
++            q0 & (QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1));
++        if (q0 & QMU_RX_DONE_BIT_EP1)
++            ruby_rx_done_events++;
+     }
+ 
+     ruby_ep2_rx_drain(mac);
+@@ -4036,7 +4040,10 @@ ruby_usb_irq_pass(void)
+             ruby_qmu_push_req = 1;
+             routed = 1;
+         }
+-        if ((q0 & QMU_RX_DONE_BIT) || (q1 & RUBY_QMU_RXQ_EMPTY_BITS)) {
++        /* 0232: EP1 (0x01) RX done is BIT(16) << 1; the old mask only saw
++         * EP2's BIT(18), so rx drain never ran on EP1 data. */
++        if ((q0 & (QMU_RX_DONE_BIT | QMU_RX_DONE_BIT_EP1)) ||
++            (q1 & RUBY_QMU_RXQ_EMPTY_BITS)) {
+             ruby_qmu_rx_req = 1;
+             routed = 1;
+         }
+@@ -5166,7 +5173,8 @@ ruby_usb_probe(void)
+                 ruby_wr32(mac, LV1IESR_OFF,
+                     RUBY_IRQ_LV1_SET | LV1_QMU_INTR);
+                 ruby_wr32(mac, QIESR0_OFF,
+-                    RUBY_QMU_TX_DONE | QMU_RX_DONE_BIT);
++                    RUBY_QMU_TX_DONE | QMU_RX_DONE_BIT |
++                    QMU_RX_DONE_BIT_EP1);
+                 ruby_wr32(mac, QIESR1_OFF, RUBY_QMU_QIER1_SET);
+             } else {
+                 ruby_wr32(mac, LV1IESR_OFF, RUBY_IRQ_LV1_SET);

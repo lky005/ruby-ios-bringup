@@ -1,0 +1,224 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1663,7 +1663,12 @@
+ #define RUBY_PAD_TEXT   (RUBY_LOG_CHUNK - RUBY_HDR_LEN_V2)
+ #define RUBY_PAD_MAGIC  0x25u    /* 6-bit format tag, hdr[4] bits 15:10 */
+ 
+-static uint8_t ruby_gpd_ring[RUBY_GPD_RING_SZ] __attribute__((aligned(4096)));
++/*
++ * 0204: full-page array so the uncached alias (rubydmauc) never
++ * shares its page with any other BSS object.  RUBY_GPD_RING_SZ
++ * (1 KB) is still the logical ring size; the rest is padding.
++ */
++static uint8_t ruby_gpd_ring[PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
+ static uint8_t ruby_log_buf[RUBY_GPD_NUM][RUBY_LOG_CHUNK]
+     __attribute__((aligned(4096)));
+ static uint32_t ruby_gpd_enq;
+@@ -1676,6 +1681,17 @@
+ static uint64_t ruby_gpd_pa[RUBY_GPD_NUM];
+ static uint64_t ruby_ring_pa;
+ static uint64_t ruby_log_pa[RUBY_GPD_NUM];
++/*
++ * 0204: CPU access to the TX GPD ring.  With rubydmauc=1 the ring
++ * is also mapped uncached; every CPU access then goes through that
++ * alias.  The cached BSS alias is touched once, to clean it before
++ * the switch, and never afterwards.  The QMU always uses
++ * ruby_ring_pa.
++ */
++static uint8_t *ruby_gpd_ring_cpu = ruby_gpd_ring;
++static vm_offset_t ruby_gpd_ring_uc;
++static int ruby_dma_uc;
++#define RUBY_GPD_SLOT(i) (ruby_gpd_ring_cpu + (i) * RUBY_GPD_STRIDE)
+ static uint32_t ruby_push_seq;
+ static uint32_t ruby_push_tries;
+ static uint32_t ruby_stall_seen;
+@@ -1785,7 +1801,7 @@
+ static void
+ ruby_gpd_clear(uint32_t i)
+ {
+-    uint8_t *g = ruby_gpd_ring + i * RUBY_GPD_STRIDE;
++    uint8_t *g = RUBY_GPD_SLOT(i);
+     uint32_t k;
+ 
+     for (k = 0; k < RUBY_GPD_DESC; k++)
+@@ -1898,14 +1914,15 @@
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
+         uint64_t np = ruby_gpd_pa[nxt];
+-        uint8_t *g = ruby_gpd_ring + i * RUBY_GPD_STRIDE;
++        uint8_t *g = RUBY_GPD_SLOT(i);
+ 
+         ruby_gpd_clear(i);
+         g[2] = (uint8_t)(((np >> 32) & 0xfu) << 4);
+         g[3] = 0;
+         *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+     }
+-    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    if (!ruby_dma_uc)
++        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+ }
+ 
+ /*
+@@ -2069,6 +2086,38 @@
+     }
+ 
+     /*
++     * 0204: optional uncached alias for the 1 KB TX GPD ring.
++     * Clean the cached BSS alias once, then route every CPU access
++     * through the uncached mapping; the cached alias must not be
++     * touched afterwards.  Log payload buffers stay cached (dc
++     * civac) in this round; they are a separate variable.
++     */
++    if (ruby_dma_uc && !ruby_gpd_ring_uc) {
++        if (ruby_ring_pa & (PAGE_SIZE - 1u)) {
++            printf("RUBY USB: EP2 dma uc ring misaligned "
++                "pa=0x%llx\n", ruby_ring_pa);
++            ruby_dma_uc = 0;
++        } else {
++            ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
++            ruby_dma_mb();
++            ruby_gpd_ring_uc = ml_io_map(ruby_ring_pa, PAGE_SIZE);
++            if (!ruby_gpd_ring_uc) {
++                printf("RUBY USB: EP2 dma uc map failed "
++                    "pa=0x%llx\n", ruby_ring_pa);
++                ruby_dma_uc = 0;
++            } else {
++                ruby_gpd_ring_cpu =
++                    (uint8_t *)ruby_gpd_ring_uc;
++            }
++        }
++    }
++    printf("RUBY USB: EP2 ring %s pa=0x%llx cpu=0x%llx "
++        "(rubydmauc=%d)\n",
++        ruby_dma_uc ? "uncached" : "cached", ruby_ring_pa,
++        (unsigned long long)(uintptr_t)ruby_gpd_ring_cpu,
++        ruby_dma_uc);
++
++    /*
+      * 0131: reset EP2 IN before re-programming it.  EP_RST is the documented
+      * way to clear the U2 data toggle / U3 SeqN / flow-control state; the
+      * mainline and U-Boot deconfig paths pulse it, and without it a host
+@@ -2097,14 +2146,15 @@
+     for (i = 0; i < RUBY_GPD_NUM; i++) {
+         uint32_t nxt = (i + 1u) % RUBY_GPD_NUM;
+         uint64_t np = ruby_gpd_pa[nxt];
+-        uint8_t *g = ruby_gpd_ring + i * RUBY_GPD_STRIDE;
++        uint8_t *g = RUBY_GPD_SLOT(i);
+ 
+         ruby_gpd_clear(i);
+         g[2] = (uint8_t)(((np >> 32) & 0xfu) << 4);
+         g[3] = 0;
+         *(volatile uint32_t *)(g + 4) = (uint32_t)np;
+     }
+-    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    if (!ruby_dma_uc)
++        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     ruby_dma_mb();
+ 
+     ruby_wr32(mac, QCR0_OFF, ruby_rd32(mac, QCR0_OFF) | (1u << 2));
+@@ -2153,9 +2203,10 @@
+     uint64_t hwo = 0;
+     uint32_t i;
+ 
+-    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    if (!ruby_dma_uc)
++        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+-        if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
++        if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+     return hwo;
+ }
+@@ -2242,9 +2293,10 @@
+         ruby_inflight, (unsigned long long)ruby_ep2_hwo_bits(),
+         ruby_rd32(mac, TQCSR2_OFF), ruby_rd32(mac, TQCPR2_OFF),
+         ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, QISAR0_OFF));
+-    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    if (!ruby_dma_uc)
++        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     for (i = first; i <= last && i < RUBY_GPD_NUM; i++) {
+-        volatile uint8_t *g = ruby_gpd_ring + i * RUBY_GPD_STRIDE;
++        volatile uint8_t *g = RUBY_GPD_SLOT(i);
+ 
+         printf("RUBY USB: GPD[%02u] flag=%02x chk=%02x len=%u "
+             "next=%08x buf=%08x\n", i, g[0], g[1],
+@@ -2411,14 +2463,15 @@
+      * on instead of wrapping into a completed-but-not-drained GPD.  The
+      * vendor ring reserves one GPD for the same reason.
+      */
+-    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    if (!ruby_dma_uc)
++        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+-        if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
++        if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+ 
+     while (ruby_inflight < RUBY_EP2_MAX_INFLIGHT) {
+         enq = ruby_gpd_enq;
+-        g = ruby_gpd_ring + enq * RUBY_GPD_STRIDE;
++        g = RUBY_GPD_SLOT(enq);
+         if (hwo & (1ull << enq))
+             break;              /* safety net: never rewrite an owned slot */
+ 
+@@ -2480,10 +2533,15 @@
+         g[1] = ruby_gpd_chksum(g);
+         /* Make the payload and all descriptor fields visible before HWO. */
+         ruby_dc_civac(buf, RUBY_LOG_CHUNK);
+-        ruby_dc_civac(g, RUBY_GPD_DESC);
+-        ruby_dma_wmb();             /* fields before HWO */
++        if (!ruby_dma_uc) {
++            ruby_dc_civac(g, RUBY_GPD_DESC);
++            ruby_dma_wmb();         /* fields before HWO */
++        } else {
++            ruby_dma_mb();          /* uncached writes complete */
++        }
+         g[0] = (1u << 0) | (1u << 7);
+-        ruby_dc_civac(g, RUBY_GPD_DESC); /* publish HWO */
++        if (!ruby_dma_uc)
++            ruby_dc_civac(g, RUBY_GPD_DESC); /* publish HWO */
+         ruby_log_pos = pos;
+         ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+         ruby_inflight++;
+@@ -3713,9 +3771,10 @@
+     uint32_t txcpr, txhiar, i;
+     uint64_t hwo = 0;
+ 
+-    ruby_dc_civac(ruby_gpd_ring, sizeof(ruby_gpd_ring));
++    if (!ruby_dma_uc)
++        ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     for (i = 0; i < RUBY_GPD_NUM; i++)
+-        if (ruby_gpd_ring[i * RUBY_GPD_STRIDE] & 1u)
++        if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+     txcpr = ruby_rd32(mac, TQCPR2_OFF);
+     txhiar = ruby_rd32(mac, TQHIAR2_OFF);
+@@ -4367,6 +4426,7 @@
+     int usbirq = 0;
+     int qmuirq = 0;
+     int pad = 0;
++    int dmauc = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -4377,9 +4437,11 @@
+     PE_parse_boot_argn("rubyusbirq", &usbirq, sizeof(usbirq));
+     PE_parse_boot_argn("rubyqmuirq", &qmuirq, sizeof(qmuirq));
+     PE_parse_boot_argn("rubypad", &pad, sizeof(pad));
++    PE_parse_boot_argn("rubydmauc", &dmauc, sizeof(dmauc));
+     ruby_irq_mode = (enable == 1 && usbirq == 1);
+     ruby_qmu_irq_mode = (ruby_irq_mode && qmuirq == 1);
+     ruby_pad_mode = (pad == 1);
++    ruby_dma_uc = (dmauc == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log != 0);
+     printf("RUBY USB: probe writes %s\n",
+@@ -4389,6 +4451,8 @@
+     printf("RUBY USB: EP2 frames %s (rubypad=%d)\n",
+         ruby_pad_mode ? "padded 512 (hdr v2 24 B)" : "legacy 511 (hdr 16 B)",
+         pad);
++    printf("RUBY USB: EP2 ring dma %s (rubydmauc=%d)\n",
++        ruby_dma_uc ? "uncached" : "cached", dmauc);
+     if (ruby_irq_mode)
+         printf("RUBY USB: QMU irq %s (rubyqmuirq=%d)\n",
+             ruby_qmu_irq_mode ? "on" : "off", qmuirq);

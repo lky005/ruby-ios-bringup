@@ -1,0 +1,81 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -437,6 +437,28 @@
+ };
+ 
+ static struct ruby_ep ruby_eps[RUBY_EP_MAX];
++/* 0223: Function registry (Linux usb_function analogue). Each function
++ * owns its endpoints and a setup handler. CDC-ACM ready: one function may
++ * own several interfaces (Iface0 Comm + Iface1 Data). */
++struct ruby_function {
++    const char *name;
++    int (*setup)(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
++                 uint32_t value, uint32_t index, uint32_t wlen);
++    void (*configure)(vm_offset_t mac);
++};
++static struct ruby_function ruby_funcs[4];
++static uint8_t ruby_n_funcs;
++static void ruby_func_register(const char *name,
++    int (*setup)(vm_offset_t, uint32_t, uint8_t, uint8_t, uint32_t, uint32_t, uint32_t),
++    void (*configure)(vm_offset_t))
++{
++    if (ruby_n_funcs < 4) {
++        ruby_funcs[ruby_n_funcs].name = name;
++        ruby_funcs[ruby_n_funcs].setup = setup;
++        ruby_funcs[ruby_n_funcs].configure = configure;
++        ruby_n_funcs++;
++    }
++}
+ /* 0221: one req per TX GPD slot (1:1, no SG). Caller owns rq storage. */
+ #ifndef RUBY_GPD_NUM
+ #define RUBY_GPD_NUM 64
+@@ -473,6 +495,9 @@
+     ruby_eps[2].dir = RUBY_EP_DIR_OUT; ruby_eps[2].type = RUBY_EP_TYPE_BULK; ruby_eps[2].mps = 64;
+     ruby_eps[3].valid = 1; ruby_eps[3].addr = 0x81; ruby_eps[3].iface = 0;
+     ruby_eps[3].dir = RUBY_EP_DIR_IN;  ruby_eps[3].type = RUBY_EP_TYPE_BULK; ruby_eps[3].mps = 512;
++    /* 0223: probe function (commands) + log function (stream) */
++    ruby_func_register("probe", NULL, NULL);
++    ruby_func_register("log", NULL, NULL);
+ }
+ 
+ static struct ruby_ep *
+@@ -1399,6 +1424,12 @@
+             ruby_ep0_stall(mac, t, key, wlen);
+         return;
+     default:
++        /* 0223: function-level setup dispatch (vendor class later). */
++        for (int fi = 0; fi < ruby_n_funcs; fi++) {
++            if (ruby_funcs[fi].setup &&
++                ruby_funcs[fi].setup(mac, t, type, req, value, index, wlen) == 0)
++                return;
++        }
+         ruby_ep0_stall(mac, t, key, wlen);
+         return;
+     }
+@@ -3339,7 +3370,7 @@
+ }
+ 
+ static void
+-ruby_cmd_dispatch(vm_offset_t mac, char *line)
++ruby_func_probe_dispatch(vm_offset_t mac, char *line)
+ {
+     const char *text;
+ 
+@@ -3453,7 +3484,7 @@
+     seq = ruby_cmd_seq_pending;
+     ruby_cmd_seq_active = seq;
+     ruby_cmd_count++;
+-    ruby_cmd_dispatch(mac, ruby_cmd_line);
++    ruby_func_probe_dispatch(mac, ruby_cmd_line);
+     printf("RUBY CMD[%u]: done\n", seq);
+     ruby_cmd_seq_active = 0;
+     ruby_cmd_busy = 0;
+@@ -3471,7 +3502,7 @@
+         if (c == '\r' || c == '\n') {
+             if (ruby_cmd_len) {
+                 ruby_cmd_buf[ruby_cmd_len] = '\0';
+-                ruby_cmd_dispatch(mac, ruby_cmd_buf);
++                ruby_func_probe_dispatch(mac, ruby_cmd_buf);
+                 ruby_cmd_count++;
+                 ruby_cmd_len = 0;
+             }

@@ -1,0 +1,74 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 8ec9b04..73f095b 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1996,6 +1996,10 @@ static uint32_t ruby_gpd_deq;
+ /* 0242: restart counters (declared before their first use in resume). */
+ static uint32_t ruby_ep2_tx_restarts;
+ static uint32_t ruby_ep2_rx_restarts;
++/* 0243: watchdog kicks and the ACTIVE readback seen at kick time. */
++static uint32_t ruby_ep2_tx_kicks;
++static uint32_t ruby_ep2_active_seen;
++static uint32_t ruby_ep2_tx_kick_ms;
+ static uint32_t ruby_inflight;
+ static uint32_t ruby_ep2_host_seen;
+ static volatile uint32_t ruby_tx_busy;
+@@ -2840,6 +2844,30 @@ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
+     return n;
+ }
+ 
++/*
++ * 0243: TX watchdog.  Relax the wake-up gate: while descriptors are in
++ * flight and 20 ms passed since the last kick, ring the doorbell
++ * unconditionally -- regardless of what the ACTIVE readback says (the
++ * console round showed inf=1 with tq=0, and the old !ACTIVE test could
++ * skip the kick forever).  active_seen records how often the readback
++ * still claimed ACTIVE at kick time.
++ */
++static void
++ruby_ep2_tx_watchdog(vm_offset_t mac)
++{
++    if (ruby_inflight == 0)
++        return;
++    if ((uint32_t)(ruby_ms - ruby_ep2_tx_kick_ms) < 20)
++        return;
++    ruby_ep2_tx_kick_ms = ruby_ms;
++    if (ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)
++        ruby_ep2_active_seen++;
++    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
++        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++    ruby_ep2_tx_kicks++;
++}
++
+ static void
+ ruby_ep2_push_log(vm_offset_t mac)
+ {
+@@ -3143,9 +3171,10 @@ ruby_ep2_push_log(vm_offset_t mac)
+          * 0241: with no fresh data this pass used to return before the
+          * doorbell, so a stalled queue was never retried (console: inf=9,
+          * tq=0).  Keep nudging/restarting while descriptors are pending.
++         * 0243: the watchdog below ignores the ACTIVE readback entirely.
+          */
+         if (ruby_inflight > 0)
+-            ruby_ep2_resume(mac);
++            ruby_ep2_tx_watchdog(mac);
+         return;
+     }
+ 
+@@ -4372,6 +4401,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+     /* 0233: data-plane state for the ACM echo debug round. */
+     printf("RUBY USB ACM: ready=%u rx=%u echo=%u/%u drop=%u enq=%u deq=%u "
+         "inf=%u rxpk=%u rxdone=%u rxerr=%u zlp=%u "
++        "txr=%u rxr=%u act=%u kick=%u "
+         "q0=%08x q1=%08x tq=%08x rq=%08x\n",
+         ruby_ep_ready, ruby_rx_ready,
+         ruby_acm_echo_head, ruby_acm_echo_tail, ruby_acm_echo_drops,
+@@ -4379,6 +4409,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_rx_packets, ruby_rx_done_events,
+         ruby_rx_errors, ruby_rx_zlp_err,
+         ruby_ep2_tx_restarts, ruby_ep2_rx_restarts,
++        ruby_ep2_active_seen, ruby_ep2_tx_kicks,
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
+     if (ruby_irq_mode) {

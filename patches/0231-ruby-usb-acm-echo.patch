@@ -1,0 +1,222 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 2387181..de96725 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1436,8 +1436,9 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+          * keeps the ring out of rearm/stop races and silences the
+          * "EP2 stuck" watchdog.  The descriptor is unchanged, so the
+          * host sees the same device identity.
++         * 0231: ACM mode still needs the TX QMU, but for raw echo.
+          */
+-        if (ruby_ep2log_on)
++        if (ruby_ep2log_on || ruby_acm_cmd)
+             ruby_ep2_config(mac);
+         ruby_ep2_rx_config(mac);
+         /* 0225: EP3 (0x83) Interrupt IN NAK-enable. TX3 bank, MPS16, FIFO
+@@ -2717,6 +2718,70 @@ ruby_ep2_dump_gpd(vm_offset_t mac, uint32_t first, uint32_t last)
+     }
+ }
+ 
++/*
++ * 0231: ACM raw echo ring.  The RX service copies each 0x01 OUT packet here;
++ * the TX producer below drains it into GPDs with no log framing, so the host
++ * reads back exactly the bytes it wrote.  Producer (RX drain) and consumer
++ * (push) run on the same owner: the QMU workloop, or the 1 ms tick when
++ * rubyqmuirq=0.
++ */
++#define RUBY_ACM_ECHO_SIZE 8192u
++static uint8_t ruby_acm_echo_buf[RUBY_ACM_ECHO_SIZE];
++static volatile uint32_t ruby_acm_echo_head;
++static volatile uint32_t ruby_acm_echo_tail;
++static uint32_t ruby_acm_echo_bytes;
++static uint32_t ruby_acm_echo_drops;
++
++static uint32_t
++ruby_acm_echo_space(void)
++{
++    return RUBY_ACM_ECHO_SIZE -
++        (ruby_acm_echo_head - ruby_acm_echo_tail);
++}
++
++static void
++ruby_acm_echo_enqueue(const uint8_t *data, uint32_t len)
++{
++    uint32_t off, first;
++
++    if (len == 0)
++        return;
++    if (len > ruby_acm_echo_space()) {
++        ruby_acm_echo_drops += len;
++        return;
++    }
++    off = ruby_acm_echo_head % RUBY_ACM_ECHO_SIZE;
++    first = RUBY_ACM_ECHO_SIZE - off;
++    if (first > len)
++        first = len;
++    memcpy(&ruby_acm_echo_buf[off], data, first);
++    if (len > first)
++        memcpy(&ruby_acm_echo_buf[0], data + first, len - first);
++    ruby_acm_echo_bytes += len;
++    ruby_dma_wmb();
++    ruby_acm_echo_head += len;
++}
++
++static uint32_t
++ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
++{
++    uint32_t avail = ruby_acm_echo_head - ruby_acm_echo_tail;
++    uint32_t off, first, n;
++
++    if (!avail)
++        return 0;
++    n = avail < max ? avail : max;
++    off = ruby_acm_echo_tail % RUBY_ACM_ECHO_SIZE;
++    first = RUBY_ACM_ECHO_SIZE - off;
++    if (first > n)
++        first = n;
++    memcpy(out, &ruby_acm_echo_buf[off], first);
++    if (n > first)
++        memcpy(out + first, &ruby_acm_echo_buf[0], n - first);
++    ruby_acm_echo_tail += n;
++    return n;
++}
++
+ static void
+ ruby_ep2_push_log(vm_offset_t mac)
+ {
+@@ -2728,7 +2793,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+     uint32_t actual_len = 0;
+     /* 0217: obs-only backpressure counters (see ruby_0x21 diag) */
+ 
+-    if (!ruby_ep_ready || !ruby_ep2log_on)
++    if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_acm_cmd))
+         return;
+     ruby_push_tries++;
+ 
+@@ -2916,41 +2981,50 @@ ruby_ep2_push_log(vm_offset_t mac)
+             ruby_wr32(mac, TX1CSR0_OFF,
+                 (csr0 & ~(1u << 22)) | (1u << 22));
+         tqcsr = ruby_rd32(mac, TQCSR1_OFF);
+-        for (fi = 0; fi < RUBY_BULK_FRAMES; fi++) {
+-            uint8_t *fbuf = buf + fi * RUBY_LOG_CHUNK;
+-            uint32_t *fhdr = (uint32_t *)fbuf;
+-
+-            n = sweet_log_copy(&pos,
+-                (char *)fbuf + RUBY_HDR_LEN_V2, RUBY_PAD_TEXT);
++        if (ruby_acm_cmd) {
++            /* 0231: raw echo bytes, no log frame header or padding. */
++            n = ruby_acm_echo_dequeue(buf, RUBY_BULK_BYTES);
+             if (!n)
+                 break;
+-            fhdr[0] = (ruby_push_seq & 0xffffu) |
+-                ((enq & 0x3fu) << 16) |
+-                ((ruby_popcount64(hwo) & 0x3fu) << 22) |
+-                ((ruby_stall_seen & 0xfu) << 28);
+-            fhdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
+-                ((tqcsr & 0xffffu) << 16);
+-            fhdr[2] = err;
+-            fhdr[3] = csr0;
+-            fhdr[4] = (uint32_t)n | (RUBY_PAD_MAGIC << 10);
+-            fhdr[5] = 0;
+-            memset(fbuf + RUBY_HDR_LEN_V2 + n, 0,
+-                (size_t)(RUBY_PAD_TEXT - n));
+-            ruby_push_seq++;
+-            frames++;
+-            actual_len += (RUBY_HDR_LEN_V2 + n);
+-        }
+-        if (!frames) {
+-            ruby_ep2_no_log++;
+-            if (ruby_ep2_no_log <= 3 ||
+-                (ruby_ep2_no_log & 0x3f) == 0)
+-                printf("RUBY USB: EP2 no_log n=%u enq=%u deq=%u "
+-                    "inflight=%u total=%llu pos=%llu\n",
+-                    ruby_ep2_no_log, ruby_gpd_enq, ruby_gpd_deq,
+-                    ruby_inflight,
+-                    (unsigned long long)sweet_log_position(),
+-                    (unsigned long long)ruby_log_pos);
+-            break;
++            actual_len = n;
++            frames = 1;
++        } else {
++            for (fi = 0; fi < RUBY_BULK_FRAMES; fi++) {
++                uint8_t *fbuf = buf + fi * RUBY_LOG_CHUNK;
++                uint32_t *fhdr = (uint32_t *)fbuf;
++
++                n = sweet_log_copy(&pos,
++                    (char *)fbuf + RUBY_HDR_LEN_V2, RUBY_PAD_TEXT);
++                if (!n)
++                    break;
++                fhdr[0] = (ruby_push_seq & 0xffffu) |
++                    ((enq & 0x3fu) << 16) |
++                    ((ruby_popcount64(hwo) & 0x3fu) << 22) |
++                    ((ruby_stall_seen & 0xfu) << 28);
++                fhdr[1] = (q0 & 0xffu) | ((q1 & 0xffu) << 8) |
++                    ((tqcsr & 0xffffu) << 16);
++                fhdr[2] = err;
++                fhdr[3] = csr0;
++                fhdr[4] = (uint32_t)n | (RUBY_PAD_MAGIC << 10);
++                fhdr[5] = 0;
++                memset(fbuf + RUBY_HDR_LEN_V2 + n, 0,
++                    (size_t)(RUBY_PAD_TEXT - n));
++                ruby_push_seq++;
++                frames++;
++                actual_len += (RUBY_HDR_LEN_V2 + n);
++            }
++            if (!frames) {
++                ruby_ep2_no_log++;
++                if (ruby_ep2_no_log <= 3 ||
++                    (ruby_ep2_no_log & 0x3f) == 0)
++                    printf("RUBY USB: EP2 no_log n=%u enq=%u deq=%u "
++                        "inflight=%u total=%llu pos=%llu\n",
++                        ruby_ep2_no_log, ruby_gpd_enq, ruby_gpd_deq,
++                        ruby_inflight,
++                        (unsigned long long)sweet_log_position(),
++                        (unsigned long long)ruby_log_pos);
++                break;
++            }
+         }
+ 
+         np = ruby_gpd_pa[(enq + 1u) % RUBY_GPD_NUM];
+@@ -3665,7 +3739,12 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+             ruby_rx_zlp++;
+         ruby_rx_last_len = len;
+         ruby_rx_crc = ruby_fnv1a(ruby_rx_crc, ruby_rx_buf[i], len);
+-        ruby_cmd_consume(mac, ruby_rx_buf[i], len);
++        if (ruby_acm_cmd) {
++            /* 0231: ACM data plane echoes; host chars are not commands. */
++            ruby_acm_echo_enqueue(ruby_rx_buf[i], len);
++        } else {
++            ruby_cmd_consume(mac, ruby_rx_buf[i], len);
++        }
+ 
+         /* The 36-bit ext bits live in dw3 for RX; the length write must not
+          * clobber them.  Count a mismatch before re-arming the slot. */
+@@ -3682,6 +3761,10 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+ 
+     if (done)
+         ruby_ep2_rx_resume(mac);
++    /* 0231: hand the echo bytes to the TX ring right away; the QMU workloop
++     * owns both ends, so this is the same-thread producer -> consumer step. */
++    if (ruby_acm_cmd && ruby_acm_echo_head != ruby_acm_echo_tail)
++        ruby_ep2_push_log(mac);
+ }
+ 
+ static void
+@@ -4869,7 +4952,7 @@ ruby_usb_probe(void)
+ {
+     int enable = 0;
+     int probe = 0;
+-    int ep2log = 1;
++    int ep2log = -1;    /* 0231: unset => ACM defaults to off */
+     int usbirq = 0;
+     int qmuirq = 0;
+     int pad = 0;
+@@ -4891,7 +4974,7 @@ ruby_usb_probe(void)
+     ruby_pad_mode = (pad == 1);
+     ruby_dma_uc = (dmauc == 1);
+     ruby_probe_enabled = (probe == 1);
+-    ruby_ep2log_on = (ep2log != 0);
++    ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

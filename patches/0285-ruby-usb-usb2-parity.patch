@@ -1,0 +1,104 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index a5dfae3..4d0372c 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2076,6 +2076,8 @@ static int ruby_txreplay_en = 1;    /* 0277: replay preserved TX payloads */
+ static int ruby_txdone_en = 1;      /* 0279: per-TX-done register snapshot */
+ static int ruby_tx_kick_en;         /* 0280: faithful per-done send kick */
+ static int ruby_lpmhrwe_en = 1;     /* 0283: vendor LPM_HRWE parity */
++static int ruby_usb2parity_en = 1;  /* 0285: vendor USB2 init parity */
++static int ruby_usbintr_en = 1;     /* 0285: vendor suspend intr parity */
+ static uint32_t ruby_tx_k2_kicks;
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+@@ -5014,10 +5016,12 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+ {
+     static uint32_t next_ms, last_otg, last_mac2;
+     static int last_ext, primed;
++    static int usb2_rt_dumped;
+     uint32_t otg = ruby_rd32(ippc, IPPC_OTG_STS_OFF);
+     uint32_t mac2 = ruby_rd32(mac, MAC2_INTR_STATUS_OFF);
+     uint32_t seq = ruby_battery_poll_seq();
+     uint32_t rxcur = 0xffu, rxhwo = 0, ri;
++    uint32_t off;
+     int ext = ruby_battery_last_external();
+ 
+     if (primed && ruby_ms < next_ms && otg == last_otg &&
+@@ -5087,6 +5091,15 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_rd32(mac, TQCPR1_OFF), ruby_rd32(mac, TQHIAR1_OFF),
+         ruby_rd32(mac, RQCSR1_OFF), ruby_rd32(mac, RQCPR1_OFF),
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF));
++    /* 0285: one-shot runtime USB2 slice, after the device is configured. */
++    if (!usb2_rt_dumped && ruby_cfg_seen) {
++        usb2_rt_dumped = 1;
++        printf("RUBY USB USB2 RT 2400..2470:\n");
++        for (off = 0x2400; off <= 0x2470; off += 0x10)
++            printf("RUBY USB USB2R %04x: %08x %08x %08x %08x\n",
++                off, ruby_rd32(mac, off), ruby_rd32(mac, off + 4),
++                ruby_rd32(mac, off + 8), ruby_rd32(mac, off + 0xc));
++    }
+     if (ruby_irq_mode) {
+         if (ruby_qmu_irq_mode)
+             printf("RUBY USB IRQ: pass=%u mac2=%u bmu=%u qmu=%u "
+@@ -5840,9 +5853,11 @@ ruby_usb_probe(void)
+     int txdone = 1;
+     int txkick2 = 0;
+     int lpmhrwe = 1;
++    int usb2parity = 1;
++    int usbintr = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+-    uint32_t s1, s2, v;
++    uint32_t s1, s2, v, off;
+ 
+     PE_parse_boot_argn("rubyusb", &enable, sizeof(enable));
+     PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
+@@ -5878,6 +5893,10 @@ ruby_usb_probe(void)
+     ruby_tx_kick_en = (txkick2 == 1);
+     PE_parse_boot_argn("ruby_lpmhrwe", &lpmhrwe, sizeof(lpmhrwe));
+     ruby_lpmhrwe_en = (lpmhrwe == 1);
++    PE_parse_boot_argn("ruby_usb2parity", &usb2parity, sizeof(usb2parity));
++    ruby_usb2parity_en = (usb2parity == 1);
++    PE_parse_boot_argn("ruby_usbintr", &usbintr, sizeof(usbintr));
++    ruby_usbintr_en = (usbintr == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5894,6 +5913,8 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0279 txdone snap=%d\n", ruby_txdone_en);
+     printf("RUBY USB: 0280 tx_kick=%d\n", ruby_tx_kick_en);
+     printf("RUBY USB: 0283 lpm_hrwe=%d\n", ruby_lpmhrwe_en);
++    printf("RUBY USB: 0285 usb2 parity=%d intr=%d\n",
++        ruby_usb2parity_en, ruby_usbintr_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+@@ -6030,6 +6051,28 @@ ruby_usb_probe(void)
+             ruby_rd32(mac, PM_CTRL - MTU3_PA));
+     }
+ 
++    /* 0285: vendor USB2 parity (0x2414/0x2418/0x2444) plus a read-only
++     * init snapshot.  The two groups have independent boot-arg gates. */
++    if (ruby_usb2parity_en) {
++        v = ruby_rd32(mac, 0x2414);
++        ruby_wr32(mac, 0x2414, v | 0x400u);
++        ruby_wr32(mac, 0x2444, 0xa4f0u);
++        v = ruby_rd32(mac, 0x244c);
++        ruby_wr32(mac, 0x244c, v | 0x1u);
++    }
++    if (ruby_usbintr_en) {
++        v = ruby_rd32(mac, 0x2418);
++        ruby_wr32(mac, 0x2418, v | 0x1u);
++    }
++    printf("RUBY USB: 0285 usb2 parity done (2414=%08x 2418=%08x 2444=%08x)\n",
++        ruby_rd32(mac, 0x2414), ruby_rd32(mac, 0x2418),
++        ruby_rd32(mac, 0x2444));
++    printf("RUBY USB USB2 INIT 2400..2470:\n");
++    for (off = 0x2400; off <= 0x2470; off += 0x10)
++        printf("RUBY USB USB2I %04x: %08x %08x %08x %08x\n",
++            off, ruby_rd32(mac, off), ruby_rd32(mac, off + 4),
++            ruby_rd32(mac, off + 8), ruby_rd32(mac, off + 0xc));
++
+     /* 0185/0272: the vendor runs with bit21 clear; the old noise quirk
+      * stays behind ruby_noise=1 for A/B. */
+     v = ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA);

@@ -1,0 +1,38 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 0aade28..34767b2 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2157,6 +2157,7 @@ ruby_ep2_resume(vm_offset_t mac)
+         return;
+     }
+     restart_ms = ruby_ms;
++    ruby_ep2_tx_restarts++;
+     pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
+     ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
+     ruby_wr32(mac, EP_RST_OFF, 0);
+@@ -2784,6 +2785,9 @@ static uint32_t ruby_acm_echo_bytes;
+ static uint32_t ruby_acm_echo_drops;
+ static uint32_t ruby_acm_echo_dbg_rx;
+ static uint32_t ruby_acm_echo_dbg_tx;
++/* 0240: diagnostics only: how often the 20 ms full-restart fired. */
++static uint32_t ruby_ep2_tx_restarts;
++static uint32_t ruby_ep2_rx_restarts;
+ 
+ static uint32_t
+ ruby_acm_echo_space(void)
+@@ -3480,6 +3484,7 @@ ruby_ep2_rx_resume(vm_offset_t mac)
+     if ((uint32_t)(ruby_ms - restart_ms) < 20)
+         return;
+     restart_ms = ruby_ms;
++    ruby_ep2_rx_restarts++;
+     pa = ruby_rx_gpd_pa[ruby_rx_deq % RUBY_RX_GPD_NUM];
+     ruby_wr32(mac, EP_RST_OFF, EP_RST_RX1_BIT);
+     ruby_wr32(mac, EP_RST_OFF, 0);
+@@ -4364,6 +4369,7 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+         ruby_rx_packets, ruby_rx_done_events,
+         ruby_rx_errors, ruby_rx_zlp_err,
++        ruby_ep2_tx_restarts, ruby_ep2_rx_restarts,
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
+     if (ruby_irq_mode) {

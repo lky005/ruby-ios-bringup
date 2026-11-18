@@ -1,0 +1,109 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 8db376c..2ef97b8 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1868,6 +1868,7 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+ #define RX1CSR2_OFF     0x0218
+ #define QCR0_OFF        0x0400
+ #define QCR1_OFF        0x0404
++#define QCR2_OFF        0x0408
+ #define QCR3_OFF        0x040c
+ #define TQCSR1_OFF      0x0510
+ #define TQSAR1_OFF      0x0514
+@@ -2181,7 +2182,7 @@ ruby_ep2_resume(vm_offset_t mac)
+     (void)ruby_rd32(mac, EP_RST_OFF);
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
+-    ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
++    ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+     /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+      * bits clear is the only untested vendor-aligned combination). */
+     ruby_wr32(mac, QCR0_OFF, 1u);
+@@ -2354,7 +2355,7 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+      */
+     ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+     ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
+-    ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
++    ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+ 
+     /*
+      * 0235: the vendor core init enables QMU_CS16B_EN (QCR0 bit0) and
+@@ -2585,7 +2586,12 @@ ruby_ep2_config(vm_offset_t mac)
+      * differs from the verified reference.
+      */
+     ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
+-    ruby_wr32(mac, TX1CSR2_OFF, 32u | (9u << 16));
++    /*
++     * 0258: vendor programs FIFOADDR=0 for EP1 IN (TWRP readback
++     * 0x00090000).  P9's 0x200 is a legal mainline slot but not the
++     * address this SoC's allocator hands to the first bulk endpoint.
++     */
++    ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+     ruby_seq("TXCFG_CR", ruby_rd32(mac, TX1CSR0_OFF),
+         ruby_rd32(mac, TX1CSR2_OFF));
+ 
+@@ -2868,10 +2874,18 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+     uint32_t i, d;
+ 
+     printf("RUBY USB TXSTALL inf=%u tcsr=%08x qcr0=%08x qcr1=%08x "
+-        "tqcpr=%08x q0=%08x q1=%08x\n", ruby_inflight,
++        "qcr2=%08x qcr3=%08x tqcpr=%08x rqcpr=%08x q0=%08x q1=%08x "
++        "speed=%u tx1csr1=%08x tx1csr2=%08x rx1csr1=%08x rx1csr2=%08x "
++        "rq=%08x\n", ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, QCR0_OFF),
+-        ruby_rd32(mac, QCR1_OFF), ruby_rd32(mac, TQCPR1_OFF),
+-        ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF));
++        ruby_rd32(mac, QCR1_OFF), ruby_rd32(mac, QCR2_OFF),
++        ruby_rd32(mac, QCR3_OFF), ruby_rd32(mac, TQCPR1_OFF),
++        ruby_rd32(mac, RQCPR1_OFF),
++        ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
++        ruby_rd32(mac, DEVICE_CONF - MTU3_PA) & 0x7u,
++        ruby_rd32(mac, TX1CSR1_OFF), ruby_rd32(mac, TX1CSR2_OFF),
++        ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
++        ruby_rd32(mac, RQCSR1_OFF));
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_gpd_ring, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+@@ -3402,7 +3416,8 @@ ruby_ep2_rx_config(vm_offset_t mac)
+ 
+     ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+-    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
++    /* 0258: vendor RX FIFOADDR=0 (TWRP 0x00090000); 0x40 is not a 512 B unit. */
++    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+     ruby_wr32(mac, QCR0_OFF, 1u);
+     ruby_wr32(mac, QCR3_OFF,
+@@ -3448,7 +3463,7 @@ ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters)
+      * re-arming the ring so every clean test starts from the same state. */
+     ruby_wr32(mac, RX1CSR0_OFF, 64u | RX_DMAREQEN);
+     ruby_wr32(mac, RX1CSR1_OFF, RX_SLOT(2) | RX_TYPE(0));
+-    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0x40 >> 4) | RX_FIFOSEGSIZE(9));
++    ruby_wr32(mac, RX1CSR2_OFF, RX_FIFOADDR(0) | RX_FIFOSEGSIZE(9));
+     /* 0235: RX checksum engine for EP1 (BIT(16) << 1), vendor qmu_start. */
+     ruby_wr32(mac, QCR0_OFF, 1u);
+     ruby_wr32(mac, QCR3_OFF,
+@@ -4390,8 +4405,9 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+     printf("RUBY USB ACM: ready=%u rx=%u echo=%u/%u drop=%u enq=%u deq=%u "
+         "inf=%u rxpk=%u rxdone=%u rxerr=%u zlp=%u "
+         "txr=%u rxr=%u act=%u kick=%u rxact=%u rxkick=%u "
+-        "tqerr=%08x tcsr=%08x qcr0=%08x qcr1=%08x qcr3=%08x "
++        "tqerr=%08x tcsr=%08x qcr0=%08x qcr1=%08x qcr2=%08x qcr3=%08x "
+         "tqcpr=%08x rqcpr=%08x "
++        "speed=%u tx1csr1=%08x tx1csr2=%08x rx1csr1=%08x rx1csr2=%08x "
+         "q0=%08x q1=%08x tq=%08x rq=%08x\n",
+         ruby_ep_ready, ruby_rx_ready,
+         ruby_acm_echo_head, ruby_acm_echo_tail, ruby_acm_echo_drops,
+@@ -4403,8 +4419,12 @@ ruby_usb_heartbeat(vm_offset_t mac, vm_offset_t ippc)
+         ruby_ep2_rx_active_seen, ruby_ep2_rx_kicks,
+         ruby_rd32(mac, TQERRIR0_OFF), ruby_rd32(mac, TX1CSR0_OFF),
+         ruby_rd32(mac, QCR0_OFF), ruby_rd32(mac, QCR1_OFF),
++        ruby_rd32(mac, QCR2_OFF),
+         ruby_rd32(mac, QCR3_OFF), ruby_rd32(mac, TQCPR1_OFF),
+         ruby_rd32(mac, RQCPR1_OFF),
++        ruby_rd32(mac, DEVICE_CONF - MTU3_PA) & 0x7u,
++        ruby_rd32(mac, TX1CSR1_OFF), ruby_rd32(mac, TX1CSR2_OFF),
++        ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+         ruby_rd32(mac, QISAR0_OFF), ruby_rd32(mac, QISAR1_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, RQCSR1_OFF));
+     if (ruby_irq_mode) {

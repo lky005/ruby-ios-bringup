@@ -1,0 +1,56 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 19efb81..1f58e6a 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2078,6 +2078,7 @@ static int ruby_tx_kick_en;         /* 0280: faithful per-done send kick */
+ static int ruby_lpmhrwe_en = 1;     /* 0283: vendor LPM_HRWE parity */
+ static int ruby_usb2parity_en = 1;  /* 0285: vendor USB2 init parity */
+ static int ruby_usbintr_en = 1;     /* 0285: vendor suspend intr parity */
++static int ruby_lpmmask_en = 1;     /* 0287: vendor LPM mask / U3 exit parity */
+ static uint32_t ruby_tx_k2_kicks;
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+@@ -5871,6 +5872,7 @@ ruby_usb_probe(void)
+     int lpmhrwe = 1;
+     int usb2parity = 1;
+     int usbintr = 1;
++    int lpmmask = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+@@ -5913,6 +5915,8 @@ ruby_usb_probe(void)
+     ruby_usb2parity_en = (usb2parity == 1);
+     PE_parse_boot_argn("ruby_usbintr", &usbintr, sizeof(usbintr));
+     ruby_usbintr_en = (usbintr == 1);
++    PE_parse_boot_argn("ruby_lpmmask", &lpmmask, sizeof(lpmmask));
++    ruby_lpmmask_en = (lpmmask == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5931,6 +5935,7 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0283 lpm_hrwe=%d\n", ruby_lpmhrwe_en);
+     printf("RUBY USB: 0285 usb2 parity=%d intr=%d\n",
+         ruby_usb2parity_en, ruby_usbintr_en);
++    printf("RUBY USB: 0287 lpmmask=%d\n", ruby_lpmmask_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+@@ -6083,6 +6088,18 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0285 usb2 parity done (2414=%08x 2418=%08x 2444=%08x)\n",
+         ruby_rd32(mac, 0x2414), ruby_rd32(mac, 0x2418),
+         ruby_rd32(mac, 0x2444));
++
++    /* 0287: vendor LPM parity.  0x0828 U3D_USB2_EPCTL_LPM: the vendor
++     * driver enables the L1 exit check for its endpoints (EP0-3 IN,
++     * EP1-2 OUT); 0x1410 bit2 SOFT_U3_EXIT_EN is cleared by vendor
++     * hw_init.  ruby_lpmmask=0 keeps the 0286 state for the A/B. */
++    if (ruby_lpmmask_en) {
++        ruby_wr32(mac, 0x0828, 0x0006000fu);
++        v = ruby_rd32(mac, 0x1410);
++        ruby_wr32(mac, 0x1410, v & ~(1u << 2));
++        printf("RUBY USB: 0287 lpmmask done (0828=%08x 1410=%08x)\n",
++            ruby_rd32(mac, 0x0828), ruby_rd32(mac, 0x1410));
++    }
+     printf("RUBY USB USB2 INIT 2400..2470:\n");
+     for (off = 0x2400; off <= 0x2470; off += 0x10)
+         printf("RUBY USB USB2I %04x: %08x %08x %08x %08x\n",

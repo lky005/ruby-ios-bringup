@@ -1,0 +1,26 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1240,9 +1240,8 @@
+         *len = sizeof(ruby_dev_desc);
+         return ruby_dev_desc;
+     case 0x0200:
+-        /* 0218: build from EP table on first use (composite descriptor). */
+-        if (ruby_cfg_buf_len == 0)
+-            ruby_cfg_buf_len = ruby_build_cfg_desc(ruby_cfg_buf);
++        /* 0220: rebuilt on demand; vendor never relies on its own stale cache. */
++        ruby_cfg_buf_len = ruby_build_cfg_desc(ruby_cfg_buf);
+         *len = ruby_cfg_buf_len;
+         return ruby_cfg_buf;
+     case 0x0300:
+@@ -2402,6 +2401,11 @@
+      * produced a TX done.  Enable the vendor global TX ZLP bit; the
+      * GPD ZLP flag stays off, so 511-byte short packets are unchanged.
+      */
++    /* 0220: TX-done enable BEFORE the queue starts; order mirrors vendor
++     * mtu3_qmu (QIESR TX -> global TX-ZLP -> TQERRIESR -> TQHIAR/SAR ->
++     * TQCSR START). Starting TQCSR with TX-done unbaked left v6 at STOP
++     * (0x08000) and broke prime->drain after a few reads. */
++    ruby_wr32(mac, QIESR0_OFF, RUBY_QMU_TX_DONE);
+     ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | (1u << 1));
+     ruby_wr32(mac, TQERRIESR0_OFF,
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));

@@ -1,0 +1,44 @@
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1732,6 +1732,10 @@
+ static uint32_t ruby_ep2_drain_bad_last;
+ static uint32_t ruby_ep2_halt_clears;
+ static uint32_t ruby_busy_ticks;
++static uint64_t ruby_tx_prod_pos_total;   /* total bytes ever produced */
++static uint64_t ruby_tx_prod_pos_prev;    /* pos at last empty strike */
++static uint32_t ruby_tx_empty_strikes;    /* # of empty-after-bulk */
++static uint32_t ruby_tx_empty_last_ms;    /* ruby_ms at last empty */
+ static uint32_t ruby_txdone_count;
+ 
+ static uint8_t ruby_rx_gpd_ring[RUBY_RX_GPD_NUM * 16]
+@@ -2380,6 +2384,7 @@
+     uint8_t *g, *buf;
+     uint32_t n, queued = 0, freed = 0;
+     uint32_t actual_len = 0;
++    /* 0217: obs-only backpressure counters (see ruby_0x21 diag) */
+ 
+     if (!ruby_ep_ready || !ruby_ep2log_on)
+         return;
+@@ -2546,6 +2551,14 @@
+         if (RUBY_GPD_SLOT(i)[0] & 1u)
+             hwo |= 1ull << i;
+ 
++    if (ruby_inflight == 0 && ruby_log_pos != 0 &&
++        ruby_log_pos == ruby_tx_prod_pos_prev) {
++        ruby_tx_prod_pos_prev = 0;
++    } else if (ruby_inflight == 0 && ruby_log_pos != 0) {
++        ruby_tx_prod_pos_prev = ruby_log_pos;
++        ruby_tx_empty_strikes++;
++        ruby_tx_empty_last_ms = ruby_ms;
++    }
+     while (ruby_inflight < RUBY_EP2_MAX_INFLIGHT) {
+         enq = ruby_gpd_enq;
+         g = RUBY_GPD_SLOT(enq);
+@@ -2628,6 +2641,7 @@
+         g[0] = (1u << 0) | (1u << 7);
+         if (!ruby_dma_uc)
+             ruby_dc_civac(g, RUBY_GPD_DESC); /* publish HWO */
++        ruby_tx_prod_pos_total += actual_len;
+         ruby_log_pos = pos;
+         ruby_gpd_enq = (enq + 1u) % RUBY_GPD_NUM;
+         ruby_inflight++;

@@ -1,0 +1,94 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 82667ca..4ea979d 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -562,6 +562,8 @@ static uint8_t ruby_acm_line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0
+ static uint16_t ruby_acm_control_state;
+ static uint32_t ruby_acm_line_coding_set;
+ static uint32_t ruby_acm_control_state_set;
++/* 0228: SET_LINE_CODING OUT is deferred to ruby_ep0_service RX path */
++static uint32_t ruby_acm_out_pending;
+ static uint32_t
+ ruby_build_cfg_desc(uint8_t *out)
+ {
+@@ -1579,46 +1581,12 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+     else if (st[0] == 0x40 && st[1] == 0x2e)
+         ruby_ep0_vendor_cmd(mac, t, value, index, len);
+     else if (st[0] == 0x21 && st[1] == 0x20) {
+-        /* 0227 CDC SET_LINE_CODING: OUT data stage — wait for RXPKTRDY with
+-         * bounded spins, read 7B, then RX ACK (RXPKTRDY|DATAEND), not TX ACK.
+-         * Previous 0226 read immediately then TX-ACKed: FIFO residue left
+-         * TXPKTRDY stuck and Windows saw WinError 31 on reopen. */
+-        uint8_t lc[7];
+-        uint32_t spins = 0;
+-        while (spins++ < 100) {
+-            uint32_t csr = ruby_rd32(mac, EP0CSR_OFF);
+-            if (csr & EP0_RXPKTRDY)
+-                break;
+-            delay(10);
+-        }
+-        {
+-            uint32_t count = ruby_rd32(mac, RXCOUNT0_OFF);
+-            if (count >= 7) {
+-                ruby_ep0_read_fifo_bytes(mac, lc, 7);
+-                uint32_t baud = lc[0] | (lc[1] << 8) | (lc[2] << 16) | (lc[3] << 24);
+-                uint8_t fmt = lc[4], par = lc[5], bits = lc[6];
+-                int ok = (baud == 300 || baud == 1200 || baud == 2400 || baud == 4800 ||
+-                          baud == 9600 || baud == 38400 || baud == 57600 || baud == 115200) &&
+-                         fmt <= 2 && par <= 2 &&
+-                         (bits == 5 || bits == 6 || bits == 7 || bits == 8 || bits == 16);
+-                if (ok) {
+-                    ruby_acm_line_coding[0]=lc[0]; ruby_acm_line_coding[1]=lc[1];
+-                    ruby_acm_line_coding[2]=lc[2]; ruby_acm_line_coding[3]=lc[3];
+-                    ruby_acm_line_coding[4]=lc[4]; ruby_acm_line_coding[5]=lc[5];
+-                    ruby_acm_line_coding[6]=lc[6];
+-                    ruby_acm_line_coding_set++;
+-                }
+-                /* RX ACK: clear RXPKTRDY + DATAEND (= status stage ZLP */
+-                {
+-                    uint32_t csr = ruby_rd32(mac, EP0CSR_OFF) & EP0_W1C_BITS;
+-                    ruby_wr32(mac, EP0CSR_OFF, csr | EP0_RXPKTRDY | EP0_DATAEND);
+-                }
+-            } else {
+-                /* Not enough bytes: drain and STALL */
+-                ruby_ep0_drain_fifo(mac, count);
+-                ruby_ep0_stall(mac, t, key, len);
+-            }
+-        }
++        /* 0228 A-route: begin OUT data stage. Data arrives later on the
++         * RX path (ruby_ep0_service EP0_RXPKTRDY), which is the
++         * verified branch the probe_wr/cmd paths already use.
++         * Just arm the pending flag here; do not read FIFO in setup stage. */
++        ruby_acm_out_pending = 1;
++        /* No ACK yet: the OUT data stage completes in ruby_ep0_service */
+     } else if (st[0] == 0x21 && st[1] == 0x22) {
+         /* CDC SET_CONTROL_LINE_STATE: store DTR/RTS from wValue */
+         ruby_acm_control_state = (uint16_t)value;
+@@ -1711,6 +1679,27 @@ ruby_ep0_service(vm_offset_t mac, uint32_t t)
+                 printf("RUBY CMD[%u]: bad len=%u\n",
+                     ruby_cmd_out_seq, count);
+             }
++        } else if (ruby_acm_out_pending) {
++            if (count == 7) {
++                uint8_t lc[7];
++                ruby_ep0_read_fifo_bytes(mac, lc, 7);
++                uint32_t baud = lc[0] | (lc[1] << 8) | (lc[2] << 16) | (lc[3] << 24);
++                uint8_t fmt = lc[4], par = lc[5], bits = lc[6];
++                int ok = (baud == 300 || baud == 1200 || baud == 2400 || baud == 4800 ||
++                          baud == 9600 || baud == 38400 || baud == 57600 || baud == 115200) &&
++                         fmt <= 2 && par <= 2 &&
++                         (bits == 5 || bits == 6 || bits == 7 || bits == 8 || bits == 16);
++                if (ok) {
++                    ruby_acm_line_coding[0]=lc[0]; ruby_acm_line_coding[1]=lc[1];
++                    ruby_acm_line_coding[2]=lc[2]; ruby_acm_line_coding[3]=lc[3];
++                    ruby_acm_line_coding[4]=lc[4]; ruby_acm_line_coding[5]=lc[5];
++                    ruby_acm_line_coding[6]=lc[6];
++                    ruby_acm_line_coding_set++;
++                }
++            } else {
++                ruby_ep0_drain_fifo(mac, count);
++            }
++            ruby_acm_out_pending = 0;
+         } else if (ruby_probe_wr_pending) {
+             uint32_t pa = ruby_probe_wr_pa;
+             uint32_t val = 0;

@@ -1,0 +1,58 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index b302d4e..3052205 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -582,6 +582,7 @@ static uint32_t ruby_resume_eprst_cnt;
+ static uint32_t ruby_resume_vendor_cnt;
+ static uint32_t ruby_recover_suppressed[3];
+ static uint32_t ruby_txpio_tail_cnt;
++static uint32_t ruby_txpio_start_cnt;
+ static uint32_t ruby_push_start_fail;
+ static volatile uint32_t ruby_ep_ready;
+ /* 0226: real ACM state — EP0 OUT 7B stored, GET returns stored value */
+@@ -3419,13 +3420,30 @@ ruby_txpio_send(vm_offset_t mac, const uint8_t *buf, uint32_t len)
+         v |= RUBY_TX_MPS | TX_TXPKTRDY;
+         ruby_wr32(mac, TX1CSR0_OFF, v);
+         if (ruby_txpiotail_en) {
+-            /* 0293 vendor tail (mtu3_qmu.c stop_tx ZLP): re-enable the
+-             * QMU DMA and resume the queue after TXPKTRDY. */
++            /*
++             * 0293 vendor tail (mtu3_qmu.c stop_tx ZLP): re-enable the
++             * QMU DMA and resume the queue after TXPKTRDY.
++             * 0295: the PIO ring has no GPDs, so the QMU stops after each
++             * packet.  RESUME is a no-op on a stopped queue (0273); mode 2
++             * restarts it with Q_START from the programmed base instead.
++             */
+             v = ruby_rd32(mac, TX1CSR0_OFF) | TX_DMAREQEN;
+             ruby_wr32(mac, TX1CSR0_OFF, v);
+             ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-            if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-                ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++            if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)) {
++                if (ruby_txpiotail_en >= 2) {
++                    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++                    ruby_txpio_start_cnt++;
++                    if (ruby_txpio_start_cnt <= 8 ||
++                        (ruby_txpio_start_cnt & 0x3fu) == 0)
++                        printf("RUBY USB: 0295 pio qstart n=%u tq=%08x "
++                            "tx0=%08x\n", ruby_txpio_start_cnt,
++                            ruby_rd32(mac, TQCSR1_OFF),
++                            ruby_rd32(mac, TX1CSR0_OFF));
++                } else {
++                    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
++                }
++            }
+             ruby_txpio_tail_cnt++;
+         }
+         /*
+@@ -6303,7 +6321,9 @@ ruby_usb_probe(void)
+     PE_parse_boot_argn("ruby_recover", &recover, sizeof(recover));
+     ruby_recover_mask = recover & 7;
+     PE_parse_boot_argn("ruby_txpiotail", &txpiotail, sizeof(txpiotail));
+-    ruby_txpiotail_en = (txpiotail == 1);
++    if (txpiotail < 0 || txpiotail > 2)
++        txpiotail = 0;
++    ruby_txpiotail_en = txpiotail;
+     PE_parse_boot_argn("ruby_lpm_fc", &lpmfc, sizeof(lpmfc));
+     ruby_lpm_fc_en = (lpmfc == 1);
+     PE_parse_boot_argn("ruby_devrst_pre", &devrstpre, sizeof(devrstpre));

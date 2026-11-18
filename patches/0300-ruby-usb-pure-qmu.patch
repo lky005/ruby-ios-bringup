@@ -1,0 +1,1170 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -566,40 +566,30 @@ ruby_ep_complete(struct ruby_ep *ep, int status)
+  * Vendor mode (default): single vendor 0xFF interface (0223 shape).
+  */
+ static int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
+-static int ruby_clrhalt_mode;       /* 0290: 0 legacy, 1 vendor-light, 2 heavy */
+ static int ruby_cfgrst_mode = 0;    /* 0291: default no config EP_RST */
+-/* 0293 audit switches.  All new behavior is opt-in so the default image
+- * keeps the 0292 paths byte-for-byte; the matrix is selected by cmdline. */
+-static int ruby_clr81_mode;         /* 0 ignore, 1 light, 2 heavy, 3 W1C-only */
+-static int ruby_resume_mode;        /* 0 current, 1 vendor-parity, 2 no EP_RST */
++/* 0300: TX ownership is pure QMU DMA.  Only the recovery/injection
++ * switches survive from the 0293 audit set. */
+ static int ruby_recover_mask;       /* bit0 in-band, bit1 SENTSTALL, bit2 IRQ */
+-static int ruby_txpiotail_en;       /* PIO vendor tail after TXPKTRDY */
+ static int ruby_lpm_fc_en;          /* 0x0860=0 + PM_CTRL bit14/13 */
+ static int ruby_devrst_pre_en;      /* DEV_SW_RST before port enable */
+ static uint32_t ruby_clr81_reqs;
+ static uint32_t ruby_clr81_hits[4];
+-static uint32_t ruby_resume_eprst_cnt;
+ static uint32_t ruby_resume_vendor_cnt;
+ static uint32_t ruby_recover_suppressed[3];
+-static uint32_t ruby_txpio_tail_cnt;
+-static uint32_t ruby_txpio_start_cnt;
+-/* 0297: deferred PIO Q_START and write-busy guard. */
+-static int ruby_qstart_ms = 1;
+-/* 0299: pure-workloop-Q_START switch (tail skipped, pending still set). */
+-static int ruby_qstart_only_en;
+-static volatile uint32_t ruby_txpio_qstart_pending;
+-static volatile uint32_t ruby_txpio_write_busy;
+-static uint32_t ruby_txpio_qstart_due_ms;
+-/* 0298: CLEAR_FEATURE(0x01) parity, pure-PIO DMA decouple, QISAR paths. */
++/* 0298: CLEAR_FEATURE(0x01) parity, QISAR paths. */
+ static int ruby_clr01_en;
+ static uint32_t ruby_clr01_reqs;
+ static uint32_t ruby_clr01_hits;
+-static int ruby_dmareq_pio_en;
+ static int ruby_qisar1_w_en = 1;
+ static int ruby_qisar0_isr_en;
+-static volatile uint32_t ruby_txpio_qstart_req;   /* tick -> workloop */
++/*
++ * 0300: software-owned TX queue state.  RESUME is the per-enqueue kick;
++ * Q_START is issued only when a prepared GPD exists and the queue has not
++ * been started since the last prepare/stop.  The 0x18100 pseudo-active
++ * readback is never consulted, so it cannot veto the start any more.
++ */
++static int ruby_tx_queue_started;
+ static uint32_t ruby_qisar0_isr_acks;
+-static uint32_t ruby_push_start_fail;
+ static volatile uint32_t ruby_ep_ready;
+ /* 0226: real ACM state — EP0 OUT 7B stored, GET returns stored value */
+ static uint8_t ruby_acm_line_coding[7] = { 0x00, 0xC2, 0x01, 0x00, 0x00, 0x00, 0x08 };
+@@ -1419,17 +1409,13 @@ static void ruby_ep0_vendor_cmd(vm_offset_t mac, uint32_t t,
+     uint32_t value, uint32_t index, uint32_t wlen);
+ static void ruby_cmd_submit(uint32_t seq, const char *line);
+ static void ruby_cmd_tick(vm_offset_t mac);
+-static void ruby_ep2_halt_clear(vm_offset_t mac);
++static void ruby_tx_halt_clear(vm_offset_t mac);
+ static void ruby_ep2_eprst_tx(vm_offset_t mac);
+-static void ruby_ep1in_halt_clear_light(vm_offset_t mac);
+-static void ruby_ep1in_halt_status_only(vm_offset_t mac);
+ static void ruby_ep2_status_poll(vm_offset_t mac);
+ static void ruby_ep2_rx_config(vm_offset_t mac);
+ static void ruby_ep2_rx_resume(vm_offset_t mac);
+ static void ruby_ep2_rx_poll(vm_offset_t mac);
+ static void ruby_tx_recover_poll(vm_offset_t mac);
+-static void ruby_txpio_qstart_service(vm_offset_t mac);
+-static void ruby_txpio_qstart_tick(vm_offset_t mac);
+ static void ruby_rx_mtr_add(uint16_t ev, uint16_t a, uint32_t b, uint32_t c);
+ static void ruby_ep2_rx_reset(vm_offset_t mac, uint32_t reset_counters);
+ static void ruby_ep2_rx_halt_clear(vm_offset_t mac);
+@@ -1538,38 +1524,19 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+         uint32_t act = 0;
+ 
+         /*
+-         * 0293: split 0x81 from 0x82.  ruby_clrhalt keeps its old
+-         * both-endpoint semantics; ruby_clr81 only acts on the ACM bulk
+-         * IN (0x81) when ruby_clrhalt is 0.  3 = W1C-only, the arm that
+-         * acknowledges the request without pulsing EP_RST.
++         * 0300: one path for the bulk IN halt.  0x81 and 0x82 both take
++         * the vendor stall-bit/toggle clear plus the standard QMU queue
++         * restart (ruby_tx_halt_clear).  0x01 keeps the verified 0298 RX
++         * light clear; 0x02 keeps the RX queue restart.
+          */
+         if (index == 0x81)
+             ruby_clr81_reqs++;
+         if (index == 0x01)
+             ruby_clr01_reqs++;
+         if (wlen == 0 && value == 0) {
+-            if (index == 0x81) {
+-                if (ruby_clrhalt_mode == 1) {
+-                    ruby_ep1in_halt_clear_light(mac);
+-                    act = 1;
+-                } else if (ruby_clrhalt_mode == 2) {
+-                    ruby_ep2_halt_clear(mac);
+-                    act = 2;
+-                } else if (ruby_clr81_mode == 1) {
+-                    ruby_ep1in_halt_clear_light(mac);
+-                    act = 1;
+-                } else if (ruby_clr81_mode == 2) {
+-                    ruby_ep2_halt_clear(mac);
+-                    act = 2;
+-                } else if (ruby_clr81_mode == 3) {
+-                    ruby_ep1in_halt_status_only(mac);
+-                    act = 3;
+-                }
+-            } else if (index == 0x82) {
+-                if (ruby_clrhalt_mode == 1)
+-                    ruby_ep1in_halt_clear_light(mac);
+-                else
+-                    ruby_ep2_halt_clear(mac);
++            if (index == 0x81 || index == 0x82) {
++                ruby_tx_halt_clear(mac);
++                act = 1;
+             } else if (index == 0x02)
+                 ruby_ep2_rx_halt_clear(mac);
+             else if (index == 0x01 && ruby_clr01_en)
+@@ -1953,7 +1920,6 @@ ruby_ep0_thread(void *arg, wait_result_t wr)
+         ruby_usb_attach_poll(ruby_mac_base, ruby_ippc_base);
+         ruby_usb_frame_watchdog(ruby_mac_base);
+         ruby_usb_heartbeat(ruby_mac_base, ruby_ippc_base);
+-        ruby_txpio_qstart_tick(ruby_mac_base);
+         if (ruby_qmu_irq_mode) {
+             /*
+              * 0197: the EP2 data plane lives on the IRQ workloop.  The
+@@ -2174,16 +2140,11 @@ static uint32_t ruby_bulk_dup_a;
+ static uint32_t ruby_bulk_dup_b;
+ static int ruby_txreset_en;
+ static int ruby_txeprst_en;
+-static int ruby_txdeq_en;
+ static int ruby_noise_en;   /* 0272: 0185 noise quirk, default off */
+-static int ruby_txkick_en;  /* 0273: Q_START when the TX queue is stopped */
+ static uint32_t ruby_txkick_starts;
+-static int ruby_txrdy_en = 1;   /* 0274: TXPKTRDY kick on a full FIFO */
+-static uint32_t ruby_txrdy_kicks;
+-static uint32_t ruby_txrdy_ms;
++static uint32_t ruby_txrdy_kicks;   /* 0300: retired, kept for the diag ABI */
+ static int ruby_txreplay_en = 1;    /* 0277: replay preserved TX payloads */
+ static int ruby_txdone_en = 1;      /* 0279: per-TX-done register snapshot */
+-static int ruby_tx_kick_en;         /* 0280: faithful per-done send kick */
+ static int ruby_lpmhrwe_en = 1;     /* 0283: vendor LPM_HRWE parity */
+ static int ruby_usb2parity_en = 1;  /* 0285: vendor USB2 init parity */
+ static int ruby_usbintr_en = 1;     /* 0285: vendor suspend intr parity */
+@@ -2192,11 +2153,6 @@ static int ruby_txslot = 2;         /* 0288: EP1 IN TX FIFO slot (A/B) */
+ static int ruby_txfifo_en = 1;      /* 0289: per-GPD TX FIFO trace */
+ static uint32_t ruby_txfifo_lines;
+ static uint32_t ruby_flushfifo_cnt;
+-static uint32_t ruby_clr81_cnt;
+-static int ruby_txpio_en;           /* 0292: CPU PIO TX, no QMU TX */
+-static uint32_t ruby_txpio_pkts;
+-static uint32_t ruby_txpio_bytes;
+-static uint32_t ruby_txpio_timeouts;
+ 
+ static void
+ ruby_txfifo_log(vm_offset_t mac, const char *kind, uint32_t n)
+@@ -2208,7 +2164,6 @@ ruby_txfifo_log(vm_offset_t mac, const char *kind, uint32_t n)
+         kind, n, ruby_rd32(mac, TQCPR1_OFF), ruby_rd32(mac, TX1CSR0_OFF),
+         ruby_rd32(mac, TQCSR1_OFF), ruby_flushfifo_cnt);
+ }
+-static uint32_t ruby_tx_k2_kicks;
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+ static uint32_t ruby_tx_replay_bytes;
+@@ -2443,58 +2398,21 @@ ruby_tx_mtr_dump(void)
+ static void
+ ruby_ep2_resume(vm_offset_t mac)
+ {
+-    static uint32_t restart_ms;
+-    uint64_t pa;
+-
+-    if (ruby_txpio_en)
+-        return;
+-
+     ruby_tx_kick_cnt++;
+     ruby_tx_kick_src = RUBY_TX_SRC_STALL;
+     ruby_tx_kick_ms = ruby_ms;
+     ruby_tx_kick_total[RUBY_TX_SRC_STALL]++;
+     ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_STALL,
+         ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
++    /*
++     * 0300 vendor parity (mtu3_qmu_resume): RESUME, and if the readback
++     * still lacks ACTIVE, write RESUME once more.  No EP_RST, no CSR or
++     * TQSAR rewrite and no Q_START on this path.
++     */
++    ruby_resume_vendor_cnt++;
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-    if (ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE) {
+-        ruby_busy_ticks = 0;
+-        return;
+-    }
+-    if ((uint32_t)(ruby_ms - restart_ms) < 20) {
+-        ruby_busy_ticks = 0;
+-        return;
+-    }
+-    if (ruby_resume_mode == 1) {
+-        /* 0293 vendor parity: RESUME, re-read ACTIVE, RESUME once more.
+-         * No EP_RST, no CSR/TQSAR rewrite, no Q_START. */
+-        ruby_resume_vendor_cnt++;
++    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+         ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-        if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-            ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-        ruby_busy_ticks = 0;
+-        return;
+-    }
+-    restart_ms = ruby_ms;
+-    ruby_ep2_tx_restarts++;
+-    pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
+-    if (ruby_resume_mode != 2 || ruby_txeprst_en) {
+-        ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
+-        ruby_wr32(mac, EP_RST_OFF, 0);
+-        (void)ruby_rd32(mac, EP_RST_OFF);
+-        ruby_resume_eprst_cnt++;
+-    }
+-    ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+-    ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
+-    ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+-    /* 0249: vendor runs with the CS engine off (chksum byte 0 + these
+-     * bits clear is the only untested vendor-aligned combination). */
+-    ruby_wr32(mac, QCR0_OFF, 1u);
+-    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
+-    ruby_wr32(mac, TQERRIESR0_OFF,
+-        ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+-    ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
+-    ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
+-    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+     ruby_busy_ticks = 0;
+ }
+ 
+@@ -2648,10 +2566,8 @@ ruby_ep2_state_reset(vm_offset_t mac)
+ }
+ 
+ static int
+-ruby_ep2_qmu_start(vm_offset_t mac)
++ruby_ep2_qmu_prepare(vm_offset_t mac)
+ {
+-    if (ruby_txpio_en)
+-        return 0;
+     if (!ruby_ring_pa) {
+         ruby_ep2_start_failures++;
+         return -1;
+@@ -2683,15 +2599,13 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)ruby_ring_pa);
+     ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((ruby_ring_pa >> 32) & 0xfu));
+ 
+-    if (ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE) {
+-        ruby_ep2_start_failures++;
+-        return -1;
+-    }
+-    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)) {
+-        ruby_ep2_start_failures++;
+-        return -1;
+-    }
++    /*
++     * 0300: never Q_START an empty ring.  This mirrors the working RX
++     * pattern (arm GPDs first, then START): the first prepared GPD issues
++     * Q_START from the oldest pending slot.  Every stop/flush/clear lands
++     * here, so the queue is re-prepared but not started until it has work.
++     */
++    ruby_tx_queue_started = 0;
+     ruby_ep_ready = 1;
+     return 0;
+ }
+@@ -2703,18 +2617,15 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+ /*
+  * 0269: layered TX recovery.  The base layer mirrors mainline
+  * mtu3_qmu_flush + mtu3_qmu_start (stop, flush, clear the ring, restart
+- * from its base).  EP_RST and the deq start stay opt-in because
+- * mainline/U-Boot/LK use neither for runtime recovery.  The trigger runs
+- * from the 1 ms tick -> workloop, so it does not depend on RX traffic.
++ * from its base).  The EP_RST pulse stays opt-in because mainline/U-Boot/
++ * LK use it only for ClearFeature.  The trigger runs from the 1 ms tick ->
++ * workloop, so it does not depend on RX traffic.
+  */
+ static void
+ ruby_ep2_tx_rebuild(vm_offset_t mac)
+ {
+     struct ruby_ep *txep;
+-    uint64_t pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
+ 
+-    if (ruby_txpio_en)
+-        return;
+     if (ruby_ep2_qmu_stop(mac) != 0) {
+         printf("RUBY USB TXRESET stop timeout\n");
+         return;
+@@ -2724,34 +2635,21 @@ ruby_ep2_tx_rebuild(vm_offset_t mac)
+         ruby_wr32(mac, EP_RST_OFF, 0);
+         (void)ruby_rd32(mac, EP_RST_OFF);
+     }
+-    if (ruby_txdeq_en) {
+-        /* Keep the ring; restart from the oldest pending GPD.  The stop
+-         * above already flushed bytes the MAC had not sent. */
+-        ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
+-        ruby_wr32(mac, TX1CSR1_OFF, (uint32_t)ruby_txslot << 8);
+-        ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
+-        ruby_wr32(mac, QCR0_OFF, 1u);
+-        ruby_wr32(mac, QCR1_OFF,
+-            ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
+-        ruby_wr32(mac, TQERRIESR0_OFF,
+-            ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+-        ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
+-        ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
+-        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-        ruby_ep_ready = 1;
+-    } else {
+-        /* Mainline-style: drop the ring contents, restart from the base. */
+-        ruby_ep2_ring_reset(mac);
+-        txep = ruby_ep_for_addr(0x81);
+-        if (txep) {
+-            lck_spin_lock(&txep->q_lock);
+-            txep->q_head = NULL;
+-            txep->q_tail = NULL;
+-            txep->q_depth = 0;
+-            lck_spin_unlock(&txep->q_lock);
+-        }
+-        (void)ruby_ep2_qmu_start(mac);
+-    }
++    /*
++     * 0300: vendor mtu3_qmu_flush + mtu3_qmu_start split.  The ring is
++     * dropped and re-prepared from its base; the Q_START follows with the
++     * first prepared GPD (ruby_ep2_qmu_prepare leaves the queue unstarted).
++     */
++    ruby_ep2_ring_reset(mac);
++    txep = ruby_ep_for_addr(0x81);
++    if (txep) {
++        lck_spin_lock(&txep->q_lock);
++        txep->q_head = NULL;
++        txep->q_tail = NULL;
++        txep->q_depth = 0;
++        lck_spin_unlock(&txep->q_lock);
++    }
++    (void)ruby_ep2_qmu_prepare(mac);
+     ruby_ep2_tx_restarts++;
+     ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_RECOVER,
+         ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
+@@ -2805,7 +2703,7 @@ ruby_tx_reset_fire(vm_offset_t mac)
+         "tqcsr=%08x mode=%u/%u/%u\n", ruby_tx_reset_cnt,
+         ruby_gpd_deq, ruby_gpd_enq, ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, TQCSR1_OFF),
+-        ruby_txreset_en, ruby_txeprst_en, ruby_txdeq_en);
++        ruby_txreset_en, ruby_txeprst_en);
+     if (ruby_txreplay_en && ruby_acm_cmd)
+         ruby_tx_replay_snapshot(mac);
+     ruby_ep2_tx_rebuild(mac);
+@@ -2816,42 +2714,20 @@ ruby_tx_recover_poll(vm_offset_t mac)
+ {
+     uint32_t tx0;
+ 
+-    /*
+-     * 0293: PIO owns TX1CSR0.  The 1 ms tick must not inject TXPKTRDY or
+-     * flip DMAREQEN while ruby_txpio_send() is between its RMWs.
+-     */
+-    if (ruby_txpio_en)
+-        return;
+-    tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+-
+-    /* 0274/0275/0276: vendor ZLP-recovery style.  A TX FIFO holding data
+-     * with TXPKTRDY clear never reaches the bus (console: tcsr=22000200
+-     * FIFOFULL or 20000200 non-empty, TXPKTRDY=0).  The QMU consumes the
+-     * GPDs immediately (inflight 0) and the FIFO is not always "full", so
+-     * gate on "FIFO not empty": stop the QMU DMA, assert TXPKTRDY, resume
+-     * the DMA, at most once per 200 ms. */
+-    if (ruby_txrdy_en &&
+-        !(tx0 & (1u << 24)) && !(tx0 & (1u << 16)) &&
+-        (uint32_t)(ruby_ms - ruby_tx_progress_ms) >= 200 &&
+-        (uint32_t)(ruby_ms - ruby_txrdy_ms) >= 200) {
+-        uint32_t v = tx0 & ~(1u << 29);
+-
+-        ruby_wr32(mac, TX1CSR0_OFF, v | (1u << 16));
+-        ruby_wr32(mac, TX1CSR0_OFF, v | (1u << 16) | (1u << 29));
+-        ruby_txrdy_ms = ruby_ms;
+-        ruby_txrdy_kicks++;
+-    }
+-
+     if (!ruby_txreset_en)
+         return;
+-    /* 0278: the stuck FIFO is usually "non-empty, not full" with inflight 0
+-     * (the QMU already fetched the GPDs) and TXPKTRDY reads back 0, so the
+-     * old FIFOFULL/inflight gate never armed.  A healthy pending packet
+-     * has TXPKTRDY set; use "FIFO not empty && TXPKTRDY clear" instead. */
+-    if (tx0 & (1u << 24))
+-        return;
++    tx0 = ruby_rd32(mac, TX1CSR0_OFF);
++    /*
++     * Two stall signatures, both read-only:
++     *  0278 MAC jam: TX FIFO holds bytes while TXPKTRDY reads 0.
++     *  0300 silent stop: prepared GPDs are in flight but the queue never
++     *       advances (a host that is merely not reading keeps TXPKTRDY
++     *       set, so a healthy queue is never rebuilt).
++     */
+     if (tx0 & (1u << 16))
+         return;
++    if (ruby_inflight == 0 && (tx0 & (1u << 24)))
++        return;
+     if ((uint32_t)(ruby_ms - ruby_tx_progress_ms) < 200)
+         return;
+     if ((uint32_t)(ruby_ms - ruby_tx_reset_ms) < 1000)
+@@ -2871,8 +2747,6 @@ ruby_ep2_recover(vm_offset_t mac)
+ {
+     uint32_t q0, q1, err, tqcsr, tx0;
+ 
+-    if (ruby_txpio_en)
+-        return;
+     if ((int32_t)(ruby_ms - ruby_ep2_recover_hold_until) < 0) {
+         ruby_ep2_recover_skipped++;
+         return;
+@@ -2896,7 +2770,7 @@ ruby_ep2_recover(vm_offset_t mac)
+ 
+     ruby_ep2_clear_errors(mac);
+     ruby_ep2_ring_reset(mac);
+-    if (ruby_ep2_qmu_start(mac) != 0) {
++    if (ruby_ep2_qmu_prepare(mac) != 0) {
+         printf("RUBY USB: EP2 start failed spins=%u failures=%u\n",
+             ruby_ep2_stop_spins_last, ruby_ep2_start_failures);
+         ruby_ep2_recover_hold_until = ruby_ms + RUBY_EP2_RECOVER_HOLD_MS;
+@@ -3089,15 +2963,10 @@ ruby_ep2_config(vm_offset_t mac)
+ 
+     /*
+      * 0142: same 512 MPS on the reset/rearm path.
+-     * 0292: ruby_txpio=1 keeps TX_DMAREQEN clear and flushes the FIFO
+-     * once; the CPU feeds the FIFO and rings TXPKTRDY per packet.
++     * 0300: the QMU owns TX_DMAREQEN; it is set once here and never
++     * toggled per packet again.
+      */
+-    if (ruby_txpio_en) {
+-        ruby_wr32(mac, TX1CSR0_OFF, RUBY_TX_MPS | TX_FLUSHFIFO);
+-        ruby_wr32(mac, TX1CSR0_OFF, RUBY_TX_MPS);
+-    } else {
+-        ruby_wr32(mac, TX1CSR0_OFF, RUBY_TX_MPS | TX_DMAREQEN);
+-    }
++    ruby_wr32(mac, TX1CSR0_OFF, RUBY_TX_MPS | TX_DMAREQEN);
+     /*
+      * P9 runs the same bulk endpoint with TX_SLOT(2); 0102 changed this to
+      * slot 0 and never restored it.  Bulk type is 0, so only the slot field
+@@ -3153,20 +3022,8 @@ ruby_ep2_config(vm_offset_t mac)
+         ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
+     ruby_wr32(mac, TQSAR1_OFF, (uint32_t)ruby_ring_pa);
+     ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((ruby_ring_pa >> 32) & 0xfu));
+-    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-    if (ruby_txpio_en) {
+-        /*
+-         * 0292: the QMU start address and Q_START are required even for
+-         * CPU-fed FIFO packets (verified on 0291 W0); keep TX_DMAREQEN
+-         * off and never enqueue a GPD.  RX QMU is unchanged.
+-         */
+-        ruby_wr32(mac, TX1CSR0_OFF, RUBY_TX_MPS);
+-        ruby_ep_ready = 1;
+-        ruby_seq("TXCFG_PIO", ruby_ep_ready, RUBY_TX_FIFO_OFF);
+-        printf("RUBY USB: 0292 txpio=1 fifo=0x%x mps=%u (QMU start, DMA off)\n",
+-            RUBY_TX_FIFO_OFF, RUBY_TX_MPS);
+-        return;
+-    }
++    /* 0300: prepare only; the first prepared GPD performs the Q_START. */
++    ruby_tx_queue_started = 0;
+     ruby_ep_ready = 1;
+     ruby_seq("TXCFG_OUT", (uint32_t)ruby_ring_pa, ruby_ep_ready);
+     printf("RUBY USB: EP2 QMU ring pa=0x%llx gpd[0]=0x%llx gpd[%u]=0x%llx "
+@@ -3294,6 +3151,14 @@ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+         ruby_tx_progress_deq = ruby_gpd_deq;
+         ruby_tx_progress_ms = ruby_ms;
+         ruby_tx_reset_tries = 0;
++        /*
++         * 0300: once the ring drains, the QMU has no GPD left to fetch and
++         * this MAC parks the queue (0272/0273: RESUME on the parked queue
++         * is a no-op).  Mark the software state unstarted so the next
++         * prepared GPD issues Q_START instead of a dead RESUME.
++         */
++        if (ruby_inflight == 0)
++            ruby_tx_queue_started = 0;
+         ruby_tx_mtr_add(RUBY_MTR_TX_DONE, (uint16_t)freed,
+             cur, ruby_rd32(mac, TQCSR1_OFF));
+         if (freed > ruby_ep2_drain_max)
+@@ -3398,209 +3263,6 @@ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
+     return n;
+ }
+ 
+-/*
+- * 0292: CPU PIO TX for EP1 IN.  The FIFO window auto-increments, so every
+- * access uses the same address; 4/2/1-byte stores cover any length.  When
+- * ruby_txpio=1 the TX QMU is never started.
+- */
+-static void
+-ruby_txpio_send(vm_offset_t mac, const uint8_t *buf, uint32_t len)
+-{
+-    uint32_t off = 0;
+-
+-    while (off < len) {
+-        uint32_t chunk = len - off;
+-        uint32_t i = 0;
+-        uint32_t spins, v;
+-
+-        if (chunk > RUBY_TX_MPS)
+-            chunk = RUBY_TX_MPS;
+-        /*
+-         * 0292: the verified sequence clears TX_DMAREQEN and waits for the
+-         * previous packet to leave the FIFO before the CPU writes it.
+-         */
+-        v = ruby_rd32(mac, TX1CSR0_OFF);
+-        v &= ~(TX_DMAREQEN | TX_MPSZ_MSK);
+-        v |= RUBY_TX_MPS;
+-        ruby_wr32(mac, TX1CSR0_OFF, v);
+-        spins = 0;
+-        while ((ruby_rd32(mac, TX1CSR0_OFF) & TX_FIFOFULL) &&
+-            spins++ < 20000u)
+-            ;
+-        if (spins > 20000u) {
+-            ruby_txpio_timeouts++;
+-            if (ruby_txpio_timeouts <= 4 ||
+-                (ruby_txpio_timeouts & 0x3fu) == 0)
+-                printf("RUBY USB: 0292 txpio busy n=%u tx0=%08x\n",
+-                    ruby_txpio_timeouts, ruby_rd32(mac, TX1CSR0_OFF));
+-            break;
+-        }
+-        ruby_txpio_write_busy = 1;
+-        ruby_dma_mb();
+-        while (i + 4u <= chunk) {
+-            v = (uint32_t)buf[off + i] |
+-                ((uint32_t)buf[off + i + 1u] << 8) |
+-                ((uint32_t)buf[off + i + 2u] << 16) |
+-                ((uint32_t)buf[off + i + 3u] << 24);
+-            *(volatile uint32_t *)(mac + RUBY_TX_FIFO_OFF) = v;
+-            i += 4u;
+-        }
+-        if (chunk - i >= 2u) {
+-            *(volatile uint16_t *)(mac + RUBY_TX_FIFO_OFF) =
+-                (uint16_t)((uint32_t)buf[off + i] |
+-                ((uint32_t)buf[off + i + 1u] << 8));
+-            i += 2u;
+-        }
+-        if (i < chunk)
+-            *(volatile uint8_t *)(mac + RUBY_TX_FIFO_OFF) = buf[off + i];
+-        ruby_dma_mb();
+-        v = ruby_rd32(mac, TX1CSR0_OFF);
+-        v &= ~(TX_DMAREQEN | TX_MPSZ_MSK);
+-        v |= RUBY_TX_MPS | TX_TXPKTRDY;
+-        ruby_wr32(mac, TX1CSR0_OFF, v);
+-        if (ruby_txpiotail_en && !ruby_dmareq_pio_en) {
+-            /*
+-             * 0293 vendor tail (mtu3_qmu.c stop_tx ZLP): re-enable the
+-             * QMU DMA and resume the queue after TXPKTRDY.
+-             * 0296: mode 2 defers the Q_START to after the TXPKTRDY wait,
+-             * where the FIFO is non-empty and the QMU has stopped.
+-             * 0298: ruby_dmareq_pio=1 skips the tail so TX_DMAREQEN stays
+-             * clear and the CPU remains the only TXPKTRDY owner.
+-             */
+-            v = ruby_rd32(mac, TX1CSR0_OFF) | TX_DMAREQEN;
+-            ruby_wr32(mac, TX1CSR0_OFF, v);
+-            ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-            if (ruby_txpiotail_en < 2 &&
+-                !(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-                ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-            ruby_txpio_tail_cnt++;
+-        }
+-        /*
+-         * TXPKTRDY self-clears when the MAC accepts the packet; FIFOFULL
+-         * clears when the packet is fetched.  Bounded wait, then move on.
+-         */
+-        spins = 0;
+-        while (spins++ < 20000u) {
+-            v = ruby_rd32(mac, TX1CSR0_OFF);
+-            if (!(v & TX_TXPKTRDY) && !(v & TX_FIFOFULL))
+-                break;
+-        }
+-        if (spins > 20000u) {
+-            ruby_txpio_timeouts++;
+-            if (ruby_txpio_timeouts <= 4 ||
+-                (ruby_txpio_timeouts & 0x3fu) == 0)
+-                printf("RUBY USB: 0292 txpio timeout n=%u tx0=%08x "
+-                    "len=%u\n", ruby_txpio_timeouts,
+-                    ruby_rd32(mac, TX1CSR0_OFF), chunk);
+-        }
+-        /*
+-         * 0299: ruby_qstart_only=1 admits the deferred-Q_START block with
+-         * the tail disabled, so "pure workloop Q_START" becomes a real
+-         * single variable (docs/113 finding 3: with txpiotail=0 alone the
+-         * pending flag below is unreachable and the 0292 pure-PIO dead
+-         * state comes back).  Tail modes 2/3 keep their original gates so
+-         * the baseline behaviour is unchanged.
+-         */
+-        if (ruby_txpiotail_en >= 2 || ruby_qstart_only_en) {
+-            /*
+-             * 0296: mode 2 restarts a stopped QMU immediately after the
+-             * TXPKTRDY wait.
+-             * 0297: mode 3 defers the Q_START by ruby_qstart_ms; the 1 ms
+-             * tick performs it.  The write-busy flag keeps the deferred
+-             * starter out of the producer's FIFO/TXPKTRDY window.
+-             */
+-            v = ruby_rd32(mac, TX1CSR0_OFF);
+-            if (!(v & TX_FIFOEMPTY)) {
+-                if (ruby_txpiotail_en >= 3 || ruby_qstart_only_en) {
+-                    ruby_txpio_qstart_pending = 1;
+-                    ruby_txpio_qstart_due_ms =
+-                        ruby_ms + (uint32_t)ruby_qstart_ms;
+-                } else {
+-                    uint32_t spins2 = 0;
+-                    uint32_t tq;
+-
+-                    tq = ruby_rd32(mac, TQCSR1_OFF);
+-                    while ((tq & QMU_Q_ACTIVE) && spins2++ < 2000)
+-                        tq = ruby_rd32(mac, TQCSR1_OFF);
+-                    if (!(tq & QMU_Q_ACTIVE)) {
+-                        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-                        ruby_txpio_start_cnt++;
+-                        if (ruby_txpio_start_cnt <= 8 ||
+-                            (ruby_txpio_start_cnt & 0x3fu) == 0)
+-                            printf("RUBY USB: 0296 pio qstart n=%u tq=%08x "
+-                                "tx0=%08x\n", ruby_txpio_start_cnt,
+-                                ruby_rd32(mac, TQCSR1_OFF),
+-                                ruby_rd32(mac, TX1CSR0_OFF));
+-                    }
+-                }
+-            }
+-        }
+-        ruby_txpio_write_busy = 0;
+-        ruby_txpio_pkts++;
+-        ruby_txpio_bytes += chunk;
+-        off += chunk;
+-    }
+-}
+-
+-static void
+-ruby_txpio_qstart_service(vm_offset_t mac)
+-{
+-    uint32_t t0, tq;
+-
+-    if (!ruby_txpio_qstart_pending || ruby_txpio_write_busy)
+-        return;
+-    if ((int32_t)(ruby_ms - ruby_txpio_qstart_due_ms) < 0)
+-        return;
+-    t0 = ruby_rd32(mac, TX1CSR0_OFF);
+-    tq = ruby_rd32(mac, TQCSR1_OFF);
+-    /* anti-collision: producer not mid-write, TXPKTRDY clear, FIFO holds
+-     * a packet, QMU stopped.  Retry on the next tick otherwise. */
+-    if ((t0 & TX_TXPKTRDY) || (t0 & TX_FIFOEMPTY) || (tq & QMU_Q_ACTIVE))
+-        return;
+-    ruby_txpio_qstart_pending = 0;
+-    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-    ruby_txpio_start_cnt++;
+-    if (ruby_txpio_start_cnt <= 8 ||
+-        (ruby_txpio_start_cnt & 0x3fu) == 0)
+-        printf("RUBY USB: 0297 pio qstart n=%u ms=%d tq=%08x tx0=%08x\n",
+-            ruby_txpio_start_cnt, ruby_qstart_ms,
+-            ruby_rd32(mac, TQCSR1_OFF), ruby_rd32(mac, TX1CSR0_OFF));
+-}
+-
+-static void
+-ruby_txpio_qstart_tick(vm_offset_t mac)
+-{
+-    if (!ruby_txpio_qstart_pending)
+-        return;
+-    if ((int32_t)(ruby_ms - ruby_txpio_qstart_due_ms) < 0)
+-        return;
+-    /*
+-     * 0298: the deferred starter must share the producer's owner.  In IRQ
+-     * mode the PIO send runs on the QMU workloop, so only queue a request
+-     * here; the 1 ms EP0 thread must not touch TQCSR1 concurrently (the
+-     * 0297 service did and produced the pseudo-active 0x18100 readback).
+-     */
+-    if (ruby_qmu_irq_mode) {
+-        ruby_txpio_qstart_req = 1;
+-        ruby_usb_irq_kick();
+-    } else {
+-        ruby_txpio_qstart_service(mac);
+-    }
+-}
+-
+-static void
+-ruby_txpio_pump(vm_offset_t mac)
+-{
+-    uint32_t n;
+-
+-    if (!ruby_acm_cmd || !ruby_bulk_buf[0])
+-        return;
+-    n = ruby_acm_echo_dequeue(ruby_bulk_buf[0], RUBY_TX_MPS);
+-    if (!n)
+-        return;
+-    ruby_txpio_send(mac, ruby_bulk_buf[0], n);
+-}
+-
+ /*
+  * 0245: forced STOP + full re-program.  RESUME is a no-op while the
+  * readback still claims ACTIVE (console: act == kick, inf stuck), so a
+@@ -3649,16 +3311,12 @@ ruby_ep2_push_log(vm_offset_t mac)
+     uint64_t pos, np, log_pa;
+     uint8_t *g, *buf;
+     uint32_t n, queued = 0, freed = 0;
+-    uint32_t actual_len = 0;
++    uint32_t actual_len = 0, acm_zlp = 0, zlp = 0;
+     /* 0217: obs-only backpressure counters (see ruby_0x21 diag) */
+ 
+     if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_acm_cmd))
+         return;
+     ruby_push_tries++;
+-    if (ruby_txpio_en) {
+-        ruby_txpio_pump(mac);
+-        return;
+-    }
+ 
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+     q1 = ruby_rd32(mac, QISAR1_OFF);
+@@ -3687,37 +3345,13 @@ ruby_ep2_push_log(vm_offset_t mac)
+         if (ruby_txdone_en &&
+             (ruby_ep2_q0_seen <= 16 || (ruby_ep2_q0_seen & 0x3fu) == 0))
+             printf("RUBY USB MAC: devconf=%08x usb3c=%08x pm=%08x "
+-                "misc=%08x lv1=%08x usb2op=%08x txcnt=%u\n",
++                "misc=%08x lv1=%08x usb2op=%08x\n",
+                 ruby_rd32(mac, DEVICE_CONF - MTU3_PA),
+                 ruby_rd32(mac, USB3_CONFIG - MTU3_PA),
+                 ruby_rd32(mac, PM_CTRL - MTU3_PA),
+                 ruby_rd32(mac, MISC_CTRL - MTU3_PA),
+                 ruby_rd32(mac, LV1IECR - MTU3_PA),
+-                ruby_rd32(mac, USB20_OP - MTU3_PA), ruby_tx_k2_kicks);
+-        /* 0280: opt-in, faithful vendor ZLP-style send kick.  Stop the QMU
+-         * DMA, wait for the FIFO to stop reporting full, assert TXPKTRDY,
+-         * re-enable DMA and resume the queue. */
+-        if (ruby_tx_kick_en) {
+-            uint32_t t0 = ruby_rd32(mac, TX1CSR0_OFF);
+-
+-            if (!(t0 & (1u << 24))) {
+-                uint32_t v = t0 & ~(1u << 29);
+-                uint32_t spins = 0;
+-
+-                ruby_wr32(mac, TX1CSR0_OFF, v);
+-                while ((ruby_rd32(mac, TX1CSR0_OFF) & (1u << 25)) &&
+-                    spins++ < 1000)
+-                    ;
+-                ruby_wr32(mac, TX1CSR0_OFF, v | (1u << 16));
+-                ruby_dma_mb();
+-                ruby_wr32(mac, TX1CSR0_OFF,
+-                    v | (1u << 16) | (1u << 29));
+-                ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-                if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE))
+-                    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-                ruby_tx_k2_kicks++;
+-            }
+-        }
++                ruby_rd32(mac, USB20_OP - MTU3_PA));
+     }
+ 
+     freed = 0;
+@@ -3911,13 +3545,14 @@ ruby_ep2_push_log(vm_offset_t mac)
+             ruby_wr32(mac, TX1CSR0_OFF,
+                 (csr0 & ~(1u << 22)) | (1u << 22));
+         tqcsr = ruby_rd32(mac, TQCSR1_OFF);
++        acm_zlp = 0;
+         if (ruby_acm_cmd) {
+             /* 0231: raw echo bytes, no log frame header or padding. */
+             if (ruby_tx_replay_len > 0) {
+                 /* 0277: re-send payloads preserved across a TX rebuild. */
+                 n = ruby_tx_replay_len;
+-                if (n > RUBY_BULK_BYTES)
+-                    n = RUBY_BULK_BYTES;
++                if (n > RUBY_TX_MPS)
++                    n = RUBY_TX_MPS;
+                 memcpy(buf, ruby_tx_replay_buf, n);
+                 memmove(ruby_tx_replay_buf, ruby_tx_replay_buf + n,
+                     ruby_tx_replay_len - n);
+@@ -3928,16 +3563,27 @@ ruby_ep2_push_log(vm_offset_t mac)
+                     printf("RUBY USB ACM TXREP n=%u left=%u bytes=%u\n",
+                         n, ruby_tx_replay_len, ruby_tx_replay_bytes);
+                 }
++                acm_zlp = (n == RUBY_TX_MPS &&
++                    ruby_tx_replay_len == 0) ? 1u : 0u;
+                 actual_len = n;
+                 frames = 1;
+             } else {
+-            n = ruby_acm_echo_dequeue(buf, RUBY_BULK_BYTES);
++            /*
++             * 0300: echo one host read as a chain of <=512 B GPDs (one
++             * wMaxPacketSize each).  The ring budget bounds a single push
++             * pass; the remainder stays queued for the next pass.
++             */
++            n = ruby_acm_echo_dequeue(buf, RUBY_TX_MPS);
+             if (!n)
+                 break;
++            /* The transfer ends exactly on an MPS boundary only when the
++             * dequeue also drained the ring; then this chunk carries ZLP. */
++            acm_zlp = (n == RUBY_TX_MPS &&
++                ruby_acm_echo_head == ruby_acm_echo_tail) ? 1u : 0u;
+             if (ruby_acm_echo_dbg_tx < 8) {
+                 ruby_acm_echo_dbg_tx++;
+-                printf("RUBY USB ACM TX n=%u enq=%u inflight=%u\n",
+-                    n, enq, ruby_inflight);
++                printf("RUBY USB ACM TX n=%u enq=%u inflight=%u zlp=%u\n",
++                    n, enq, ruby_inflight, acm_zlp);
+             }
+             actual_len = n;
+             frames = 1;
+@@ -3997,13 +3643,23 @@ ruby_ep2_push_log(vm_offset_t mac)
+          * qcr1 TX_ZLP is already on (0211 L1981); the tail ZLP needs the
+          * GPD flag itself. dw3 low 12 bits = byte count, BIT(29) mirrors
+          * vendor GPD_EXT_FLAG_ZLP for the ext flag (old IP path). */
++        /*
++         * 0300: the ZLP tail belongs to the last chunk of a transfer whose
++         * total is an exact 512 multiple (acm_zlp, computed at dequeue).
++         * The non-ACM log path keeps the per-frame 512 rule.
++         */
++        if (ruby_acm_cmd)
++            zlp = acm_zlp;
++        else
++            zlp = ((actual_len % RUBY_LOG_CHUNK) == 0) ? 1u : 0u;
+         *(volatile uint32_t *)(g + 12) =
+-            (actual_len) | (((actual_len % RUBY_LOG_CHUNK) == 0) ? (1u << 29) : 0);
++            (actual_len) | (zlp ? (1u << 29) : 0);
+         /* 0252: TX uses the vendor's zero checksum byte (its CS engine is
+          * off); RX keeps a computed checksum. */
+         g[1] = 0;
+-        /* Payload is cached: one clean covers all 32 frames. */
+-        ruby_dc_civac(buf, RUBY_BULK_BYTES);
++        /* Payload is cached; clean exactly the bytes this GPD exposes. */
++        ruby_dc_civac(buf, ruby_acm_cmd ?
++            ((actual_len + 63u) & ~63u) : RUBY_BULK_BYTES);
+         if (!ruby_dma_uc) {
+             ruby_dc_civac(g, RUBY_GPD_DESC);
+             ruby_dma_wmb();         /* fields before HWO */
+@@ -4062,31 +3718,22 @@ ruby_ep2_push_log(vm_offset_t mac)
+     ruby_tx_kick_total[RUBY_TX_SRC_PUSH]++;
+     ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_PUSH,
+         ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
+-    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)) {
+-        /* 0273: RESUME is a no-op on a stopped queue; the vendor restarts
+-         * with Q_START from the oldest pending GPD instead. */
++    if (!ruby_tx_queue_started) {
++        /*
++         * 0300: first prepared GPD since prepare/stop/clear.  START from
++         * the oldest pending GPD.  The decision is software-owned, so the
++         * 0x18100 pseudo-active readback can neither veto nor fake it.
++         */
+         uint64_t kpa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
+ 
+-        if (ruby_txkick_en) {
+-            ruby_wr32(mac, TQSAR1_OFF, (uint32_t)kpa);
+-            ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((kpa >> 32) & 0xfu));
+-            ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+-            ruby_txkick_starts++;
+-            /* 0293 D8: the push restart path ignored Q_START failure. */
+-            if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)) {
+-                ruby_push_start_fail++;
+-                if (ruby_push_start_fail <= 4 ||
+-                    (ruby_push_start_fail & 0x3fu) == 0)
+-                    printf("RUBY USB: 0293 push start fail n=%u "
+-                        "tq=%08x deq=%u enq=%u inf=%u\n",
+-                        ruby_push_start_fail,
+-                        ruby_rd32(mac, TQCSR1_OFF),
+-                        ruby_gpd_deq, ruby_gpd_enq, ruby_inflight);
+-            }
+-        } else {
+-            ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+-        }
++        ruby_wr32(mac, TQSAR1_OFF, (uint32_t)kpa);
++        ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((kpa >> 32) & 0xfu));
++        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++        ruby_tx_queue_started = 1;
++        ruby_txkick_starts++;
++    } else {
++        /* Vendor mtu3_qmu_resume kick: RESUME only. */
++        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_RESUME);
+     }
+ 
+     if (ruby_rd32(mac, QISAR0_OFF) & RUBY_QMU_TX_DONE) {
+@@ -4137,32 +3784,27 @@ ruby_ep2_status_poll(vm_offset_t mac)
+ }
+ 
+ /*
+- * 0290: vendor parity for CLEAR_FEATURE.  The vendor clears the stall bits
+- * and pulses EP_RST (data toggle reset) without flushing the ring or
+- * restarting QMU.
++ * 0300: single CLEAR_FEATURE(HALT) path for the bulk IN.  Vendor parity
++ * for the stall bits and the data-toggle reset (mtu3_ep_stall_set clear),
++ * followed by the standard QMU queue restart: stop, drop the ring and
++ * re-prepare from its base.  The Q_START follows with the next GPD.
+  */
+ static void
+-ruby_ep1in_halt_clear_light(vm_offset_t mac)
++ruby_tx_halt_clear(vm_offset_t mac)
+ {
+     uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+ 
+     ruby_wr32(mac, TX1CSR0_OFF,
+         (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+-    ruby_ep2_eprst_tx(mac);
+-    ruby_clr81_cnt++;
+-    if (ruby_clr81_cnt <= 8 || (ruby_clr81_cnt & 0xffu) == 0)
+-        ruby_seq("CLR81", tx0, ruby_rd32(mac, TX1CSR0_OFF));
+-}
+-
+-static void
+-ruby_ep1in_halt_status_only(vm_offset_t mac)
+-{
+-    uint32_t tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+-
+-    ruby_wr32(mac, TX1CSR0_OFF,
+-        (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+-    if (ruby_clr81_hits[3] <= 8 || (ruby_clr81_hits[3] & 0xffu) == 0)
+-        ruby_seq("CLR81S", tx0, ruby_rd32(mac, TX1CSR0_OFF));
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++    (void)ruby_rd32(mac, EP_RST_OFF);
++    ruby_ep2_state_reset(mac);
++    (void)ruby_ep2_qmu_prepare(mac);
++    ruby_ep2_halt_clears++;
++    ruby_busy_ticks = 0;
++    printf("RUBY USB: 0300 halt_tx tx0=%08x tq=%08x inf=%u\n",
++        tx0, ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
+ }
+ 
+ static void
+@@ -4187,66 +3829,6 @@ ruby_ep2_rx_halt_clear_light(vm_offset_t mac)
+             ruby_rd32(mac, RX1CSR0_OFF), ruby_rd32(mac, RQCSR1_OFF));
+ }
+ 
+-static void
+-ruby_ep2_halt_clear(vm_offset_t mac)
+-{
+-    uint32_t q0, q1, err, tqcsr, tx0, freed = 0, resumed = 0;
+-
+-    if (!ruby_ep_ready)
+-        return;
+-    q0 = ruby_rd32(mac, QISAR0_OFF);
+-    q1 = ruby_rd32(mac, QISAR1_OFF);
+-    err = ruby_rd32(mac, TQERRIR0_OFF);
+-    tqcsr = ruby_rd32(mac, TQCSR1_OFF);
+-    tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+-    if (ruby_inflight > 0)
+-        freed = ruby_ep2_drain(mac, q0);
+-    printf("RUBY USB: EP2 halt_clear q0=%08x q1=%08x err=%08x "
+-        "tqcsr=%08x tx0=%08x cur=%02x enq=%u deq=%u "
+-        "inflight=%u hwo=%llx total=%llu pos=%llu freed=%u\n",
+-        q0, q1, err, tqcsr, tx0, ruby_ep2_cur_slot(mac),
+-        ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+-        (unsigned long long)ruby_ep2_hwo_bits(),
+-        (unsigned long long)sweet_log_position(),
+-        (unsigned long long)ruby_log_pos, freed);
+-    printf("RUBY USB: EP2 halt_clear2 drain=%u noq0=%u bad=%u "
+-        "gap=%u inv=%u max=%u calls=%u clears=%u\n",
+-        ruby_ep2_drain_freed_total, ruby_ep2_drain_noq0,
+-        ruby_ep2_cur_bad, ruby_ep2_hwo_gap,
+-        ruby_ep2_drain_invariant, ruby_ep2_drain_max,
+-        ruby_ep2_drain_calls, ruby_ep2_halt_clears);
+-
+-    if (ruby_ep2_halt_clears < 2)
+-        ruby_ep2_dump_gpd(mac, 20, 32);
+-
+-    /*
+-     * 0127: vendor CLEAR_FEATURE parity: W1C SENTSTALL, clear SENDSTALL,
+-     * pulse EP_RST.  0188 adds a ring-state reset and TX FIFO flush after
+-     * the pulse; 0189 restarts the QMU so the re-armed endpoint is live.
+-     */
+-    ruby_wr32(mac, TX1CSR0_OFF,
+-        (tx0 & ~(TX_SENDSTALL | TX_SENTSTALL)) | TX_SENTSTALL);
+-    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
+-    ruby_wr32(mac, EP_RST_OFF, 0);
+-    ruby_seq("HALT_TX", ruby_rd32(mac, TX1CSR0_OFF),
+-        ruby_rd32(mac, TQCSR1_OFF));
+-    /* 0188: endpoint reset leaves no stale ring/FIFO state behind. */
+-    ruby_ep2_state_reset(mac);
+-    ruby_ep2_halt_clears++;
+-    ruby_busy_ticks = 0;
+-
+-    if (!(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE)) {
+-        /* 0189: RESUME cannot start a stopped queue; do a full start. */
+-        if (ruby_ep2_qmu_start(mac) == 0)
+-            resumed = 1;
+-    }
+-    printf("RUBY USB: EP2 halt_clear3 tqcsr=%08x cur=%02x enq=%u deq=%u "
+-        "inflight=%u hwo=%llx resumed=%u clears=%u\n",
+-        ruby_rd32(mac, TQCSR1_OFF), ruby_ep2_cur_slot(mac),
+-        ruby_gpd_enq, ruby_gpd_deq, ruby_inflight,
+-        (unsigned long long)ruby_ep2_hwo_bits(), resumed, ruby_ep2_halt_clears);
+-}
+-
+ /* ---- EP2 bulk OUT (RX), 0112 Stage A ---- */
+ 
+ static uint32_t
+@@ -5341,11 +4923,6 @@ ruby_usb_irq_service_work(void)
+         ruby_qmu_rx_recover_req = 0;
+         ruby_ep2_rx_recover(mac);
+     }
+-    /* 0298: deferred PIO Q_START runs here, serialized with push/drain. */
+-    if (ruby_txpio_qstart_req) {
+-        ruby_txpio_qstart_req = 0;
+-        ruby_txpio_qstart_service(mac);
+-    }
+     if (ruby_qmu_push_req) {
+         ruby_qmu_push_req = 0;
+         ruby_ep2_push_log(mac);
+@@ -5724,17 +5301,17 @@ ruby_ep0_vendor_audit(vm_offset_t mac, uint32_t t, uint32_t wlen)
+     v[3] = ruby_clr81_hits[2];
+     v[4] = ruby_clr81_hits[3];
+     v[5] = ruby_clr81_reqs;
+-    v[6] = ruby_resume_eprst_cnt;
++    v[6] = 0;                   /* 0300: EP_RST no longer fires from resume */
+     v[7] = ruby_resume_vendor_cnt;
+     v[8] = ruby_ep2_tx_restarts;
+     v[9] = (ruby_recover_suppressed[0] & 0xffu) |
+         ((ruby_recover_suppressed[1] & 0xffu) << 8) |
+         ((ruby_recover_suppressed[2] & 0xffu) << 16);
+     v[10] = (uint32_t)ruby_recover_mask;
+-    v[11] = ruby_txpio_tail_cnt;
+-    v[12] = ruby_txpio_pkts;
+-    v[13] = ruby_txpio_timeouts;
+-    v[14] = ruby_push_start_fail;
++    v[11] = ruby_txkick_starts;
++    v[12] = ruby_tx_kick_total[RUBY_TX_SRC_PUSH];
++    v[13] = ruby_tx_reset_tries;
++    v[14] = ruby_tx_queue_started;
+     v[15] = (ruby_gpd_enq & 0xffu) | ((ruby_gpd_deq & 0xffu) << 8) |
+         ((ruby_inflight & 0xffu) << 16);
+     ruby_ep0_send(mac, t, 0xc030, (const uint8_t *)v, sizeof(v), wlen);
+@@ -6407,33 +5984,21 @@ ruby_usb_probe(void)
+     int rxskip = 0;
+     int txreset = 0;
+     int txeprst = 0;
+-    int txdeq = 0;
+     int noise = 0;
+-    int txkick = 1;
+-    int txrdy = 1;
+-    int txreplay = 1;
++    int txreplay = 0;
+     int txdone = 1;
+-    int txkick2 = 0;
+     int lpmhrwe = 1;
+     int usb2parity = 1;
+     int usbintr = 1;
+     int lpmmask = 1;
+     int txslot = 2;
+     int txfifo = 1;
+-    int clrhalt = 0;
+     int cfgrst = 0;
+-    int txpio = 0;
+-    int clr81 = 0;
+-    int resume = 0;
+     int recover = 0;
+-    int txpiotail = 0;
+-    int qstartonly = 0;
+     int rxbuf = 512;
+     int lpmfc = 0;
+     int devrstpre = 0;
+-    int qstart_ms = 1;
+     int clr01 = 0;
+-    int dmareqpio = 0;
+     int qisar1w = 1;
+     int qisar0isr = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+@@ -6456,22 +6021,14 @@ ruby_usb_probe(void)
+     ruby_rx_skip_en = (rxskip == 1);
+     PE_parse_boot_argn("ruby_txreset", &txreset, sizeof(txreset));
+     PE_parse_boot_argn("ruby_txeprst", &txeprst, sizeof(txeprst));
+-    PE_parse_boot_argn("ruby_txdeq", &txdeq, sizeof(txdeq));
+     ruby_txreset_en = (txreset == 1);
+     ruby_txeprst_en = (txeprst == 1);
+-    ruby_txdeq_en = (txdeq == 1);
+     PE_parse_boot_argn("ruby_noise", &noise, sizeof(noise));
+     ruby_noise_en = (noise == 1);
+-    PE_parse_boot_argn("ruby_txkick", &txkick, sizeof(txkick));
+-    ruby_txkick_en = (txkick == 1);
+-    PE_parse_boot_argn("ruby_txrdy", &txrdy, sizeof(txrdy));
+-    ruby_txrdy_en = (txrdy == 1);
+     PE_parse_boot_argn("ruby_txreplay", &txreplay, sizeof(txreplay));
+     ruby_txreplay_en = (txreplay == 1);
+     PE_parse_boot_argn("ruby_txdone", &txdone, sizeof(txdone));
+     ruby_txdone_en = (txdone == 1);
+-    PE_parse_boot_argn("ruby_tx_kick", &txkick2, sizeof(txkick2));
+-    ruby_tx_kick_en = (txkick2 == 1);
+     PE_parse_boot_argn("ruby_lpmhrwe", &lpmhrwe, sizeof(lpmhrwe));
+     ruby_lpmhrwe_en = (lpmhrwe == 1);
+     PE_parse_boot_argn("ruby_usb2parity", &usb2parity, sizeof(usb2parity));
+@@ -6488,38 +6045,12 @@ ruby_usb_probe(void)
+     ruby_txslot = txslot;
+     PE_parse_boot_argn("ruby_txfifo", &txfifo, sizeof(txfifo));
+     ruby_txfifo_en = (txfifo == 1);
+-    PE_parse_boot_argn("ruby_clrhalt", &clrhalt, sizeof(clrhalt));
+-    if (clrhalt < 0 || clrhalt > 2)
+-        clrhalt = 0;
+-    ruby_clrhalt_mode = clrhalt;
+     PE_parse_boot_argn("ruby_cfgrst", &cfgrst, sizeof(cfgrst));
+     if (cfgrst < 0 || cfgrst > 2)
+         cfgrst = 0;
+     ruby_cfgrst_mode = cfgrst;
+-    PE_parse_boot_argn("ruby_txpio", &txpio, sizeof(txpio));
+-    ruby_txpio_en = (txpio == 1);
+-    PE_parse_boot_argn("ruby_clr81", &clr81, sizeof(clr81));
+-    if (clr81 < 0 || clr81 > 3)
+-        clr81 = 0;
+-    ruby_clr81_mode = clr81;
+-    PE_parse_boot_argn("ruby_resume", &resume, sizeof(resume));
+-    if (resume < 0 || resume > 2)
+-        resume = 0;
+-    ruby_resume_mode = resume;
+     PE_parse_boot_argn("ruby_recover", &recover, sizeof(recover));
+     ruby_recover_mask = recover & 7;
+-    PE_parse_boot_argn("ruby_txpiotail", &txpiotail, sizeof(txpiotail));
+-    if (txpiotail < 0 || txpiotail > 3)
+-        txpiotail = 0;
+-    ruby_txpiotail_en = txpiotail;
+-    PE_parse_boot_argn("ruby_qstart_ms", &qstart_ms, sizeof(qstart_ms));
+-    if (qstart_ms < 0)
+-        qstart_ms = 0;
+-    if (qstart_ms > 100)
+-        qstart_ms = 100;
+-    ruby_qstart_ms = qstart_ms;
+-    PE_parse_boot_argn("ruby_qstart_only", &qstartonly, sizeof(qstartonly));
+-    ruby_qstart_only_en = (qstartonly == 1);
+     PE_parse_boot_argn("ruby_rxbuf", &rxbuf, sizeof(rxbuf));
+     if (rxbuf < 64)
+         rxbuf = 64;
+@@ -6528,8 +6059,6 @@ ruby_usb_probe(void)
+     ruby_rx_buf_size = (uint32_t)rxbuf;
+     PE_parse_boot_argn("ruby_clr01", &clr01, sizeof(clr01));
+     ruby_clr01_en = (clr01 == 1);
+-    PE_parse_boot_argn("ruby_dmareq_pio", &dmareqpio, sizeof(dmareqpio));
+-    ruby_dmareq_pio_en = (dmareqpio == 1);
+     PE_parse_boot_argn("ruby_qisar1_w", &qisar1w, sizeof(qisar1w));
+     ruby_qisar1_w_en = (qisar1w != 0);
+     PE_parse_boot_argn("ruby_qisar0_isr", &qisar0isr, sizeof(qisar0isr));
+@@ -6544,39 +6073,27 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0266 rx probe ready (read-only)\n");
+     printf("RUBY USB: 0267 rx skip=%d (rxskip=1 enables)\n",
+         ruby_rx_skip_en);
+-    printf("RUBY USB: 0269 tx reset=%d ep=%d deq=%d\n",
+-        ruby_txreset_en, ruby_txeprst_en, ruby_txdeq_en);
++    printf("RUBY USB: 0269 tx reset=%d ep=%d\n",
++        ruby_txreset_en, ruby_txeprst_en);
+     printf("RUBY USB: 0272 noise quirk=%d (ruby_noise=1 restores 0185)\n",
+         ruby_noise_en);
+-    printf("RUBY USB: 0273 tx kick start=%d\n", ruby_txkick_en);
+-    printf("RUBY USB: 0274 txrdy kick=%d\n", ruby_txrdy_en);
+     printf("RUBY USB: 0277 tx replay=%d\n", ruby_txreplay_en);
+     printf("RUBY USB: 0279 txdone snap=%d\n", ruby_txdone_en);
+-    printf("RUBY USB: 0280 tx_kick=%d\n", ruby_tx_kick_en);
+     printf("RUBY USB: 0283 lpm_hrwe=%d\n", ruby_lpmhrwe_en);
+     printf("RUBY USB: 0285 usb2 parity=%d intr=%d\n",
+         ruby_usb2parity_en, ruby_usbintr_en);
+     printf("RUBY USB: 0287 lpmmask=%d\n", ruby_lpmmask_en);
+     printf("RUBY USB: 0288 tx_slot=%d\n", ruby_txslot);
+     printf("RUBY USB: 0289 txfifo=%d\n", ruby_txfifo_en);
+-    printf("RUBY USB: 0290 clrhalt=%d cfgrst=%d\n",
+-        ruby_clrhalt_mode, ruby_cfgrst_mode);
+-    printf("RUBY USB: 0292 txpio=%d\n", ruby_txpio_en);
+-    printf("RUBY USB: 0293 clr81=%d resume=%d recover=%d piotail=%d "
+-        "lpm_fc=%d devrst_pre=%d\n",
+-        ruby_clr81_mode, ruby_resume_mode, ruby_recover_mask,
+-        ruby_txpiotail_en, ruby_lpm_fc_en, ruby_devrst_pre_en);
+-    printf("RUBY USB: 0293b clrhalt=%d txeprst=%d txpio=%d\n",
+-        ruby_clrhalt_mode, ruby_txeprst_en, ruby_txpio_en);
+-    printf("RUBY USB: 0297 qstart_ms=%d piotail=%d\n",
+-        ruby_qstart_ms, ruby_txpiotail_en);
+-    printf("RUBY USB: 0298 clr01=%d dmareq_pio=%d qisar1_w=%d "
+-        "qisar0_isr=%d\n", ruby_clr01_en, ruby_dmareq_pio_en,
+-        ruby_qisar1_w_en, ruby_qisar0_isr_en);
+-    printf("RUBY USB: 0299 rxbuf=%u qstart_only=%d\n",
+-        ruby_rx_buf_size, ruby_qstart_only_en);
+-    if (ruby_txpio_en && !ruby_acm_cmd)
+-        printf("RUBY USB: 0292 txpio needs rubyusbcmd=1\n");
++    printf("RUBY USB: 0290 cfgrst=%d\n", ruby_cfgrst_mode);
++    printf("RUBY USB: 0293 recover=%d lpm_fc=%d devrst_pre=%d\n",
++        ruby_recover_mask, ruby_lpm_fc_en, ruby_devrst_pre_en);
++    printf("RUBY USB: 0298 clr01=%d qisar1_w=%d qisar0_isr=%d\n",
++        ruby_clr01_en, ruby_qisar1_w_en, ruby_qisar0_isr_en);
++    printf("RUBY USB: 0299 rxbuf=%u\n", ruby_rx_buf_size);
++    /* 0300 content gate: grep this string in the built kernel. */
++    printf("RUBY USB: 0300 qmu-only txreset=%d txeprst=%d txreplay=%d\n",
++        ruby_txreset_en, ruby_txeprst_en, ruby_txreplay_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",

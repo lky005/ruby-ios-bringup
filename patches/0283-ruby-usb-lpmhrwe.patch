@@ -1,0 +1,54 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index 0ac1d51..a5dfae3 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2075,6 +2075,7 @@ static uint32_t ruby_txrdy_ms;
+ static int ruby_txreplay_en = 1;    /* 0277: replay preserved TX payloads */
+ static int ruby_txdone_en = 1;      /* 0279: per-TX-done register snapshot */
+ static int ruby_tx_kick_en;         /* 0280: faithful per-done send kick */
++static int ruby_lpmhrwe_en = 1;     /* 0283: vendor LPM_HRWE parity */
+ static uint32_t ruby_tx_k2_kicks;
+ static uint8_t ruby_tx_replay_buf[4096];
+ static uint32_t ruby_tx_replay_len;
+@@ -5838,6 +5839,7 @@ ruby_usb_probe(void)
+     int txreplay = 1;
+     int txdone = 1;
+     int txkick2 = 0;
++    int lpmhrwe = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5874,6 +5876,8 @@ ruby_usb_probe(void)
+     ruby_txdone_en = (txdone == 1);
+     PE_parse_boot_argn("ruby_tx_kick", &txkick2, sizeof(txkick2));
+     ruby_tx_kick_en = (txkick2 == 1);
++    PE_parse_boot_argn("ruby_lpmhrwe", &lpmhrwe, sizeof(lpmhrwe));
++    ruby_lpmhrwe_en = (lpmhrwe == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+@@ -5889,6 +5893,7 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0277 tx replay=%d\n", ruby_txreplay_en);
+     printf("RUBY USB: 0279 txdone snap=%d\n", ruby_txdone_en);
+     printf("RUBY USB: 0280 tx_kick=%d\n", ruby_tx_kick_en);
++    printf("RUBY USB: 0283 lpm_hrwe=%d\n", ruby_lpmhrwe_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+@@ -6015,6 +6020,16 @@ ruby_usb_probe(void)
+         (v | (1u << 5)) & ~((1u << 6) | (1u << 0)));
+     ruby_wr32(mac, DEVICE_CONF - MTU3_PA, 0);
+ 
++    /* 0283: vendor hw_init sets U3D_POWER_MANAGEMENT.LPM_HRWE (bit 10),
++     * automatic hardware resume from L1.  Vendor live pm=0x64f1, ours
++     * 0x60f1; ruby_lpmhrwe=0 keeps the old value for the A/B. */
++    if (ruby_lpmhrwe_en) {
++        v = ruby_rd32(mac, PM_CTRL - MTU3_PA);
++        ruby_wr32(mac, PM_CTRL - MTU3_PA, v | (1u << 10));
++        printf("RUBY USB: lpm hrwe 0x%08x\n",
++            ruby_rd32(mac, PM_CTRL - MTU3_PA));
++    }
++
+     /* 0185/0272: the vendor runs with bit21 clear; the old noise quirk
+      * stays behind ruby_noise=1 for A/B. */
+     v = ruby_rd32(mac, BUS_PERFORMANCE - MTU3_PA);

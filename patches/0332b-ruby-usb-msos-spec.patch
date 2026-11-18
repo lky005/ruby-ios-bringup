@@ -1,0 +1,113 @@
+diff --git a/bsd/dev/ruby_usb_gadget.c b/bsd/dev/ruby_usb_gadget.c
+index 4681dda..1162bee 100644
+--- a/bsd/dev/ruby_usb_gadget.c
++++ b/bsd/dev/ruby_usb_gadget.c
+@@ -88,6 +88,11 @@ void ruby_func_register(const char *name,
+     }
+ }
+ 
++/* 0332: the profile-2 vendor debug interface number is the MS OS 2.0
++ * function-subset target; keep the config builder and the MS OS builder
++ * tied to the same constant. */
++#define RUBY_VENDOR_IFACE_P2 2u
++
+ uint32_t
+ ruby_build_cfg_desc(uint8_t *out)
+ {
+@@ -139,7 +144,7 @@ ruby_build_cfg_desc(uint8_t *out)
+         if (ruby_enum_profile == 2 && ruby_winusb_mode != 0) {
+             /* 0332: vendor debug interface #2 (control-only) for MS OS 2.0.
+              * The CDC data pair 0x01/0x81 and the rescue lane stay put. */
+-            vout[off++] = 9; vout[off++] = 4; vout[off++] = 2;
++            vout[off++] = 9; vout[off++] = 4; vout[off++] = RUBY_VENDOR_IFACE_P2;
+             vout[off++] = 0; vout[off++] = 0; vout[off++] = 0xFF;
+             vout[off++] = 0; vout[off++] = 0; vout[off++] = 0;
+         }
+@@ -464,7 +469,7 @@ ruby_0332_vendor_iface(void)
+     if (ruby_enum_profile == 0)
+         return 0;
+     if (ruby_enum_profile == 2)
+-        return 2;
++        return RUBY_VENDOR_IFACE_P2;
+     return -1;
+ }
+ 
+@@ -507,22 +512,23 @@ ruby_0332_build(void)
+     v[12] = 28; v[13] = 0x10; v[14] = 0x05; v[15] = 0;
+     {
+         static const uint8_t uuid[16] = {
+-            0xB0, 0x60, 0xDD, 0xD8, 0x4F, 0x0E, 0x5B, 0x4E,
+-            0x98, 0xA2, 0x1C, 0xE7, 0x62, 0x73, 0xE2, 0xCE
++            0xDF, 0x60, 0xDD, 0xD8, 0x89, 0x45, 0xC7, 0x4C,
++            0x9C, 0xD2, 0x65, 0x9D, 0x9E, 0x64, 0x8A, 0x9F
+         };
+ 
+         for (i = 0; i < 16; i++)
+             v[16 + i] = uuid[i];
+     }
+     v[32] = 0x00; v[33] = 0x00; v[34] = 0x03; v[35] = 0x06;
+-    for (i = 36; i < RUBY_BOS_LEN; i++)
+-        v[i] = 0;
++    /* 36-39 (set length / vendor code / alt enum) are filled after the
++     * MS OS descriptor set is built. */
++    v[36] = 0; v[37] = 0; v[38] = 0; v[39] = 0;
+ 
+     while (name[nlen])
+         nlen++;
+     while (guid[glen])
+         glen++;
+-    reglen = 6u + 2u * (nlen + 1u) + 2u + 2u * (glen + 2u);
++    reglen = 8u + 2u * (nlen + 1u) + 2u + 2u * (glen + 2u);
+     func = 8u + 20u + reglen;
+     subset = 8u + func;
+     total = 10u + subset;
+@@ -532,25 +538,27 @@ ruby_0332_build(void)
+         return;
+     }
+     v = ruby_msos_desc;
+-    v[o++] = 10; v[o++] = 0x00;
++    v[o++] = 10; v[o++] = 0x00;             /* wLength */
++    v[o++] = 0x00; v[o++] = 0x00;           /* SET_HEADER */
+     v[o++] = 0x00; v[o++] = 0x00; v[o++] = 0x03; v[o++] = 0x06;
+     v[o++] = (uint8_t)(total & 0xffu); v[o++] = (uint8_t)(total >> 8);
+-    v[o++] = 0; v[o++] = 0;
+-    v[o++] = 8; v[o++] = 0x01; v[o++] = 1; v[o++] = 0;
++    v[o++] = 8; v[o++] = 0x00;              /* wLength */
++    v[o++] = 0x01; v[o++] = 0x00;           /* CONFIG_SUBSET */
++    v[o++] = 1; v[o++] = 0;                 /* configuration value 1 */
+     v[o++] = (uint8_t)(subset & 0xffu); v[o++] = (uint8_t)(subset >> 8);
+-    v[o++] = 0; v[o++] = 0;
+-    v[o++] = 8; v[o++] = 0x02; v[o++] = (uint8_t)iface; v[o++] = 0;
++    v[o++] = 8; v[o++] = 0x00;              /* wLength */
++    v[o++] = 0x02; v[o++] = 0x00;           /* FUNCTION_SUBSET */
++    v[o++] = (uint8_t)iface; v[o++] = 0;    /* bFirstInterface */
+     v[o++] = (uint8_t)(func & 0xffu); v[o++] = (uint8_t)(func >> 8);
+-    v[o++] = 0; v[o++] = 0;
+-    v[o++] = 20; v[o++] = 0x03;
++    v[o++] = 20; v[o++] = 0x00;             /* wLength */
++    v[o++] = 0x03; v[o++] = 0x00;           /* COMPATIBLE_ID */
+     v[o++] = 0x57; v[o++] = 0x49; v[o++] = 0x4E; v[o++] = 0x55;
+     v[o++] = 0x53; v[o++] = 0x42; v[o++] = 0; v[o++] = 0;
+     for (i = 0; i < 8; i++)
+         v[o++] = 0;
+-    /* MS OS 2.0 CompatibleID declares bLength=20: two Reserved bytes. */
+-    v[o++] = 0; v[o++] = 0;
+-    v[o++] = (uint8_t)reglen; v[o++] = 0x04;
+-    v[o++] = 0x01; v[o++] = 0x00;
++    v[o++] = (uint8_t)(reglen & 0xffu); v[o++] = (uint8_t)(reglen >> 8);
++    v[o++] = 0x04; v[o++] = 0x00;           /* REG_PROPERTY */
++    v[o++] = 0x07; v[o++] = 0x00;           /* REG_MULTI_SZ */
+     w = (uint16_t)(2u * (nlen + 1u));
+     v[o++] = (uint8_t)(w & 0xffu); v[o++] = (uint8_t)(w >> 8);
+     for (i = 0; i < nlen; i++) {
+@@ -567,6 +575,10 @@ ruby_0332_build(void)
+     v[o++] = 0; v[o++] = 0;
+     v[o++] = 0; v[o++] = 0;
+     ruby_msos_len = o;
++    ruby_bos_desc[36] = (uint8_t)(ruby_msos_len & 0xffu);
++    ruby_bos_desc[37] = (uint8_t)(ruby_msos_len >> 8);
++    ruby_bos_desc[38] = 0x01;               /* bMS_VendorCode */
++    ruby_bos_desc[39] = 0x00;               /* bAltEnumCode */
+     printf("RUBY 0332: bos=%u msos=%u iface=%u reglen=%u rescue ep=01/81 kept ",
+         RUBY_BOS_LEN, ruby_msos_len, iface, reglen);
+ }

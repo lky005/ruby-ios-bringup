@@ -1,0 +1,129 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+index dfc8755..aea85b2 100644
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2043,6 +2043,7 @@ enum {
+     RUBY_MTR_TX_KICK,
+     RUBY_MTR_TX_STALL,
+     RUBY_MTR_BULK_DUP,
++    RUBY_MTR_TX_RESET,
+ };
+ struct ruby_tx_mtr {
+     uint32_t t;
+@@ -2060,6 +2061,12 @@ static volatile uint32_t ruby_tx_kick_total[4];
+ static uint32_t ruby_bulk_dup_cnt;
+ static uint32_t ruby_bulk_dup_a;
+ static uint32_t ruby_bulk_dup_b;
++static int ruby_txreset_en;
++static uint32_t ruby_tx_reset_cnt;
++static uint32_t ruby_tx_reset_ms;
++static uint32_t ruby_tx_reset_tries;
++static uint32_t ruby_tx_progress_deq;
++static uint32_t ruby_tx_progress_ms;
+ 
+ /* 0266: read-only RX handoff probes (no behavior change). */
+ #define RUBY_RX_MTR_SLOTS   16u
+@@ -2517,6 +2524,39 @@ ruby_ep2_qmu_start(vm_offset_t mac)
+  * 0121: replace the bare EP_RST with the vendor/mainline stop/flush/restart
+  * sequence.  The trigger conditions are deliberately unchanged.
+  */
++/*
++ * 0268: bounded TX rebuild for a pseudo-active queue stuck on a full FIFO.
++ * The normal resume path returns early when the ACTIVE readback is set, so
++ * a wedged queue needs the vendor stop/flush/reset/start sequence.
++ */
++static void
++ruby_ep2_tx_rebuild(vm_offset_t mac)
++{
++    uint64_t pa = ruby_gpd_pa[ruby_gpd_deq % RUBY_GPD_NUM];
++
++    if (ruby_ep2_qmu_stop(mac) != 0) {
++        printf("RUBY USB TXRESET stop timeout\n");
++        return;
++    }
++    ruby_wr32(mac, EP_RST_OFF, EP_RST_TX1_BIT);
++    ruby_wr32(mac, EP_RST_OFF, 0);
++    (void)ruby_rd32(mac, EP_RST_OFF);
++    ruby_wr32(mac, TX1CSR0_OFF, 512u | (1u << 29));
++    ruby_wr32(mac, TX1CSR1_OFF, 2u << 8);
++    ruby_wr32(mac, TX1CSR2_OFF, 9u << 16);
++    ruby_wr32(mac, QCR0_OFF, 1u);
++    ruby_wr32(mac, QCR1_OFF, ruby_rd32(mac, QCR1_OFF) | 0x0006000eu);
++    ruby_wr32(mac, TQERRIESR0_OFF,
++        ruby_rd32(mac, TQERRIESR0_OFF) | (1u << 17) | (1u << 1));
++    ruby_wr32(mac, TQSAR1_OFF, (uint32_t)pa);
++    ruby_wr32(mac, TQHIAR1_OFF, (uint32_t)((pa >> 32) & 0xfu));
++    ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++    ruby_ep_ready = 1;
++    ruby_ep2_tx_restarts++;
++    ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_RECOVER,
++        ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
++}
++
+ static void
+ ruby_ep2_recover(vm_offset_t mac)
+ {
+@@ -2909,6 +2949,9 @@ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+         }
+         ruby_txdone_count += freed;
+         ruby_ep2_drain_freed_total += freed;
++        ruby_tx_progress_deq = ruby_gpd_deq;
++        ruby_tx_progress_ms = ruby_ms;
++        ruby_tx_reset_tries = 0;
+         ruby_tx_mtr_add(RUBY_MTR_TX_DONE, (uint16_t)freed,
+             cur, ruby_rd32(mac, TQCSR1_OFF));
+         if (freed > ruby_ep2_drain_max)
+@@ -3226,7 +3269,27 @@ ruby_ep2_push_log(vm_offset_t mac)
+                     }
+                     if (ruby_ep2_inflight_stuck == 1)
+                         ruby_ep2_dump_gpd(mac, 20, 32);
+-                    ruby_ep2_resume(mac);
++                    if (ruby_txreset_en &&
++                        (ruby_rd32(mac, TX1CSR0_OFF) & (1u << 25)) &&
++                        (uint32_t)(ruby_ms - ruby_tx_progress_ms) >= 200 &&
++                        (uint32_t)(ruby_ms - ruby_tx_reset_ms) >= 1000 &&
++                        ruby_tx_reset_tries < 5) {
++                        ruby_tx_reset_tries++;
++                        ruby_tx_reset_cnt++;
++                        ruby_tx_reset_ms = ruby_ms;
++                        ruby_tx_mtr_add(RUBY_MTR_TX_RESET,
++                            (uint16_t)ruby_gpd_deq, ruby_inflight,
++                            ruby_rd32(mac, TX1CSR0_OFF));
++                        printf("RUBY USB TXRESET n=%u deq=%u enq=%u "
++                            "inf=%u tx0=%08x tqcsr=%08x\n",
++                            ruby_tx_reset_cnt, ruby_gpd_deq,
++                            ruby_gpd_enq, ruby_inflight,
++                            ruby_rd32(mac, TX1CSR0_OFF),
++                            ruby_rd32(mac, TQCSR1_OFF));
++                        ruby_ep2_tx_rebuild(mac);
++                    } else {
++                        ruby_ep2_resume(mac);
++                    }
+                 }
+             }
+         }
+@@ -5544,6 +5607,7 @@ ruby_usb_probe(void)
+     int pad = 0;
+     int dmauc = 0;
+     int rxskip = 0;
++    int txreset = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v;
+@@ -5562,12 +5626,16 @@ ruby_usb_probe(void)
+     ruby_dma_uc = (dmauc == 1);
+     PE_parse_boot_argn("ruby_rxskip", &rxskip, sizeof(rxskip));
+     ruby_rx_skip_en = (rxskip == 1);
++    PE_parse_boot_argn("ruby_txreset", &txreset, sizeof(txreset));
++    ruby_txreset_en = (txreset == 1);
+     ruby_probe_enabled = (probe == 1);
+     ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+     printf("RUBY USB: 0266 rx probe ready (read-only)\n");
+     printf("RUBY USB: 0267 rx skip=%d (rxskip=1 enables)\n",
+         ruby_rx_skip_en);
++    printf("RUBY USB: 0268 tx reset=%d (txreset=1 enables)\n",
++        ruby_txreset_en);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+     printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
