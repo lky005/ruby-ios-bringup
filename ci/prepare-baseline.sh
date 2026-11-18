@@ -285,6 +285,16 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0310-ruby-usb-rx-uc-ring.patch" \
     "$ROOT/patches/0311-0328-cumulative.patch" \
     "$ROOT/patches/0329a-ruby-usb-ep-split.patch" \
+    "$ROOT/patches/0329a2-ruby-usb-qmu-split.patch" \
+    "$ROOT/patches/0329a3-ruby-usb-qmu-engine.patch" \
+    "$ROOT/patches/0329a4-ruby-usb-rx-qmu.patch" \
+    "$ROOT/patches/0329a5-ruby-usb-plat.patch" \
+    "$ROOT/patches/0329a6-ruby-usb-port-gadget.patch" \
+    "$ROOT/patches/0330-ruby-usb-config.patch" \
+    "$ROOT/patches/0331-ruby-usb-ep-test.patch" \
+    "$ROOT/patches/0332-ruby-usb-bos-gated.patch" \
+    "$ROOT/patches/0332b-ruby-usb-msos-spec.patch" \
+    "$ROOT/patches/0332i-ruby-usb-msos1.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \

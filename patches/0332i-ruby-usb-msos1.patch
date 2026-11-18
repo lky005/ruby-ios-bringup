@@ -1,0 +1,196 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -120,6 +120,11 @@
+     24, 3, 'r', 0, 'u', 0, 'b', 0, 'y', 0, ' ', 0,
+     'U', 0, 'S', 0, 'B', 0, ' ', 0, 'P', 0, '2', 0
+ };
++/* 0332i: MS OS 1.0 OS string for WCID (vendor code 0x01) */
++const uint8_t ruby_str_msft[18] = {
++    18, 3, 'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0,
++    0x01, 0x00
++};
+ static const uint8_t ruby_str_ser_base[10] = {
+     10, 3, '0', 0, '0', 0, '0', 0, '1', 0
+ };
+@@ -2270,7 +2275,7 @@
+     PE_parse_boot_argn("rubywinusb", &winusb, sizeof(winusb));
+     if (winusb < 0)
+         winusb = 0;
+-    if (winusb > 3)
++    if (winusb > 4)
+         winusb = 0;
+     ruby_winusb_mode = winusb;
+     if ((ruby_winusb_mode == 1 || ruby_winusb_mode == 2) &&
+@@ -2278,12 +2283,24 @@
+         ruby_dev_desc[2] = 0x01;
+         ruby_dev_desc[3] = 0x02;
+     }
+-    printf("RUBY 0332: bcdusb=%02x%02x winusb=%d bos=%d msos_iface=%d "
+-        "rescue ep=01/81 kept ", ruby_dev_desc[3], ruby_dev_desc[2],
++    if (ruby_winusb_mode == 4) {
++        /*
++         * 0332i: Windows caches "no MS OS descriptor" per VID/PID/
++         * bcdDevice, so mode 4 bumps bcdDevice 0x0211 -> 0x0212 to make
++         * the 0xEE WCID probe run again.  bcdUSB stays 2.00.
++         */
++        ruby_dev_desc[12] = 0x12;
++        ruby_dev_desc[13] = 0x02;
++    }
++    printf("RUBY 0332: bcdusb=%02x%02x bcddev=%02x%02x winusb=%d bos=%d "
++        "msos_iface=%d ms10=%d rescue ep=01/81 kept ",
++        ruby_dev_desc[3], ruby_dev_desc[2],
++        ruby_dev_desc[13], ruby_dev_desc[12],
+         ruby_winusb_mode,
+         ((ruby_winusb_mode == 1 || ruby_winusb_mode == 2) &&
+          (ruby_enum_profile == 0 || ruby_enum_profile == 2)) ? 1 : 0,
+-        (ruby_enum_profile == 0) ? 0 : ((ruby_enum_profile == 2) ? 2 : -1));
++        (ruby_enum_profile == 0) ? 0 : ((ruby_enum_profile == 2) ? 2 : -1),
++        ruby_winusb_mode == 4 ? 1 : 0);
+     PE_parse_boot_argn("ruby_clr01", &clr01, sizeof(clr01));
+     ruby_clr01_en = (clr01 == 1);
+     PE_parse_boot_argn("ruby_qisar1_w", &qisar1w, sizeof(qisar1w));
+diff --git a/bsd/dev/ruby_usb_gadget.c b/bsd/dev/ruby_usb_gadget.c
+--- a/bsd/dev/ruby_usb_gadget.c
++++ b/bsd/dev/ruby_usb_gadget.c
+@@ -636,6 +636,107 @@
+     printf("RUBY 0332: qual=10 other_cfg=%u ", ruby_other_len);
+ }
+ 
++/* ---- 0332i: MS OS 1.0 (bcdUSB 2.00, WCID) ---- */
++#define RUBY_MS10_COMPAT_LEN 40u
++#define RUBY_MS10_PROPS_MAX 192u
++static uint8_t ruby_ms10_compat[RUBY_MS10_COMPAT_LEN];
++static uint8_t ruby_ms10_props[RUBY_MS10_PROPS_MAX];
++static uint32_t ruby_ms10_props_len;
++static int ruby_ms10_iface = -2;   /* -2 unbuilt, -1 none, >=0 vendor iface */
++
++static int
++ruby_ms10_on(void)
++{
++    return ruby_winusb_mode == 4;
++}
++
++static void
++ruby_ms10_build(void)
++{
++    const char *name = "DeviceInterfaceGUIDs";
++    const char *guid = "{2C4FFB48-B39B-4E6E-9D4B-6B0E7C9C0E35}";
++    uint32_t nlen = 0, glen = 0, i, off, prop, dn, total;
++    uint8_t *v;
++
++    if (ruby_ms10_iface != -2)
++        return;
++    ruby_ms10_iface = ruby_0332_vendor_iface();
++    if (ruby_ms10_iface < 0)
++        return;
++    while (name[nlen])
++        nlen++;
++    while (guid[glen])
++        glen++;
++
++    /* Extended Compat ID: header 16 B + one function section 24 B. */
++    v = ruby_ms10_compat;
++    v[0] = RUBY_MS10_COMPAT_LEN; v[1] = 0; v[2] = 0; v[3] = 0;
++    v[4] = 0x00; v[5] = 0x01;               /* bcdVersion 1.00 */
++    v[6] = 0x04; v[7] = 0x00;               /* wIndex 4 */
++    v[8] = 1;                               /* bCount */
++    for (i = 9; i < 16; i++)
++        v[i] = 0;
++    v[16] = (uint8_t)ruby_ms10_iface;       /* bFirstInterface */
++    v[17] = 0;
++    v[18] = 'W'; v[19] = 'I'; v[20] = 'N'; v[21] = 'U';
++    v[22] = 'S'; v[23] = 'B'; v[24] = 0; v[25] = 0;
++    for (i = 26; i < RUBY_MS10_COMPAT_LEN; i++)
++        v[i] = 0;
++
++    /* Extended Properties: header 16 B + one REG_MULTI_SZ property. */
++    dn = 2u * (glen + 2u);                  /* GUID + two nulls */
++    prop = 4u + 4u + 2u + 2u * (nlen + 1u) + 4u + dn;
++    total = 16u + prop;
++    if (total > sizeof(ruby_ms10_props)) {
++        printf("RUBY MS10: props overflow %u ", total);
++        ruby_ms10_iface = -1;
++        return;
++    }
++    v = ruby_ms10_props;
++    off = 0;
++    v[off++] = (uint8_t)(total & 0xffu);
++    v[off++] = (uint8_t)((total >> 8) & 0xffu);
++    v[off++] = (uint8_t)((total >> 16) & 0xffu);
++    v[off++] = (uint8_t)((total >> 24) & 0xffu);
++    v[off++] = 0x00; v[off++] = 0x01;       /* bcdVersion 1.00 */
++    v[off++] = 0x05; v[off++] = 0x00;       /* wIndex 5 */
++    v[off++] = 1;                           /* wCount */
++    for (i = 0; i < 7; i++)
++        v[off++] = 0;
++    v[off++] = (uint8_t)(prop & 0xffu);
++    v[off++] = (uint8_t)((prop >> 8) & 0xffu);
++    v[off++] = (uint8_t)((prop >> 16) & 0xffu);
++    v[off++] = (uint8_t)((prop >> 24) & 0xffu);
++    v[off++] = 0x07; v[off++] = 0;          /* REG_MULTI_SZ */
++    v[off++] = 0; v[off++] = 0;
++    v[off++] = (uint8_t)((2u * (nlen + 1u)) & 0xffu);
++    v[off++] = (uint8_t)((2u * (nlen + 1u)) >> 8);
++    for (i = 0; i < nlen; i++) {
++        v[off++] = (uint8_t)name[i];
++        v[off++] = 0;
++    }
++    v[off++] = 0; v[off++] = 0;
++    v[off++] = (uint8_t)(dn & 0xffu);
++    v[off++] = (uint8_t)((dn >> 8) & 0xffu);
++    v[off++] = (uint8_t)((dn >> 16) & 0xffu);
++    v[off++] = (uint8_t)((dn >> 24) & 0xffu);
++    for (i = 0; i < glen; i++) {
++        v[off++] = (uint8_t)guid[i];
++        v[off++] = 0;
++    }
++    v[off++] = 0; v[off++] = 0;
++    v[off++] = 0; v[off++] = 0;
++    ruby_ms10_props_len = off;
++    if (off != total) {
++        printf("RUBY MS10: props len %u != %u ", off, total);
++        ruby_ms10_iface = -1;
++        return;
++    }
++    printf("RUBY MS10: iface=%u compat=%u props=%u bcddev=%02x%02x ",
++        (unsigned)ruby_ms10_iface, RUBY_MS10_COMPAT_LEN,
++        ruby_ms10_props_len, ruby_dev_desc[13], ruby_dev_desc[12]);
++}
++
+ static void
+ ruby_ep0_0332_msos(vm_offset_t mac, uint32_t t, uint32_t wlen)
+ {
+@@ -689,6 +790,11 @@
+             return NULL;
+         *len = RUBY_BOS_LEN;
+         return ruby_bos_desc;
++    case 0x03EE:    /* 0332i: MS OS 1.0 OS string (WCID) */
++        if (!ruby_ms10_on())
++            return NULL;
++        *len = sizeof(ruby_str_msft);
++        return ruby_str_msft;
+     case 0x0300:
+         *len = sizeof(ruby_str_lang);
+         return ruby_str_lang;
+@@ -960,6 +1066,9 @@
+     if ((st[0] & 0x60) == 0)
+         ruby_ep0_standard(mac, t, st[0], st[1], value, index, len);
+     else if ((st[0] == 0xc0 || st[0] == 0xc1) && st[1] == 0x01 &&
++        ruby_winusb_mode == 4 && (index == 4 || index == 5))
++        ruby_ep0_ms10(mac, t, index, len);
++    else if ((st[0] == 0xc0 || st[0] == 0xc1) && st[1] == 0x01 &&
+         (index == 7 || index == 0))
+         ruby_ep0_0332_msos(mac, t, len);
+     else if (st[0] == 0xc0 && st[1] == 0x21)
+diff --git a/bsd/dev/ruby_usb_gadget.h b/bsd/dev/ruby_usb_gadget.h
+--- a/bsd/dev/ruby_usb_gadget.h
++++ b/bsd/dev/ruby_usb_gadget.h
+@@ -97,6 +97,7 @@
+ extern const uint8_t ruby_str_lang[4];
+ extern const uint8_t ruby_str_mfg[10];
+ extern const uint8_t ruby_str_prod[24];
++extern const uint8_t ruby_str_msft[18];
+ extern char ruby_cmd_line[];
+ extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
+ extern uint64_t sweet_log_position(void);
