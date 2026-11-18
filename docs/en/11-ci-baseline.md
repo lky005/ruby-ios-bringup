@@ -42,7 +42,7 @@ project's delta.
   rearm after stopping the QMU. The host-side first-session XACT remains
   open in 0143.
 - The 0131b branch keeps its own workflow and patch list; main carries
-  `config/0131b.env` and `config/0131b-boot.cmdline` as history.
+  `config/0334.env` and `config/0131b-boot.cmdline` as history.
 - Kernel run `41022192026` built 0143 and matched exec-data `6fa65088...`;
   `41015790742` did the same for 0142 (`99d98d80...`). The 2026-10-29
   runs `40822689195` / `40824668335` remain the historical main/USB
@@ -72,10 +72,10 @@ ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
-python scripts/verify-local.py --ci-config config/0179.env
+python scripts/verify-local.py --ci-config config/0334.env
 ```
 
-The USB branch passes `--ci-config config/0131b.env`.
+The USB branch passes `--ci-config config/0334.env`.
 
 ## Image packaging parameters [measured]
 

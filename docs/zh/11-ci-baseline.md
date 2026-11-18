@@ -40,7 +40,7 @@
   + 最多 495 B 文本），并在停 QMU 后 reset TX 环。host 侧首会话 XACT
   在 0143 仍未闭环。
 - 0131b 分支保留自己的 workflow 和 patch 列表；main 保留
-  `config/0131b.env` 与 `config/0131b-boot.cmdline` 作为历史。
+  `config/0334.env` 与 `config/0131b-boot.cmdline` 作为历史。
 - 内核 run `41022192026` 构建 0143，exec-data 与 `6fa65088...` 一致；
   `41015790742` 对应 0142（`99d98d80...`）。2026-10-29 的
   `40822689195` / `40824668335` 作为历史 main/USB 参考保留。
@@ -67,10 +67,10 @@ ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
-python scripts/verify-local.py --ci-config config/0179.env
+python scripts/verify-local.py --ci-config config/0334.env
 ```
 
-USB 分支使用 `--ci-config config/0131b.env`。
+USB 分支使用 `--ci-config config/0334.env`。
 
 ## 镜像打包参数 [measured]
 

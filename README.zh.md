@@ -2,7 +2,7 @@
 
 [English](README.md) · **中文**
 
-[![xnu-0195](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![xnu-0334](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
 [![tag v0.7.0](https://img.shields.io/badge/tag-v0.7.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.7.0)
 
