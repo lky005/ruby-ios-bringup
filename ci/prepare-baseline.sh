@@ -295,6 +295,7 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0332-ruby-usb-bos-gated.patch" \
     "$ROOT/patches/0332b-ruby-usb-msos-spec.patch" \
     "$ROOT/patches/0332i-ruby-usb-msos1.patch" \
+    "$ROOT/patches/0333-ruby-usb-port-events.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
