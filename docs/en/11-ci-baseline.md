@@ -35,14 +35,15 @@ project's delta.
 
 - Main includes 0080/0084/0085, 0086-0131b, 0140/0141, 0142/0143,
   0144/0145, the historical 0146a-0155 line (probe/pwrap, keys/reboot,
-  battery, touch) and the current 0156-0179 line (HAL/I2C, USB hotplug,
-  RubyGIC/KPD and native EINT touch).
+  battery, touch), the 0156-0179 line (HAL/I2C, USB hotplug, RubyGIC/KPD
+  and native EINT touch) and the current 0329a-0334 USB split/queue line.
 - 0142 widens the EP2 IN bulk MPS to 512; 0143 grows each log frame to
   511 bytes (16 B header + up to 495 B text) and resets the TX ring on
   rearm after stopping the QMU. The host-side first-session XACT remains
   open in 0143.
-- The 0131b branch keeps its own workflow and patch list; main carries
-  `config/0334.env` and `config/0131b-boot.cmdline` as history.
+- The 0131b branch keeps its own workflow and patch list; the current 0334
+  line carries `config/0334.env`, with `config/0131b.env` and
+  `config/0131b-boot.cmdline` kept as history.
 - Kernel run `41022192026` built 0143 and matched exec-data `6fa65088...`;
   `41015790742` did the same for 0142 (`99d98d80...`). The 2026-10-29
   runs `40822689195` / `40824668335` remain the historical main/USB

@@ -33,14 +33,15 @@
 | USB（`usb-0131b-probe-write`，历史） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
 
 - main 包含 0080/0084/0085、0086-0131b、0140/0141、0142/0143、
-  0144/0145、历史 0146a-0155 线（探针/pwrap、按键/复位、电池、触摸），
-  以及当前 0156-0179 线（HAL/I2C、USB 热插拔、RubyGIC/KPD、原生 EINT
-  触摸）。
+  0144/0145、历史 0146a-0155 线（探针/pwrap、按键/复位、电池、触摸）、
+  0156-0179 线（HAL/I2C、USB 热插拔、RubyGIC/KPD、原生 EINT 触摸）
+  以及当前 0329a-0334 USB 拆分/队列线。
 - 0142 把 EP2 IN bulk MPS 扩到 512；0143 把每帧日志扩到 511 B（16 B 头
   + 最多 495 B 文本），并在停 QMU 后 reset TX 环。host 侧首会话 XACT
   在 0143 仍未闭环。
-- 0131b 分支保留自己的 workflow 和 patch 列表；main 保留
-  `config/0334.env` 与 `config/0131b-boot.cmdline` 作为历史。
+- 0131b 分支保留自己的 workflow 和 patch 列表；当前 0334 线使用
+  `config/0334.env`，`config/0131b.env` 与 `config/0131b-boot.cmdline`
+  作为历史保留。
 - 内核 run `41022192026` 构建 0143，exec-data 与 `6fa65088...` 一致；
   `41015790742` 对应 0142（`99d98d80...`）。2026-10-29 的
   `40822689195` / `40824668335` 作为历史 main/USB 参考保留。

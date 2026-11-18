@@ -45,7 +45,7 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | 电源 | MT6360 电池/充电只读：4311 mV、`external=1/full=1`；Type-C read-only；无充电控制/OTG |
 | 存储 | UFS LUN 2，`iosroot` 上读写 HFS+；4 MB HFS 救援根走 LK ramdisk 槽 |
 | 最新 runs（分开记录） | 2026-11-18 0334（每端点环/FIFO；lite 矩阵 PASS、`epall ok=0x3e`）、0333（10/10 拔插、两次 suspend）；2026-11-06 0179（P2b 原生 EINT 触摸；G1–G6；10 min + 5 min 压测；0 panic）；2026-11-02 0155（P1/P2/P3：探针、按键、电池、触摸；19/19、8/8 I2C5、0 panic）；2026-10-30 USB 0143（512 MPS/511 B；稳定性 13/7/23 帧，一次掉链）；2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
-| 未闭环 | P2b G7/G8 与完整 10 min 复跑未跑；无 ESD 健康检查；P2.4 电池 UI 滞后（30 s 轮询；拔电 100→98）；P3 目标（USB host/音频/传感器）；第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
+| 未闭环 | P2b G7/G8 与完整 10 min 复跑已按决定取消；无 ESD 健康检查；P2.4 电池 UI 滞后（30 s 轮询；拔电 100→98）；P3 目标（USB host/音频/传感器）；第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
 | 未通 | Wi-Fi、Bluetooth、蜂窝、音频、相机、GPU、RTC；USB host/OTG；sleep/wake；充电控制；Type-C role |
 | 安全 | AMFI/sandbox/签名关闭；可能丢数据 |
 
@@ -64,10 +64,10 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | `docs/records/` | 状态、验证、保证、范围、安全、法律、致谢 |
 | `docs/en/`、`docs/zh/` | 英文与中文章节 |
 | `touch/` | probe 阶梯、硬件契约与脱敏实验记录 |
-| `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0179 USB/探针/按键/电池/触摸/原生 IRQ、0140/0141 ramdisk；历史 0081-0084 |
+| `patches/` | 自有 XNU 增量：0080 UFS、0085 Goodix 触摸、0086-0179 USB/探针/按键/电池/触摸/原生 IRQ、0329a-0334 USB 拆分/每端点队列、0140/0141 ramdisk；历史 0081-0084 |
 | `ci/` | 基线清单/recipe、固定 patchset 哈希、内核分段哈希与来源 |
 | `config/` | 0334 当前线；0329a-0333 拆分线；0195 及更早为历史 |
-| `.github/workflows/xnu.yml` | 复现当前内核并校验 patchset/exec-data 哈希；workflow 名 `xnu-0179` |
+| `.github/workflows/xnu.yml` | 复现当前内核并校验 patchset/exec-data 哈希；workflow 名 `xnu-0334` |
 | `src/bringup/` | 早期启动 payload、shim、镜像打包 |
 | `src/ufs-probe/` | MT6877 UFS 只读探针 |
 | `tools/image/` | ICL 补丁、dyld 扫描、boot 校验 |
@@ -111,7 +111,7 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: 10b1e2e8...（当前线，175 文件；历史 da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
+patchset: d87e666f...（当前线，305 文件；历史 10b1e2e8... 175、da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -121,8 +121,8 @@ patchset 哈希不匹配就停止。boot 镜像本身**不在**仓库里；`tool
 提供离线校验和补丁工具。详见 `docs/zh/11-ci-baseline.md`。
 
 Host 管线（不碰设备、不碰 root）：`scripts/test-pipeline.sh`，输入 base
-boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0179 用
-`config/0179.env`）；生成 payload、确定性 boot 镜像并校验布局；见
+boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0334 用
+`config/0334.env`）；生成 payload、确定性 boot 镜像并校验布局；见
 `docs/zh/09-reproduce.md`。
 
 ## 当前线与验证
@@ -155,8 +155,8 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0179 �
 | 设备 | Redmi Note 12 Pro 5G，`ruby` / MT6877，8 GB + 256 GB |
 | 系统 | Android 12 / MIUI 13.0.4，已解锁，Magisk，slot `_a` |
 | 布局 | `userdata` 208.4 GiB + `iosroot` 17 GiB；`boot_a` 128 MiB；`super` 约 9.1 GB |
-| 当前状态 | 0194 镜像/内核（active slot `_b`）；0195 致谢镜像已构建未刷；0189C/TWRP 已归档；0155 与 0085/0084 为历史；root A/A' 快照、ICL 块、boot cmdline；设备不在本仓库内 |
-| 成功工件 | 0179 镜像、内核、root A/A' 快照、ICL 块、boot cmdline |
+| 当前状态 | `boot_a` 0334b4 default 镜像/内核（WinUSB 已绑定）；`boot_b` TWRP；0194/0195、0189C、0155 与 0085/0084 为历史；root A/A' 快照、ICL 块、boot cmdline；设备不在本仓库内 |
+| 成功工件 | 0334b4 default/lite 镜像、内核、root A/A' 快照、ICL 块、boot cmdline |
 | 需匹配 | 固件/GPT、root hash、boot 镜像、启动参数、面板/显示 |
 | 不需要 | 触摸固件、Wi-Fi/BT、音频、相机/GPU、RTC |
 
@@ -184,10 +184,11 @@ hash 在 `config/0085.env`。见 [`docs/zh/device.md`](docs/zh/device.md)。
 
 ## 保证
 
-成功路径——启动到锁屏、原生 EINT14 触摸、按键和电池读数（0179）——有
-**单台设备证据**（B+NOP 首启 -> A'、CI kernel 启动、0155 真机、0179 P2b
-线）和文档化配方。它不是第二台/干净室保证；G7/G8 与完整 10 min 复跑未做。
-启动前工件 hash 对命名文件是固定的；启动后的 live-root/ring/日志 hash 易变。
+成功路径——启动到锁屏、原生 EINT14 触摸、按键和电池读数（0179），以及
+0334 USB device 线——有 **单台设备证据**（B+NOP 首启 -> A'、CI kernel
+启动、0155 真机、0179 P2b 线、0334b4 实测）和文档化配方。它不是第二台/
+干净室保证；G7/G8 与完整 10 min 复跑已按决定取消。启动前工件 hash 对命名
+文件是固定的；启动后的 live-root/ring/日志 hash 易变。
 从 IPSW 造 root/shim/ADT 的 builder 和严格 pin 的 payload 仍未完成。见
 [`GUARANTEE.zh.md`](docs/records/GUARANTEE.zh.md)。
 
