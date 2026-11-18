@@ -1,7 +1,19 @@
 # Status
 
-As of **2026-11-07**. This is a snapshot of verified results, not a live device
+As of **2026-11-18**. This is a snapshot of verified results, not a live device
 status. No phone is attached to this repository or to its CI.
+
+## 2026-11-18 state (0334 line)
+
+| Item | Result | Evidence |
+|---|---|---|
+| Current line | 0334: per-endpoint GPD rings, FIFO allocation, 0333 port events | patchset `d87e666f...` (305 files); `config/0334.env` |
+| Kernel | full `5ee3019d...`, exec-data `61c6b1a1...`; CI `44296779724` | `config/0334.env`; workflow `xnu-0334` |
+| Images | default `561f1026...` (587 B cmdline), lite `b4b95789...` (585 B, `rubyep_test=1`) | host build 2026-11-18; `boot_verify.py` PASS |
+| T2 batch | EP1–5 allocate `0x0/0x600/0xc00/0x1200/0x1800`; EP6–8 `REJECT units=3 free=1`; `epall` `ok_tx=3e tmo=0 err=1c0 ok_rx=3e err=1c0 restore=0`, per-EP `st=0` | device runs 2026-11-18; `docs/en/14-usb-per-endpoint.md` |
+| Default path | lite matrix PASS before and after the batch; default image `sel=1 uc`, WinUSB `CM_PROB_NONE`, no panic, `fused=0` | device runs 2026-11-18 |
+| Known limits | host-side data on `0x81` only; concurrent multi-EP and non-default RX data unmeasured; XactErr `0xC0000011` open | 2026-11-18 |
+| Rollback | 0334b3 default `ca2f3bf4...`; 0334b2 `7681ab7c...`; 0333c `ce794bf8...` | local archive |
 
 ## Verified
 

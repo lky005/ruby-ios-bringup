@@ -30,6 +30,7 @@ project's delta.
 | main (2026-10-30 integration) | `f47f4c19...` | 139 | `config/0143.env` | full `d2eae74d...`, exec `6fa65088...` (CI `41022192026`) |
 | main (2026-10-29 integration) | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`, exec `721e5daf...` |
 | USB 0142 / 0143 branches | `d0c5ab5e...` / `f47f4c19...` | 138 / 139 | `config/0142.env`, `config/0143.env` | CI `41015790742` / `41022192026` |
+| USB split 0334 (`p3-usb-cl0329-driver-split-2026-11-18`) | `d87e666f...` | 305 | `config/0334.env` | full `5ee3019d...`, exec `61c6b1a1...` (CI `44296779724`) |
 | USB (`usb-0131b-probe-write`, historical) | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`, exec `06db2bb3...` |
 
 - Main includes 0080/0084/0085, 0086-0131b, 0140/0141, 0142/0143,
@@ -75,6 +76,21 @@ python scripts/verify-local.py --ci-config config/0179.env
 ```
 
 The USB branch passes `--ci-config config/0131b.env`.
+
+## Image packaging parameters [measured]
+
+The boot image is assembled by two host scripts; none of their inputs are
+published.
+
+| Stage | Tool | Parameters |
+|---|---|---|
+| Payload | `.temp/mkpayload.py` | `kernel`, `adt`, `out`, `--cmdline <587/605/585 B>`, optional `--ramdisk` |
+| Boot image | `tools/image/pack_boot.py` | `--base`, `--shim`, `--payload`, `--out`, `--seed 0x84`, optional `--payload-off` and `--expect-{base,shim,payload,out}-sha` |
+| Verify | `tools/image/boot_verify.py` | image path (layout + cmdline dump) |
+
+Copy-paste cmdline presets, the full boot-arg reference and the
+reproducibility rules are in the
+[boot-args appendix](appendix-bootargs.md).
 
 ## Boundaries
 

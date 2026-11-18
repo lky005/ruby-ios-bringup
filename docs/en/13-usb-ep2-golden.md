@@ -5,6 +5,11 @@
 Evidence tags: **[measured]**, **[inferred]**, **[historical]**. A number
 without a source is a bug; commands use placeholders, never personal paths.
 
+> **[historical]** This chapter documents the 0180–0195 EP2 line. The current
+> line is 0334 (per-endpoint queues and FIFO allocation, chapter
+> [14](14-usb-per-endpoint.md)); the evidence here is kept for the record and
+> is not a claim about the 0334 build.
+
 ## Scope
 
 This chapter covers the device-mode USB EP2 bulk-IN log channel of the ruby

@@ -4,37 +4,32 @@
 
 [![xnu-0195](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
-[![tag v0.6.0](https://img.shields.io/badge/tag-v0.6.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.6.0)
+[![tag v0.7.0](https://img.shields.io/badge/tag-v0.7.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.7.0)
 
 **XNU 8796 + iPhone X iOS 16.7.16 userland on a MediaTek MT6877 phone.**
 A research bring-up, packaged as an independent, sanitized delta.
 
 > [!IMPORTANT]
-> **Status 2026-11-07 — 0195 line.** `main 1e45453`, `v0.6.0`; patchset
-> `a9cc0050…` (187 files), exec-data `6b22fc25…`; 0195 ack image
-> `fe009b89…` (comment-only; golden boot verified on 0194 `1808e440…`).
-> Works: UFS root, display, native EINT14 touch, keys, battery read-only,
-> USB EP2 state machine + golden SRCTRL=5, bilingual MTU3 acknowledgements.
-> Limits: XactErr `0xC0000011` not root-caused; 511 B framing prevents
-> big-read aggregation; sustained clear storms can drop the host port;
-> G7/G8 and ESD/P2.4 unchanged; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/
-> sleep; research bring-up.
+> **Status 2026-11-18 — 0334 line.** patchset `d87e666f…` (305 files),
+> CI kernel full `5ee3019d…`, exec-data `61c6b1a1…` (run `44296779724`);
+> device images default `561f1026…` (`x16-0334b4-default.img`) and lite
+> `b4b95789…` (`x16-0334b4-lite.img`). Works: UFS root, display, native
+> EINT14 touch, keys, battery read-only, USB device mode with MS OS 1.0
+> WinUSB binding (`rubywinusb=4`), IRQ port events and gated
+> suspend/resume (0333), and per-endpoint GPD rings with a real FIFO
+> allocation (0334: five endpoints per direction, oversell refused;
+> `t331 epmap/epall`). Limits: host-side USB data is measured only on
+> the `0x81` channel; concurrent multi-endpoint traffic and RX data on
+> non-default endpoints are not measured; the 0195-line first-session
+> XactErr `0xC0000011` stays open; no USB host/audio/Wi-Fi/BT/camera/
+> GPU/RTC/sleep; research bring-up.
 > See [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [docs](docs/README.md).
 
 ## Start here
 
 | 5 min | 30 min | Deep |
 |---|---|---|
-| [README](README.md) + [STATUS](docs/records/STATUS.md) | [08-recovery](docs/en/08-recovery.md), [09-reproduce](docs/en/09-reproduce.md), [10-scripts](docs/en/10-scripts.md) | [01–07](docs/en/README.md), [11](docs/en/11-ci-baseline.md), [12](docs/en/12-usb-host.md), [13](docs/en/13-usb-ep2-golden.md) |
-
-## Demo
-
-[<img src="media/home-screen.jpg" width="360" alt="SpringBoard home screen after the synthetic swipe">](media/autoswipe.mp4)
-
-**Click the image to play the 12 s clip** (720p60, 2.6 MB): lock screen →
-kernel-side synthetic swipe → home screen. Captured on the 0084 build on
-2026-10-21; metadata and audio stripped. See
-[`media/README.md`](media/README.md).
+| [README](README.md) + [STATUS](docs/records/STATUS.md) | [08-recovery](docs/en/08-recovery.md), [09-reproduce](docs/en/09-reproduce.md), [10-scripts](docs/en/10-scripts.md) | [01–07](docs/en/README.md), [11](docs/en/11-ci-baseline.md), [12](docs/en/12-usb-host.md), [13](docs/en/13-usb-ep2-golden.md), [14](docs/en/14-usb-per-endpoint.md) |
 
 This repository contains **no Apple firmware, iOS root images, device dumps or
 diff data**. The kernel is built from Apple's xnu tag, a content-pinned 82-file
@@ -52,7 +47,7 @@ before building.
 | Input | **real Goodix GT9916R** over SPI3; 0179 drives it from EINT14 through a child EINT controller and a dedicated IOWorkLoop oneshot (command/diagnostic path on `IOCommandGate`); unlock, multi-contact HID dispatch, edge; volume/power keys via HID; 0084 synthetic swipe still available |
 | Power | MT6360 battery/charger read-only: 4311 mV, `external=1/full=1`; Type-C read-only; no charger control/OTG |
 | Storage | UFS LUN 2, read/write HFS+ on `iosroot`; 4 MB HFS rescue root via the LK ramdisk slot |
-| Latest runs (separate) | 2026-11-06 0179 (P2b native EINT touch; G1–G6; 10 min + 5 min stress; no panic); 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot; 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
+| Latest runs (separate) | 2026-11-18 0334 (per-endpoint rings/FIFO; lite matrix PASS, `epall ok=0x3e`), 0333 (10/10 hotplug, two suspend cycles); 2026-11-06 0179 (P2b native EINT touch; G1–G6; 10 min + 5 min stress; no panic); 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot; 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
 | Open | P2b G7/G8 and a full 10 min repeat were not run; no ESD health timer; P2.4 battery UI latency (30 s poll; 100→98 on unplug); P3 target (USB host, audio, sensors); second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
 | Not yet | Wi-Fi, Bluetooth, cellular, audio, camera, GPU, RTC; USB host/OTG; sleep/wake; charger control; Type-C role |
 | Safety | AMFI/sandbox/code signing off; data may be lost |
@@ -75,7 +70,7 @@ evidence and the wrong turns.
 | `touch/` | probe ladder, hardware contract and sanitized lab notes |
 | `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0179 USB/probe/keys/battery/touch/native IRQ, 0140/0141 ramdisk; historical 0081-0084 |
 | `ci/` | baseline manifest/recipe, canonical patchset hash, kernel segment hash and provenance |
-| `config/` | 0179 current line (0156-0179); 0155 and earlier as history |
+| `config/` | 0334 current line; 0329a-0333 split line; 0195 and earlier as history |
 | `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash; workflow name `xnu-0179` |
 | `src/bringup/` | early boot payloads, shim, image packers |
 | `src/ufs-probe/` | read-only MT6877 UFS probe |
@@ -142,14 +137,25 @@ a deterministic image and checks the layout.
 
 | Pin | Value |
 |---|---|
-| Patchset | `a9cc0050…` (187 files) |
-| Kernel | full `45ea1bc3…`, exec-data `6b22fc25…` (0195 ack; 0194 exec same) |
-| Image | `fe009b89…` (`x16-0195-ack.img`, payload `3a97d52b…`, comment-only; 0194 golden `1808e440…` booted) |
-| CI | `xnu-0195` `42301546006` / `42302694315` (exec pin); host-checks `42302515812`; main `42304310915` / host-checks `42304311052` |
-| Tags | `v0.6.0` → `1e45453`; `usb-ep2-0194-2026-11-07` → `a9e24e2`; historical `v0.5.0` → `22cdb29` |
-| `boot_a` | 0194 (active `_b`); 0195 ack image built, not flashed |
-| Device evidence | 0194 golden boot (`golden acr5=0x40805000`, 14.1 s); 62-frame peak; EP2 state machine; XactErr `0xC0000011` |
-| Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) · [13](docs/en/13-usb-ep2-golden.md) |
+| Patchset | `d87e666f…` (305 files; 0001-0079 baseline + patches through 0334) |
+| Kernel | full `5ee3019d…`, exec-data `61c6b1a1…` (CI `44296779724`) |
+| Image | default `561f1026…` (`x16-0334b4-default.img`), lite `b4b95789…` (`x16-0334b4-lite.img`, `rubyep_test=1`) |
+| CI | `xnu-0334` `44296779724` (success, branch dispatch; exec gate pinned in `config/0334.env`) |
+| Tags | `v0.7.0` → merge `M2`; `p3-usb-0334-final` → feature tip; historical `v0.6.0` → `1e45453` |
+| `boot_a` | 0334b4 default (WinUSB bound, `CM_PROB_NONE`); `boot_b` TWRP |
+| Device evidence | 0331 lite matrix PASS (T0/T1/T3/T4, 512–16K); `t331 epall 511` → `ok_tx=3e err_tx=1c0 ok_rx=3e err_rx=1c0 restore=0`; post-batch matrix PASS; no panic, `fused=0`; rollback 0334b3 `ca2f3bf4…` |
+| Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) · [14](docs/en/14-usb-per-endpoint.md) |
+
+### USB device mode (0334 line)
+
+- EP0 `0x2E` command channel and the `0xC0/0x31` mailbox; EP1 pair for data;
+  MS OS 1.0 binding under `rubywinusb=4`; port events and suspend gates in 0333.
+- 0334 gives every endpoint slot its own GPD ring and allocates FIFO segments
+  the vendor way (`ep_fifo_alloc`): 3 × 512 B units per endpoint at slot 2, so
+  EP1–5 fit per direction and EP6–8 are refused instead of overlapping.
+- Host-side data is still measured only on `0x81`; see
+  [14 — USB per-endpoint queues](docs/en/14-usb-per-endpoint.md) for the
+  method, raw evidence and limits.
 
 ## Device situation
 
@@ -204,7 +210,7 @@ Start at the [docs index](docs/README.md) ([English](docs/en/README.md) / [中�
 
 | Start | Reference | Evidence |
 |---|---|---|
-| [09-reproduce](docs/en/09-reproduce.md), [08-recovery](docs/en/08-recovery.md) | [11-ci-baseline](docs/en/11-ci-baseline.md), [12-usb-host](docs/en/12-usb-host.md) | [STATUS](docs/records/STATUS.md), [VERIFICATION](docs/records/VERIFICATION.md), [GUARANTEE](docs/records/GUARANTEE.md) |
+| [09-reproduce](docs/en/09-reproduce.md), [08-recovery](docs/en/08-recovery.md) | [11-ci-baseline](docs/en/11-ci-baseline.md), [12-usb-host](docs/en/12-usb-host.md), [14](docs/en/14-usb-per-endpoint.md), [boot-args appendix](docs/en/appendix-bootargs.md) | [STATUS](docs/records/STATUS.md), [VERIFICATION](docs/records/VERIFICATION.md), [GUARANTEE](docs/records/GUARANTEE.md) |
 
 ## History
 
@@ -260,6 +266,23 @@ See [STATUS](docs/records/STATUS.md) and [07-experiments](docs/en/07-experiments
 > the real-touch 0085 boot were run on the author's unit on 2026-10-22. A
 > second unit/clean-room and the from-IPSW root/shim/ADT builders remain open.
 > See [`GUARANTEE.md`](docs/records/GUARANTEE.md).
+</details>
+
+## Demo (historical, 0084 era)
+
+The clip and photo below are 2026-10-21 evidence for the 0084 synthetic-swipe
+build, not the current line. They are kept for the record and demoted here so
+the top of this page stays focused.
+
+<details>
+<summary>Sanitized 12 s clip and home-screen photo (0084, 2026-10-21)</summary>
+
+[<img src="media/home-screen.jpg" width="360" alt="SpringBoard home screen after the synthetic swipe">](media/autoswipe.mp4)
+
+**Click the image to play the 12 s clip** (720p60, 2.6 MB): lock screen →
+kernel-side synthetic swipe → home screen. Metadata and audio stripped; no
+face, serial, IMEI or account data. Files and hashes are listed in
+[`media/README.md`](media/README.md).
 </details>
 
 ## Acknowledgements and legal

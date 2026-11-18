@@ -9,12 +9,11 @@
 
 | 项 | 值 |
 |---|---|
-| 线 | 0195 |
-| `main` / tag | `1e45453` / `v0.6.0` |
-| Patchset | `a9cc0050…`（187 文件） |
-| 内核 | full `45ea1bc3…`、exec-data `6b22fc25…` |
-| 镜像 | `fe009b89…`（`x16-0195-ack.img`；黄金 boot 在 0194 `1808e440…` 验证） |
-| 已知限制 | XactErr `0xC0000011`；511 B 帧封装；连续 clear 风暴可能停主机端口；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep；研究性 bring-up |
+| 线 | 0334 |
+| Patchset | `d87e666f…`（305 文件） |
+| 内核 | full `5ee3019d…`、exec-data `61c6b1a1…`（CI `44296779724`） |
+| 镜像 | default `561f1026…`（`x16-0334b4-default.img`）、lite `b4b95789…`（`x16-0334b4-lite.img`） |
+| 已知限制 | 宿主侧数据只在 `0x81` 实测；多端点并发与非默认 RX 数据未测；511 B 帧封装；XactErr `0xC0000011`；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep；研究性 bring-up |
 
 见 [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md) · [GUARANTEE.zh.md](../records/GUARANTEE.zh.md)。
 
@@ -43,7 +42,9 @@
 | [`10-scripts`](10-scripts.md) | 逐脚本用途与边界 | `[实测]` | 2026-11-06 |
 | [`11-ci-baseline`](11-ci-baseline.md) | 内容固定的基线、分支 pin、exec-data 门禁 | `[实测]` | 2026-11-06 |
 | [`12-usb-host`](12-usb-host.md) | USB 上位机通道：测试条件、驱动绑定、安全调试 | `[实测]` | 2026-11-06 |
-| [`13-usb-ep2-golden`](13-usb-ep2-golden.md) | EP2 状态机 0180–0195、黄金 PHY、主机侧边界 | `[实测]` | 2026-11-07 |
+| [`13-usb-ep2-golden`](13-usb-ep2-golden.md) | EP2 状态机 0180–0195、黄金 PHY、主机侧边界 | `[历史]` | 2026-11-07 |
+| [`14-usb-per-endpoint`](14-usb-per-endpoint.md) | 0333/0334 线：每端点 GPD 环、FIFO 分配、T2 批量、边界 | `[实测]` | 2026-11-18 |
+| [`appendix-bootargs`](appendix-bootargs.md) | 推荐 cmdline 预设、USB 启动参数参考、镜像打包参数 | `[实测]` | 2026-11-18 |
 | [`appendix-dualboot`](appendix-dualboot.md) | 可选布局；仅方法说明 | `[推断]` | — |
 | [`glossary`](glossary.md) | 代号、缩写与状态标签 | — | — |
 | [`device`](device.md) | 设备情况；不发布基线 hash | `[实测]` | 2026-10-22 |

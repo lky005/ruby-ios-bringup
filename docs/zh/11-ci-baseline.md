@@ -29,6 +29,7 @@
 | main（2026-10-30 集成） | `f47f4c19...` | 139 | `config/0143.env` | full `d2eae74d...`，exec `6fa65088...`（CI `41022192026`） |
 | main（2026-10-29 集成） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
 | USB 0142 / 0143 分支 | `d0c5ab5e...` / `f47f4c19...` | 138 / 139 | `config/0142.env`、`config/0143.env` | CI `41015790742` / `41022192026` |
+| USB 拆分 0334（`p3-usb-cl0329-driver-split-2026-11-18`） | `d87e666f...` | 305 | `config/0334.env` | full `5ee3019d...`、exec `61c6b1a1...`（CI `44296779724`） |
 | USB（`usb-0131b-probe-write`，历史） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
 
 - main 包含 0080/0084/0085、0086-0131b、0140/0141、0142/0143、
@@ -70,6 +71,19 @@ python scripts/verify-local.py --ci-config config/0179.env
 ```
 
 USB 分支使用 `--ci-config config/0131b.env`。
+
+## 镜像打包参数 [measured]
+
+boot 镜像由两个宿主脚本拼装；它们的输入都不发布。
+
+| 环节 | 工具 | 参数 |
+|---|---|---|
+| payload | `.temp/mkpayload.py` | `kernel`、`adt`、`out`、`--cmdline <587/605/585 B>`，可选 `--ramdisk` |
+| boot 镜像 | `tools/image/pack_boot.py` | `--base`、`--shim`、`--payload`、`--out`、`--seed 0x84`，可选 `--payload-off` 与 `--expect-{base,shim,payload,out}-sha` |
+| 校验 | `tools/image/boot_verify.py` | 镜像路径（布局 + cmdline 打印） |
+
+可直接复制的 cmdline 预设、完整启动参数参考与复现规则见
+[启动参数附录](appendix-bootargs.md)。
 
 ## 边界
 

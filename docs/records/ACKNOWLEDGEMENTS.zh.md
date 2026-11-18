@@ -45,6 +45,22 @@ Chunfeng Yun（MediaTek）的 [`5aba179c34`](https://github.com/torvalds/linux/c
 的双 `TX_FLUSHFIFO` 序列。上述源码仅作参考，未包含在本仓库中；驱动为原创
 XNU 胶水实现，作为 XNU 补丁的一部分仍按 APSL 2.0 发布。
 
+**0333/0334 line.** Port events, per-endpoint GPD rings and the FIFO
+allocation follow the same references. The segment rules —
+`roundup_pow_of_two(ceil(mps / 512))` 512-byte units times `(slot + 1)`, the
+`FIFOADDR`/`FIFOSEGSIZE` encoding, the per-endpoint CSR stride and the
+`BIT(0) << ep` TX-done bit — mirror the vendor `ep_fifo_alloc()` /
+`mtu3_config_ep()` / `mtu3_qmu_start()` logic in the MediaTek 4.19 `mtu3`
+driver and the upstream Linux driver. Those trees are references only; no
+vendor code is copied, and the original XNU glue stays under APSL 2.0.
+
+**0333/0334 线。** 端口事件、每端点 GPD 环与 FIFO 分配沿用同一组参考：
+512 B 段的 `roundup_pow_of_two(ceil(mps / 512)) × (slot + 1)` 规则、
+`FIFOADDR`/`FIFOSEGSIZE` 编码、每端点 CSR 步长与 `BIT(0) << ep` 的 TX done
+位，均对应 MediaTek 4.19 `mtu3` 与上游 Linux 驱动的
+`ep_fifo_alloc()` / `mtu3_config_ep()` / `mtu3_qmu_start()` 逻辑。上述源码
+仅作参考，未复制任何厂商代码；原创 XNU 胶水仍按 APSL 2.0 发布。
+
 iPhone X iOS 16.7.16 用户态和 Apple 固件归 Apple 所有，仓库不包含；使用者
 需自备并遵守 Apple 条款。
 
