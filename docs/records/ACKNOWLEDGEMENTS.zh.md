@@ -8,14 +8,20 @@ commit 拉取基线。
 ## 上游项目
 
 - [ios-sweet](https://github.com/dipa-studio/ios-sweet) — 原始
-  iOS-on-Sweet 项目；用户态/显示/UFS 思路和补丁谱系。
-- [ios-topaz](https://github.com/MakrSas/ios-topaz) — topaz 移植和构建基线。
+  iOS-on-Sweet 项目（dipa-studio）；用户态/显示/UFS 思路和补丁谱系。
+- [ios-topaz](https://github.com/MakrSas/ios-topaz) — topaz 移植和构建基线
+  （MakrSas，ios-sweet 的 fork）。
+- [HakiOS-MTK](https://github.com/oosexgang/hackios-xnu-kernel) — oosexgang
+  的 MediaTek XNU bring-up（同一账号下的 kernel/userland 仓库）。用于
+  KPD/pwrap/connsys 与数据卷决策的**只读对比**；其内核驱动为 APSL-2.0。
+  0150/0169 按键按 Xiaomi DTS 与 vendor `kpd.c` 实现；路线图中计划改编的
+  `redwood_mtkkeys.c` **未采用**，未复制任何代码。
 - [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build) —
   workflow 使用的 MIT 许可 XNU 构建框架。
 - [Apple XNU](https://github.com/apple-oss-distributions/xnu) — 开源内核；
   补丁按 APSL 2.0。
 - [Xiaomi ruby-s-oss](https://github.com/MiCode/Xiaomi_Kernel_OpenSource) —
-  设备树和驱动参考。
+  厂商 4.19.191 `ruby-s-oss` 树（MiCode），设备树与驱动参考。
 - [TWRP](https://twrp.me) — recovery 环境；仓库不含 TWRP 镜像。
 - [Magisk](https://github.com/topjohnwu/Magisk) — Android root；仓库不含
   Magisk 镜像。

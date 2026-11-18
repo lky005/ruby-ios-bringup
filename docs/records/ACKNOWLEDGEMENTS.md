@@ -8,15 +8,24 @@ copied into this repository; the pinned baseline is fetched at build time.
 ## Upstream projects
 
 - [ios-sweet](https://github.com/dipa-studio/ios-sweet) — the original
-  iOS-on-Sweet project; the userland/display/UFS ideas and the patch lineage.
+  iOS-on-Sweet project (dipa-studio); the userland/display/UFS ideas and the
+  patch lineage.
 - [ios-topaz](https://github.com/MakrSas/ios-topaz) — the topaz port and the
-  pinned build baseline.
+  pinned build baseline (MakrSas, a fork of ios-sweet).
+- [HakiOS-MTK](https://github.com/oosexgang/hackios-xnu-kernel) — the
+  oosexgang MediaTek XNU bring-up (kernel/userland repositories under the
+  same account). Read-only comparison for KPD/pwrap/connsys and data-volume
+  decisions; its kernel drivers are APSL-2.0. The 0150/0169 keys work was
+  implemented from the Xiaomi DTS and the vendor `kpd.c`; the roadmap's
+  planned adaptation of its `redwood_mtkkeys.c` was not used, and no code is
+  copied.
 - [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build) —
   the MIT-licensed XNU build harness used by the workflow.
 - [Apple XNU](https://github.com/apple-oss-distributions/xnu) — the open-source
   kernel; patches remain under APSL 2.0.
 - [Xiaomi ruby-s-oss](https://github.com/MiCode/Xiaomi_Kernel_OpenSource) —
-  the device tree and driver reference.
+  the vendor 4.19.191 `ruby-s-oss` tree (MiCode) used as the device-tree and
+  driver reference.
 - [TWRP](https://twrp.me) — recovery environment; no TWRP image is included.
 - [Magisk](https://github.com/topjohnwu/Magisk) — Android root; no Magisk image
   is included.
