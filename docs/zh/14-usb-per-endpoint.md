@@ -65,6 +65,16 @@
 6. 默认镜像：`0334b3 rx ring sel=1 uc`，启动**没有** `0334b4 epfifo` 行，
    WinUSB `CM_PROB_NONE`，无 panic，`fused=0`。
 
+## 补丁区间
+
+`bsd/dev/ruby_usb.c` 由 `0086-ruby-usb-p0.patch` 引入，随后在编号 USB
+补丁中演进。`0329a`–`0329a6` 把它拆成 `ruby_usb_ep`、`ruby_usb_qmu`、
+`ruby_usb_plat`、`ruby_usb_port`、`ruby_usb_gadget`；`0330` 增加配置层，
+`0331` 增加 EP0 测试通道，`0332*` 增加门控的 BOS/MS OS 描述符，`0333`
+增加端口事件，`0334` 增加每端点队列。补丁按顺序应用、没有删除任何文件，
+因此 `ci/prepare-baseline.sh` 仅凭 0086–0334 补丁列表即可还原完整的
+`bsd/dev/ruby_usb*.c/h`。（`0080` 是 UFS 补丁，不碰 USB。）
+
 ## 设计
 
 ### 每槽环

@@ -69,6 +69,18 @@ Device runs (lite image, then default image):
 6. Default image: `0334b3 rx ring sel=1 uc`, **no** `0334b4 epfifo` lines at
    boot, WinUSB `CM_PROB_NONE`, no panic, `fused=0`.
 
+## Patch range
+
+`bsd/dev/ruby_usb.c` is created by `0086-ruby-usb-p0.patch` and evolves
+through the numbered USB patches. `0329a`–`0329a6` split it into
+`ruby_usb_ep`, `ruby_usb_qmu`, `ruby_usb_plat`, `ruby_usb_port` and
+`ruby_usb_gadget`; `0330` adds the configuration layer, `0331` the EP0 test
+channel, `0332*` the gated BOS/MS OS descriptors, `0333` the port events and
+`0334` the per-endpoint queues. The patches apply in order and nothing is
+dropped, so `ci/prepare-baseline.sh` reconstructs the complete
+`bsd/dev/ruby_usb*.c/h` set from the 0086–0334 patch list alone. (`0080` is
+the UFS patch and does not touch USB.)
+
 ## Design
 
 ### Per-slot rings
