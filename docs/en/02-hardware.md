@@ -12,13 +12,13 @@ another unit.
 |---|---|---|
 | SoC | MediaTek MT6877TT (Dimensity 1080) | `ruby` |
 | Little cores | 6× Cortex-A55, MIDR `0x412fd050` | up to 2.0 GHz [measured] |
-| Big cores | 2× Cortex-A76, MIDR `0x411fd410` | up to 2.6 GHz [measured] |
-| MPIDR | A55 `0x000..0x500`; A76 `0x600,0x700` | Aff1 numbering |
+| Big cores | 2× Cortex-A78, MIDR `0x411fd410` | up to 2.6 GHz [measured] |
+| MPIDR | A55 `0x000..0x500`; A78 `0x600,0x700` | Aff1 numbering |
 | PSCI | 1.0, `smc` | context id 0 |
 | 16K pages | both core types support `TGran16` | no Silver-core parking |
 | LSE/LDAPR | native | no emulation needed |
 
-XNU runs on the six A55s (`cpus=6`). The A76 pair is not used yet; running
+XNU runs on the six A55s (`cpus=6`). The A78 pair is not used yet; running
 16K-page XNU on A55 avoids the topaz Silver-core workaround.
 
 ## Memory

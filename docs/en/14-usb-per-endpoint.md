@@ -95,15 +95,15 @@ the UFS patch and does not touch USB.)
 
 Offsets follow the vendor strides (mtu3 `MU3D_EP_TXCR/RXCR`, `USB_QMU_TQ/RQ`):
 
-| Register | Formula |
-|---|---|
-| TX CSR0/1/2 | `0x0110 + (ep-1)*0x10` (+0/+4/+8) |
-| TX TQ CSR/SAR/CPR | `0x0510 + (ep-1)*0x10` (+0/+4/+8) |
-| TX HIAR | `0x0484 + (ep-1)*4` |
-| RX CSR0/1/2 | `0x0210 + (ep-1)*0x10` (+0/+4/+8) |
-| RX RQ CSR/SAR/CPR | `0x0610 + (ep-1)*0x10` (+0/+4/+8) |
-| RX HIAR | `0x04c4 + (ep-1)*4` |
-| TX-done bit | `BIT(0) << ep` |
+| Register | Formula | Role |
+|---|---|---|
+| TX CSR0/1/2 | `0x0110 + (ep-1)*0x10` (+0/+4/+8) | Endpoint attributes and TX FIFO window |
+| TX TQ CSR/SAR/CPR | `0x0510 + (ep-1)*0x10` (+0/+4/+8) | QMU DMA start/stop; ring base (SAR) and current pointer (CPR) |
+| TX HIAR | `0x0484 + (ep-1)*4` | High 4 physical-address bits for memory above 4 GB |
+| RX CSR0/1/2 | `0x0210 + (ep-1)*0x10` (+0/+4/+8) | Endpoint attributes and RX FIFO window |
+| RX RQ CSR/SAR/CPR | `0x0610 + (ep-1)*0x10` (+0/+4/+8) | QMU DMA start/stop; ring base (SAR) and current pointer (CPR) |
+| RX HIAR | `0x04c4 + (ep-1)*4` | High 4 physical-address bits for memory above 4 GB |
+| TX-done bit | `BIT(0) << ep` | Per-endpoint transmit-complete status bit |
 
 ### FIFO allocation
 

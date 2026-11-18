@@ -73,7 +73,7 @@ tools; a userland HID injector needs signing/entitlements. The kernel timer
 reuses the existing `touch()`.
 
 **D6 — `cpus=6` (A55).** 16K pages on A55 avoid the topaz Silver-core
-workaround. A76 is not used yet.
+workaround. A78 is not used yet.
 
 **D7 — TWRP in `boot_a`.** There is no recovery partition and no `boot:`;
 offline raw I/O requires flashing TWRP to `boot_a`.

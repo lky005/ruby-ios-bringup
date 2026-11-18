@@ -71,7 +71,7 @@
 注入要签名/entitlement；内核定时器复用现有 `touch()`。
 
 **D6 — `cpus=6`（A55）。** A55 支持 16K 页，省掉 topaz 的 Silver 核处理；
-A76 暂未使用。
+A78 暂未使用。
 
 **D7 — TWRP 放 `boot_a`。** 没有 recovery 分区、没有 `boot:`；离线 raw I/O
 只能把 TWRP 刷进 `boot_a`。

@@ -11,13 +11,13 @@
 |---|---|---|
 | SoC | MediaTek MT6877TT（天玑 1080） | `ruby` |
 | 小核 | 6× Cortex-A55，MIDR `0x412fd050` | 最高 2.0 GHz [实测] |
-| 大核 | 2× Cortex-A76，MIDR `0x411fd410` | 最高 2.6 GHz [实测] |
-| MPIDR | A55 `0x000..0x500`；A76 `0x600,0x700` | Aff1 编号 |
+| 大核 | 2× Cortex-A78，MIDR `0x411fd410` | 最高 2.6 GHz [实测] |
+| MPIDR | A55 `0x000..0x500`；A78 `0x600,0x700` | Aff1 编号 |
 | PSCI | 1.0，`smc` | context id 0 |
 | 16K 页 | 两种核都支持 `TGran16` | 不需要 Silver 核 park |
 | LSE/LDAPR | 原生支持 | 不需要模拟 |
 
-XNU 跑在 6 个 A55 上（`cpus=6`），A76 暂未使用；16K 页的 XNU 在 A55 上跑，
+XNU 跑在 6 个 A55 上（`cpus=6`），A78 暂未使用；16K 页的 XNU 在 A55 上跑，
 省掉 topaz 的 Silver 核处理。
 
 ## 内存

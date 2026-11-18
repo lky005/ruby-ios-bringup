@@ -26,7 +26,7 @@ lsd. The two lsd threads wait on each other through the MG path.
 
 | Hypothesis | Experiment | Result |
 |---|---|---|
-| CPU count / A76 | `cpus=6` + upstream cache | stacks byte-identical to `cpus=8` |
+| CPU count / A78 | `cpus=6` + upstream cache | stacks byte-identical to `cpus=8` |
 | launchd cache variant | upstream vs boot-forced | no change |
 | ADT lacks Wi-Fi node | add `/arm-io/marconi-wifi` | matches `IOPlatformDevice`, still no `IONetworkController` notification |
 | No IONetworkController service | kernel 0082 stub | stub published; notification delivered 0 times in that boot |

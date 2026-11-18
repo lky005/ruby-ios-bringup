@@ -88,15 +88,15 @@
 
 偏移按 vendor 步长（mtu3 `MU3D_EP_TXCR/RXCR`、`USB_QMU_TQ/RQ`）：
 
-| 寄存器 | 公式 |
-|---|---|
-| TX CSR0/1/2 | `0x0110 + (ep-1)*0x10`（+0/+4/+8） |
-| TX TQ CSR/SAR/CPR | `0x0510 + (ep-1)*0x10`（+0/+4/+8） |
-| TX HIAR | `0x0484 + (ep-1)*4` |
-| RX CSR0/1/2 | `0x0210 + (ep-1)*0x10`（+0/+4/+8） |
-| RX RQ CSR/SAR/CPR | `0x0610 + (ep-1)*0x10`（+0/+4/+8） |
-| RX HIAR | `0x04c4 + (ep-1)*4` |
-| TX done 位 | `BIT(0) << ep` |
+| 寄存器 | 公式 | 核心功能 |
+|---|---|---|
+| TX CSR0/1/2 | `0x0110 + (ep-1)*0x10`（+0/+4/+8） | 端点属性与 TX FIFO 窗口 |
+| TX TQ CSR/SAR/CPR | `0x0510 + (ep-1)*0x10`（+0/+4/+8） | QMU DMA 启停；环首地址（SAR）与当前指针（CPR） |
+| TX HIAR | `0x0484 + (ep-1)*4` | 超过 4 GB 内存的高 4 位物理地址 |
+| RX CSR0/1/2 | `0x0210 + (ep-1)*0x10`（+0/+4/+8） | 端点属性与 RX FIFO 窗口 |
+| RX RQ CSR/SAR/CPR | `0x0610 + (ep-1)*0x10`（+0/+4/+8） | QMU DMA 启停；环首地址（SAR）与当前指针（CPR） |
+| RX HIAR | `0x04c4 + (ep-1)*4` | 超过 4 GB 内存的高 4 位物理地址 |
+| TX done 位 | `BIT(0) << ep` | 每端点发送完成状态位 |
 
 ### FIFO 分配
 

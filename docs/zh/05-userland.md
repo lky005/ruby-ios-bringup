@@ -26,7 +26,7 @@ SpringBoard t0 等 `_LSContextInitCommon`，t1 持锁等 lsd；lsd 两条线程�
 
 | 假设 | 实验 | 结果 |
 |---|---|---|
-| CPU 数/A76 | `cpus=6` + 上游 cache | 栈与 `cpus=8` 逐字节相同 |
+| CPU 数/A78 | `cpus=6` + 上游 cache | 栈与 `cpus=8` 逐字节相同 |
 | launchd cache 变体 | 上游 vs boot-forced | 不变 |
 | ADT 缺 Wi-Fi 节点 | 加 `/arm-io/marconi-wifi` | 匹配 `IOPlatformDevice`，但仍无 `IONetworkController` 通知 |
 | 缺 IONetworkController 服务 | 内核 0082 stub | stub 发布成功；该次启动通知送达 0 次 |
