@@ -4,7 +4,7 @@
 
 [![xnu-0349](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
-[![tag v0.7.0](https://img.shields.io/badge/tag-v0.7.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.7.0)
+[![tag v0.8.0](https://img.shields.io/badge/tag-v0.8.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.8.0)
 
 **在 MediaTek MT6877 手机上运行 XNU 8796 + iPhone X iOS 16.7.16 用户态。**
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
@@ -136,7 +136,7 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0349 �
 | 内核 | 本地 VM 构建 full `abdf8acb…`（payload `4b13e5a6…`）；对新 pin 的合并窗 CI run 是构建门 |
 | 镜像 | default `514ea382…`（`x16-amfi-0349-defaults.img`，cmdline 397 B） |
 | CI | run `44912588343`（分支 `0667041`）= 仅格式门（该 run 的 patchset pin 仍是 0334 集）；`config/0349.env` 承载合并窗门禁 |
-| Tags | `v0.7.0` → 合并 `M2`；`p3-usb-0334-final` → 特性分支终点；历史 `v0.6.0` → `1e45453` |
+| Tags | `v0.8.0` → 合并 `M2`；`p3-usb-0349-final` → 特性分支终点；历史 `v0.7.0` → 0334 `M2`、`v0.6.0` → `1e45453` |
 | `boot_a` | 0349 default（ECM 网络 + SSH；boot-args 397 B）；`boot_b` TWRP |
 | 设备证据 | 2026-11-21：banner 默认值全部来自源码；64 MB wget 14.1 MB/s + scp 推 14.3 MB/s（md5 一致）；全程 TXRESET=0；salvage 2 + softbell 25 开机窗形态；rxpk ~93k rxerr=0；无 panic；回滚 0347 `b46acd2c…`、0348v2 `f7b1f8e6…` |
 | 证据 | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE.zh.md](docs/records/GUARANTEE.zh.md) · [14](docs/zh/14-usb-per-endpoint.md) |

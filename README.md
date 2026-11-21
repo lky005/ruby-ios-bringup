@@ -4,7 +4,7 @@
 
 [![xnu-0349](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
-[![tag v0.7.0](https://img.shields.io/badge/tag-v0.7.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.7.0)
+[![tag v0.8.0](https://img.shields.io/badge/tag-v0.8.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.8.0)
 
 **XNU 8796 + iPhone X iOS 16.7.16 userland on a MediaTek MT6877 phone.**
 A research bring-up, packaged as an independent, sanitized delta.
@@ -145,7 +145,7 @@ a deterministic image and checks the layout.
 | Kernel | local VM build full `abdf8acb…` (payload `4b13e5a6…`); the merge-window CI run against the new pin is the build gate |
 | Image | default `514ea382…` (`x16-amfi-0349-defaults.img`, cmdline 397 B) |
 | CI | run `44912588343` (branch `0667041`) = format gate only (patchset pin there was still the 0334 set); `config/0349.env` carries the merge-window gate |
-| Tags | `v0.7.0` → merge `M2`; `p3-usb-0334-final` → feature tip; historical `v0.6.0` → `1e45453` |
+| Tags | `v0.8.0` → merge `M2`; `p3-usb-0349-final` → feature tip; historical `v0.7.0` → 0334 `M2`, `v0.6.0` → `1e45453` |
 | `boot_a` | 0349 default (ECM net + SSH; boot-args 397 B); `boot_b` TWRP |
 | Device evidence | 2026-11-21: banner defaults from source; 64 MB wget 14.1 MB/s + scp push 14.3 MB/s (md5 match); TXRESET 0 all session; salvage 2 + softbell 25 boot-window shape; rxpk ~93k rxerr=0; no panic; rollback 0347 `b46acd2c…`, 0348v2 `f7b1f8e6…` |
 | Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) · [14](docs/en/14-usb-per-endpoint.md) |
