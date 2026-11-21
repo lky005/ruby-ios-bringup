@@ -310,6 +310,9 @@ cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
     "$ROOT/patches/historical/0083-ruby-iokit-match-trace.patch" \
     "$DEST/xnu/patches/"
+# Stage script for the built-in IONetworkingFamily: the ECM driver includes
+# <IOKit/network/IOEthernetController.h>, which only exists after this runs.
+cp "$ROOT/patches/0497-stage-ionet.sh" "$DEST/xnu/patches/"
 
 # SKIP_PATCHES holds patch numbers (prefix match, e.g. "0144" or "0144 0143b").
 # The matching patches are dropped again so the caller can build an older
