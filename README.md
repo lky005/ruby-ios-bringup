@@ -10,7 +10,7 @@
 A research bring-up, packaged as an independent, sanitized delta.
 
 > [!IMPORTANT]
-> **Status 2026-11-22 — 0349 line.** patchset `5015ae6d…` (313 files),
+> **Status 2026-11-22 — 0349 line.** patchset `b277f658…` (314 files),
 > CI kernel full `2eb84a6d02c8e830250b52949a72eebc54a12ae007bae9f283b15a189ddffbc9`, exec-data `1fa119b0c2313d1be9595bb9f4b30a9147d8c7ada4fa70b37a32917fffc3571f` (run `44931937790`);
 > device image `514ea382…` (`x16-amfi-0349-defaults.img`). Works: UFS root,
 > display, native EINT14 touch, keys, battery read-only, USB device mode
@@ -119,7 +119,7 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: 5015ae6d... (current line, 313 files; historical d87e666f... 305,  10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
+patchset: b277f658... (current line, 314 files; historical d87e666f... 305,  10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -139,7 +139,7 @@ a deterministic image and checks the layout.
 
 | Pin | Value |
 |---|---|
-| Patchset | `5015ae6d…` (313 files; 0001-0079 baseline + patches through 0349) |
+| Patchset | `b277f658…` (314 files; 0001-0079 baseline + patches through 0349) |
 | Kernel | full `5ee3019d…`, exec-data `61c6b1a1…` (CI `44296779724`) |
 | Image | default `561f1026…` (`x16-0334b4-default.img`), lite `b4b95789…` (`x16-0334b4-lite.img`, `rubyep_test=1`) |
 | CI | `xnu-0349` `44931937790` (success, branch dispatch; exec gate pinned in `config/0349.env`) |

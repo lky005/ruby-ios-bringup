@@ -10,7 +10,7 @@
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
 > [!IMPORTANT]
-> **状态 2026-11-22 — 0349 线。** patchset `5015ae6d…`（313 文件）、
+> **状态 2026-11-22 — 0349 线。** patchset `b277f658…`（314 文件）、
 > CI 内核 full `2eb84a6d02c8e830250b52949a72eebc54a12ae007bae9f283b15a189ddffbc9`、exec-data `1fa119b0c2313d1be9595bb9f4b30a9147d8c7ada4fa70b37a32917fffc3571f`（run `44931937790`）；
 > 设备镜像 `514ea382…`（`x16-amfi-0349-defaults.img`）。已通：UFS root、
 > 显示、原生 EINT14 触摸、按键、电池只读、USB device 模式 + MS OS 1.0
@@ -112,7 +112,7 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: 5015ae6d...（当前线，313 文件；历史 d87e666f... 305、 10b1e2e8... 175、da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
+patchset: b277f658...（当前线，314 文件；历史 d87e666f... 305、 10b1e2e8... 175、da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -130,7 +130,7 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0334 �
 
 | Pin | 值 |
 |---|---|
-| Patchset | `5015ae6d…`（313 文件；0001-0079 基线 + 至 0349 的项目补丁） |
+| Patchset | `b277f658…`（314 文件；0001-0079 基线 + 至 0349 的项目补丁） |
 | 内核 | full `5ee3019d…`、exec-data `61c6b1a1…`（CI `44296779724`） |
 | 镜像 | default `561f1026…`（`x16-0334b4-default.img`）、lite `b4b95789…`（`x16-0334b4-lite.img`，`rubyep_test=1`） |
 | CI | `xnu-0349` `44931937790`（成功，分支 dispatch；exec 门禁已写入 `config/0349.env`） |
