@@ -29,7 +29,7 @@
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（不复制上游树）
-patchset: 58e0730b...（当前线，223 文件；0348+0349）
+patchset: 1282a8bd...（当前线，307 文件；0348+0349）
           历史：d87e666f...（305 文件，config/0334.env）、
           da13b6df...（151 文件，config/0155.env）、
           9f7b41cf...（141 文件，config/0144.env）

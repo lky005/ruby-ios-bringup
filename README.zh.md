@@ -10,7 +10,7 @@
 一个研究性 bring-up，以独立、脱敏的增量形式打包。
 
 > [!IMPORTANT]
-> **状态 2026-11-21 — 0349 线。** patchset `58e0730b…`（223 文件；0348
+> **状态 2026-11-21 — 0349 线。** patchset `1282a8bd…`（307 文件；0348
 > 退役 21 个死开关 bootarg，0349 把 15 个稳态 USB 参数烘焙为源码默认值
 > 并将 cmdline 596 → 397 B）；本地内核 `abdf8acb…`、设备镜像 `514ea382…`
 > （`x16-amfi-0349-defaults.img`，boot_a）。真机验证 2026-11-21：64 MB
@@ -114,7 +114,7 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: 58e0730b...（当前线，223 文件；0348+0349；历史 d87e666f... 305、10b1e2e8... 175、da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
+patchset: 1282a8bd...（当前线，307 文件；0348+0349；历史 d87e666f... 305、10b1e2e8... 175、da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -132,7 +132,7 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0349 �
 
 | Pin | 值 |
 |---|---|
-| Patchset | `58e0730b…`（223 文件；0001-0079 基线 + 至 0349 的项目补丁） |
+| Patchset | `1282a8bd…`（307 文件；0001-0079 基线 + 至 0349 的项目补丁） |
 | 内核 | 本地 VM 构建 full `abdf8acb…`（payload `4b13e5a6…`）；对新 pin 的合并窗 CI run 是构建门 |
 | 镜像 | default `514ea382…`（`x16-amfi-0349-defaults.img`，cmdline 397 B） |
 | CI | run `44912588343`（分支 `0667041`）= 仅格式门（该 run 的 patchset pin 仍是 0334 集）；`config/0349.env` 承载合并窗门禁 |
