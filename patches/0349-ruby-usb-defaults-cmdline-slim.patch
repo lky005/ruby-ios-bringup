@@ -1,0 +1,79 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2140,33 +2140,33 @@
+ void
+ ruby_usb_probe(void)
+ {
+-    int enable = 0;
++    int enable = 1;   /* 0349: was rubyusb=1 */
+     int probe = 0;
+-    int usbirq = 0;
+-    int qmuirq = 0;
+-    int pad = 0;
+-    int dmauc = 0;
++    int usbirq = 1;   /* 0349: was rubyusbirq=1 */
++    int qmuirq = 1;   /* 0349: was rubyqmuirq=1 */
++    int pad = 1;      /* 0349: was rubypad=1 */
++    int dmauc = 1;    /* 0349: was rubydmauc=1 */
+     int rxskip = 0;
+-    int txreset = 0;
++    int txreset = 1;  /* 0349: was ruby_txreset=1 */
+     int txreplay = 0;
+     int txdone = 1;
+-    int txsalv = 0;
+-    int txsoften = 0;
++    int txsalv = 1;  /* 0349: was ruby_txsalv=1 */
++    int txsoften = 1; /* 0349: was ruby_txsoften=1 */
+     int lpmhrwe = 1;
+     int usb2parity = 1;
+     int usbintr = 1;
+     int lpmmask = 1;
+     int txslot = 2;
+     int txfifo = 1;
+-    int txgpd = 512;
++    int txgpd = 2048; /* 0349: was ruby_txgpd=2048 */
+     int txgpdnum = 64;
+     int rxgpdnum = 16;
+     int inflight = 16;
+     int rxslot = 2;
+     int rxuc = 1;
+-    int rxbuf = 512;
+-    int winusb = 0;
+-    int clr01 = 0;
++    int rxbuf = 2048; /* 0349: was ruby_rxbuf=2048 */
++    int winusb = 4;   /* 0349: was rubywinusb=4 */
++    int clr01 = 1;    /* 0349: was ruby_clr01=1 */
+     int qisar1w = 1;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+@@ -2180,7 +2180,7 @@
+     PE_parse_boot_argn("rubydmauc", &dmauc, sizeof(dmauc));
+     PE_parse_boot_argn("rubyusbcmd", &ruby_acm_cmd, sizeof(ruby_acm_cmd));
+     {
+-        int enumprof = -1;
++        int enumprof = 3;   /* 0349: was ruby_enum=3; unset sentinel was -1 */
+ 
+         PE_parse_boot_argn("ruby_enum", &enumprof, sizeof(enumprof));
+         if (enumprof >= 0 && enumprof <= 3) {
+@@ -2204,7 +2204,7 @@
+         "hiar=%04x\n", ruby_tx_ep_sel, ruby_rx_ep_sel,
+         ruby_rx_csr0_off, ruby_rq_csr_off, ruby_rq_hiar_off);
+     {
+-        int bell = 0;
++        int bell = 1;  /* 0349: was ruby_txbell=1 */
+         uint32_t bellms = 1;
+ 
+         /* 0348: ruby_cfg_pre/ruby_qstart_cfg/ruby_qstart_keep/
+diff --git a/bsd/dev/ruby_ecm.c b/bsd/dev/ruby_ecm.c
+--- a/bsd/dev/ruby_ecm.c
++++ b/bsd/dev/ruby_ecm.c
+@@ -342,7 +342,7 @@
+ 	ecm.grp = lck_grp_alloc_init("ruby_ecm", LCK_GRP_ATTR_NULL);
+ 	ecm.lock = lck_spin_alloc_init(ecm.grp, LCK_ATTR_NULL);
+ 
+-	int io = 0;
++	int io = 1;   /* 0349: was rubyecmio=1 */
+ 	PE_parse_boot_argn("rubyecmio", &io, sizeof(io));
+ 	if (io == 1) {
+ 		/* IONetworkingFamily path: configd names it and runs DHCP. */

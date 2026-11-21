@@ -1,0 +1,319 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1,5 +1,8 @@
+ /*
+- * Ruby (MT6877) USB P2b.
++ * Ruby (MT6877) USB-ECM driver.
++ * Portions derived from and adapted after the agate fork's USB-ECM line
++ * (qmu/park shapes, EP0 ordering); localized changes and boundaries are
++ * tracked in the project documentation.
+  *
+  * IP power/reset + U2/U3 PHY + IDDIG/D+ pull-up + PS5169 + device
+  * soft-connect, followed by a polling EP0 enumeration path with minimal
+@@ -1982,10 +1985,8 @@
+ static int
+ ruby_dump_on(void)
+ {
+-    int on = 0;
+-
+-    PE_parse_boot_argn("rubydump", &on, sizeof(on));
+-    return on == 1;
++    /* 0348: retired knob, was rubydump (never set on any verified boot). */
++    return 0;
+ }
+ 
+ static void
+@@ -2141,16 +2142,12 @@
+ {
+     int enable = 0;
+     int probe = 0;
+-    int iddump = 0;
+-    int ep2log = -1;    /* 0231: unset => ACM defaults to off */
+     int usbirq = 0;
+     int qmuirq = 0;
+     int pad = 0;
+     int dmauc = 0;
+     int rxskip = 0;
+     int txreset = 0;
+-    int txeprst = 0;
+-    int noise = 0;
+     int txreplay = 0;
+     int txdone = 1;
+     int txsalv = 0;
+@@ -2167,23 +2164,16 @@
+     int inflight = 16;
+     int rxslot = 2;
+     int rxuc = 1;
+-    int cfgrst = 0;
+-    int recover = 0;
+     int rxbuf = 512;
+     int winusb = 0;
+-    int lpmfc = 0;
+-    int devrstpre = 0;
+     int clr01 = 0;
+     int qisar1w = 1;
+-    int qisar0isr = 0;
+     vm_offset_t ippc, mac, phy, gpio, ifrao;
+     uint32_t c0, c2, u3, u2, rst;
+     uint32_t s1, s2, v, off;
+ 
+     PE_parse_boot_argn("rubyusb", &enable, sizeof(enable));
+     PE_parse_boot_argn("rubyprobe", &probe, sizeof(probe));
+-    PE_parse_boot_argn("ruby_iddump", &iddump, sizeof(iddump));
+-    PE_parse_boot_argn("rubyep2log", &ep2log, sizeof(ep2log));
+     PE_parse_boot_argn("rubyusbirq", &usbirq, sizeof(usbirq));
+     PE_parse_boot_argn("rubyqmuirq", &qmuirq, sizeof(qmuirq));
+     PE_parse_boot_argn("rubypad", &pad, sizeof(pad));
+@@ -2191,7 +2181,6 @@
+     PE_parse_boot_argn("rubyusbcmd", &ruby_acm_cmd, sizeof(ruby_acm_cmd));
+     {
+         int enumprof = -1;
+-        int zlp = 0;
+ 
+         PE_parse_boot_argn("ruby_enum", &enumprof, sizeof(enumprof));
+         if (enumprof >= 0 && enumprof <= 3) {
+@@ -2200,72 +2189,41 @@
+         } else {
+             ruby_enum_profile = ruby_acm_cmd ? 1 : 0;
+         }
+-        PE_parse_boot_argn("ruby_zlp", &zlp, sizeof(zlp));
+-        ruby_zlp_en = (zlp == 1);
+-        {
+-            int echoarg = -1;
+-
+-            PE_parse_boot_argn("ruby_echo", &echoarg, sizeof(echoarg));
+-            ruby_echo_en = (echoarg >= 0) ? (echoarg == 1) :
+-                (ruby_acm_cmd != 0);
+-        }
+-    }
+-    {
+-        int txep = 1;
+-        int txfbase = 0;
+-
+-        PE_parse_boot_argn("ruby_txep", &txep, sizeof(txep));
+-        if (txep != 3)
+-            txep = 1;
+-        PE_parse_boot_argn("ruby_txfbase", &txfbase, sizeof(txfbase));
+-        if (txfbase < 0)
+-            txfbase = 0;
+-        txfbase &= 0xffff;
+-        if (ruby_enum_profile != 0) {
+-            /* ACM keeps the notification EP3 and the EP1 data IN. */
+-            txep = 1;
+-            txfbase = 0;
+-        }
+-        ruby_tx_ep_sel = txep;
+-        ruby_txfbase = (uint32_t)txfbase;
+-        if (txep == 3) {
+-            ruby_tx_ep_addr = 0x83;
+-            /* vendor: TX CSR/QMU/HIAR strides from the endpoint index. */
+-            ruby_tx_csr0_off = 0x0110 + (txep - 1) * 0x10;
+-            ruby_tx_csr1_off = 0x0114 + (txep - 1) * 0x10;
+-            ruby_tx_csr2_off = 0x0118 + (txep - 1) * 0x10;
+-            ruby_tq_csr_off = 0x0510 + (txep - 1) * 0x10;
+-            ruby_tq_sar_off = 0x0514 + (txep - 1) * 0x10;
+-            ruby_tq_cpr_off = 0x0518 + (txep - 1) * 0x10;
+-            ruby_tq_hiar_off = 0x0484 + (txep - 1) * 4;
+-            ruby_tx_done_bit = 1u << 3;
+-        }
+-    }
++        /* 0348: ruby_zlp/ruby_echo parses retired; 0347 runtime values
++         * were 0 and enum!=0-derived (echo follows ACM), kept as-is. */
++        ruby_echo_en = (ruby_acm_cmd != 0);
++    }
++    /* 0348: ruby_txep/ruby_txfbase/ruby_rxep parses retired; enum!=0
++     * pinned the TX shape and sel=1 is the only verified RX ring. */
++    ruby_tx_ep_sel = 1;
++    ruby_txfbase = 0;
+     ruby_tx_ring_select((uint32_t)ruby_tx_ep_sel);
+-    {
+-        int rxep = 1;
+-
+-        PE_parse_boot_argn("ruby_rxep", &rxep, sizeof(rxep));
+-        if (rxep < 1 || rxep > 16)
+-            rxep = 1;
+-        ruby_rx_ep_sel = rxep;
+-        ruby_rx_ring_select((uint32_t)rxep);
+-    }
++    ruby_rx_ep_sel = 1;
++    ruby_rx_ring_select(1);
+     printf("RUBY USB: 0334b2 txep=%d rxep=%d rxcsr=%04x rq=%04x "
+         "hiar=%04x\n", ruby_tx_ep_sel, ruby_rx_ep_sel,
+         ruby_rx_csr0_off, ruby_rq_csr_off, ruby_rq_hiar_off);
+     {
+-        int cfgpre = 0, qcfg = 0, qkeep = 0, bell = 0;
+-        uint32_t bellms = 1, eprstbit = 0;
++        int bell = 0;
++        uint32_t bellms = 1;
+ 
+-        PE_parse_boot_argn("ruby_cfg_pre", &cfgpre, sizeof(cfgpre));
+-        PE_parse_boot_argn("ruby_qstart_cfg", &qcfg, sizeof(qcfg));
+-        PE_parse_boot_argn("ruby_qstart_keep", &qkeep, sizeof(qkeep));
++        /* 0348: ruby_cfg_pre/ruby_qstart_cfg/ruby_qstart_keep/
++         * ruby_tx_eprst_bit parses retired (never set on a verified
++         * boot).  ruby_qstart_keep keeps its variable: the salvage
++         * path reads it; pinned at compiled default 0. */
+         PE_parse_boot_argn("ruby_txbell", &bell, sizeof(bell));
+         PE_parse_boot_argn("ruby_txbell_ms", &bellms, sizeof(bellms));
+-        ruby_cfg_pre = (cfgpre == 1);
+-        ruby_qstart_cfg = (qcfg == 1);
+-        ruby_qstart_keep = (qkeep == 1);
++        /* 0348 (position restored to the 0347 sequence): the retired
++         * parses read 0 on every verified boot; pinned here exactly
++         * where their 0347 assignments lived. */
++        ruby_zlp_en = 0;
++        ruby_cfg_pre = 0;
++        ruby_qstart_cfg = 0;
++        ruby_qstart_keep = 0;   /* salvage path reads it */
++        ruby_txeprst_en = 0;
++        ruby_lpm_fc_en = 0;
++        ruby_devrst_pre_en = 0;
++        ruby_qisar0_isr_en = 0;
+         ruby_txbell_en = (bell == 1);
+         if (bellms < 1)
+             bellms = 1;
+@@ -2273,9 +2231,6 @@
+             bellms = 100;
+         ruby_txbell_ms = bellms;
+         ruby_tx_eprst_bit = 1u << (16 + ((ruby_tx_ep_sel == 3) ? 3 : 1));
+-        PE_parse_boot_argn("ruby_tx_eprst_bit", &eprstbit, sizeof(eprstbit));
+-        if (eprstbit != 0)
+-            ruby_tx_eprst_bit = eprstbit;
+     }
+     for (uint32_t di = 0; di < sizeof(ruby_dev_desc); di++)
+         ruby_dev_desc[di] = ruby_dev_desc_base[di];
+@@ -2302,17 +2257,15 @@
+     PE_parse_boot_argn("ruby_rxskip", &rxskip, sizeof(rxskip));
+     ruby_rx_skip_en = (rxskip == 1);
+     PE_parse_boot_argn("ruby_txreset", &txreset, sizeof(txreset));
+-    PE_parse_boot_argn("ruby_txeprst", &txeprst, sizeof(txeprst));
+     /* 0347: 0345/0346 added the assignments but missed the parses, so
+      * both knobs read 0 at runtime regardless of cmdline (docs/199). */
+     PE_parse_boot_argn("ruby_txsalv", &txsalv, sizeof(txsalv));
+     PE_parse_boot_argn("ruby_txsoften", &txsoften, sizeof(txsoften));
+     ruby_txreset_en = (txreset == 1);
+-    ruby_txeprst_en = (txeprst == 1);
+     ruby_txsalv_en = (txsalv == 1);
+     ruby_txsoften_en = (txsoften == 1);
+-    PE_parse_boot_argn("ruby_noise", &noise, sizeof(noise));
+-    ruby_noise_en = (noise == 1);
++    /* 0348: ruby_txeprst/ruby_noise parses retired (both read 0 on
++     * every verified boot). */
+     PE_parse_boot_argn("ruby_txreplay", &txreplay, sizeof(txreplay));
+     ruby_txreplay_en = (txreplay == 1);
+     PE_parse_boot_argn("ruby_txdone", &txdone, sizeof(txdone));
+@@ -2365,12 +2318,8 @@
+     ruby_rx_uc = (rxuc != 0);
+     PE_parse_boot_argn("ruby_txfifo", &txfifo, sizeof(txfifo));
+     ruby_txfifo_en = (txfifo == 1);
+-    PE_parse_boot_argn("ruby_cfgrst", &cfgrst, sizeof(cfgrst));
+-    if (cfgrst < 0 || cfgrst > 2)
+-        cfgrst = 0;
+-    ruby_cfgrst_mode = cfgrst;
+-    PE_parse_boot_argn("ruby_recover", &recover, sizeof(recover));
+-    ruby_recover_mask = recover & 7;
++    /* 0348: ruby_cfgrst/ruby_recover parses retired (0291 default ==
++     * verified value; recover mask stays at compiled 0). */
+     PE_parse_boot_argn("ruby_rxbuf", &rxbuf, sizeof(rxbuf));
+     if (rxbuf < 64)
+         rxbuf = 64;
+@@ -2398,16 +2347,10 @@
+         ruby_dev_desc[13] = 0x02;
+     }
+     {
+-        int hotplug = 0;
+-
+-        PE_parse_boot_argn("rubyusb_hotplug", &hotplug, sizeof(hotplug));
+-        ruby_usb_hotplug_on = hotplug != 0;
+-    }
+-    {
+-        int susp = 0;
+-
+-        PE_parse_boot_argn("rubyusb_susp", &susp, sizeof(susp));
+-        ruby_susp_on = susp != 0;
++        /* 0348: rubyusb_hotplug/rubyusb_susp parses retired; the
++         * flags stay (port.c IRQ paths read them), pinned at 0. */
++        ruby_usb_hotplug_on = 0;
++        ruby_susp_on = 0;
+     }
+     printf("RUBY 0332: bcdusb=%02x%02x bcddev=%02x%02x winusb=%d bos=%d "
+         "msos_iface=%d ms10=%d rescue ep=01/81 kept ",
+@@ -2422,22 +2365,14 @@
+     ruby_clr01_en = (clr01 == 1);
+     PE_parse_boot_argn("ruby_qisar1_w", &qisar1w, sizeof(qisar1w));
+     ruby_qisar1_w_en = (qisar1w != 0);
+-    PE_parse_boot_argn("ruby_qisar0_isr", &qisar0isr, sizeof(qisar0isr));
+-    ruby_qisar0_isr_en = (qisar0isr == 1);
+-    PE_parse_boot_argn("ruby_lpm_fc", &lpmfc, sizeof(lpmfc));
+-    ruby_lpm_fc_en = (lpmfc == 1);
+-    PE_parse_boot_argn("ruby_devrst_pre", &devrstpre, sizeof(devrstpre));
+-    ruby_devrst_pre_en = (devrstpre == 1);
++    /* 0348: ruby_qisar0_isr/ruby_lpm_fc/ruby_devrst_pre parses retired
++     * (all read 0 on every verified boot). */
+     ruby_probe_enabled = (probe == 1);
+-    ruby_ep2log_on = (ep2log >= 0) ? (ep2log != 0) : !ruby_acm_cmd;
++    ruby_ep2log_on = 0;   /* 0348: rubyep2log retired, default off */
+     printf("RUBY USB: 0265 tx probe ready (read-only)\n");
+     printf("RUBY USB: 0266 rx probe ready (read-only)\n");
+     printf("RUBY USB: 0267 rx skip=%d (rxskip=1 enables)\n",
+         ruby_rx_skip_en);
+-    printf("RUBY USB: 0269 tx reset=%d ep=%d\n",
+-        ruby_txreset_en, ruby_txeprst_en);
+-    printf("RUBY USB: 0272 noise quirk=%d (ruby_noise=1 restores 0185)\n",
+-        ruby_noise_en);
+     printf("RUBY USB: 0277 tx replay=%d\n", ruby_txreplay_en);
+     printf("RUBY USB: 0347 txsalv=%d txsoften=%d replay=%d\n",
+         ruby_txsalv_en, ruby_txsoften_en, ruby_txreplay_en);
+@@ -2446,11 +2381,6 @@
+     printf("RUBY USB: 0285 usb2 parity=%d intr=%d\n",
+         ruby_usb2parity_en, ruby_usbintr_en);
+     printf("RUBY USB: 0287 lpmmask=%d\n", ruby_lpmmask_en);
+-    printf("RUBY USB: 0288 tx_slot=%d\n", ruby_txslot);
+-    printf("RUBY USB: 0289 txfifo=%d\n", ruby_txfifo_en);
+-    printf("RUBY USB: 0290 cfgrst=%d\n", ruby_cfgrst_mode);
+-    printf("RUBY USB: 0293 recover=%d lpm_fc=%d devrst_pre=%d\n",
+-        ruby_recover_mask, ruby_lpm_fc_en, ruby_devrst_pre_en);
+     printf("RUBY USB: 0298 clr01=%d qisar1_w=%d qisar0_isr=%d\n",
+         ruby_clr01_en, ruby_qisar1_w_en, ruby_qisar0_isr_en);
+     printf("RUBY USB: 0299 rxbuf=%u\n", ruby_rx_buf_size);
+@@ -2458,14 +2388,11 @@
+     printf("RUBY USB: 0300 qmu-only txreset=%d txeprst=%d txreplay=%d\n",
+         ruby_txreset_en, ruby_txeprst_en, ruby_txreplay_en);
+     /* 0301 content gate. */
+-    printf("RUBY USB: 0301 enum=%d zlp=%d\n",
+-        ruby_enum_profile, ruby_zlp_en);
++    printf("RUBY USB: 0301 enum=%d\n", ruby_enum_profile);
+     printf("RUBY USB: 0302 echo=%d\n", ruby_echo_en);
+-    printf("RUBY USB: 0303 txep=0x%02x txfbase=0x%x\n",
+-        ruby_tx_ep_addr, ruby_txfbase);
+-    printf("RUBY USB: 0304 cfg_pre=%d qstart_cfg=%d qstart_keep=%d "
++    printf("RUBY USB: 0304 qstart_keep=%d "
+         "txbell=%d/%ums txeprst=0x%x\n",
+-        ruby_cfg_pre, ruby_qstart_cfg, ruby_qstart_keep,
++        ruby_qstart_keep,
+         ruby_txbell_en, ruby_txbell_ms, ruby_tx_eprst_bit);
+     printf("RUBY USB: 0305 txwatch progress-init\n");
+     printf("RUBY USB: 0308 acr3_bist=0\n");
+@@ -2476,8 +2403,8 @@
+     printf("RUBY USB: 0310 rxuc=%d\n", ruby_rx_uc);
+     printf("RUBY USB: probe writes %s\n",
+         ruby_probe_enabled ? "enabled" : "locked");
+-    printf("RUBY USB: EP2 log %s (rubyep2log=%d)\n",
+-        ruby_ep2log_on ? "on" : "off", ep2log);
++    printf("RUBY USB: EP2 log %s\n",
++        ruby_ep2log_on ? "on" : "off");
+     printf("RUBY USB: EP2 frames %s (rubypad=%d)\n",
+         ruby_pad_mode ? "padded 512 (hdr v2 24 B)" : "legacy 511 (hdr 16 B)",
+         pad);
+@@ -2541,9 +2468,7 @@
+         ruby_dump_dt_strings();
+         ruby_dump_regs(0, ippc, mac, 0);
+     }
+-    if (iddump)
+-        ruby_dump_ident();
+-
++    /* 0348: ruby_iddump retired (was: if (iddump) ruby_dump_ident()). */
+     c0 = ruby_rd32(ippc, 0x00);
+     c2 = ruby_rd32(ippc, 0x08);
+     u3 = ruby_rd32(ippc, 0x30);

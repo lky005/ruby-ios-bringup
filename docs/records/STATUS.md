@@ -7,8 +7,8 @@ status. No phone is attached to this repository or to its CI.
 
 | Item | Result | Evidence |
 |---|---|---|
-| Current line | 0334: per-endpoint GPD rings, FIFO allocation, 0333 port events | patchset `d87e666f...` (305 files); `config/0334.env` |
-| Kernel | full `5ee3019d...`, exec-data `61c6b1a1...`; CI `44296779724` | `config/0334.env`; workflow `xnu-0334` |
+| Current line | 0349: USB CDC-ECM networking, SSH over ECM, 0348/0349 boot-arg retirement and baked defaults | patchset `5015ae6d...` (313 files); `config/0349.env` |
+| Kernel | full `2eb84a6d02c8e830250b52949a72eebc54a12ae007bae9f283b15a189ddffbc9`, exec-data `1fa119b0c2313d1be9595bb9f4b30a9147d8c7ada4fa70b37a32917fffc3571f`; CI `44931937790` | `config/0349.env`; workflow `xnu-0349` |
 | Images | default `561f1026...` (587 B cmdline), lite `b4b95789...` (585 B, `rubyep_test=1`) | host build 2026-11-18; `boot_verify.py` PASS |
 | T2 batch | EP1–5 allocate `0x0/0x600/0xc00/0x1200/0x1800`; EP6–8 `REJECT units=3 free=1`; `epall` `ok_tx=3e tmo=0 err=1c0 ok_rx=3e err=1c0 restore=0`, per-EP `st=0` | device runs 2026-11-18; `docs/en/14-usb-per-endpoint.md` |
 | Default path | lite matrix PASS before and after the batch; default image `sel=1 uc`, WinUSB `CM_PROB_NONE`, no panic, `fused=0` | device runs 2026-11-18 |

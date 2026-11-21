@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -2303,6 +2303,10 @@ ruby_usb_probe(void)
+     ruby_rx_skip_en = (rxskip == 1);
+     PE_parse_boot_argn("ruby_txreset", &txreset, sizeof(txreset));
+     PE_parse_boot_argn("ruby_txeprst", &txeprst, sizeof(txeprst));
++    /* 0347: 0345/0346 added the assignments but missed the parses, so
++     * both knobs read 0 at runtime regardless of cmdline (docs/199). */
++    PE_parse_boot_argn("ruby_txsalv", &txsalv, sizeof(txsalv));
++    PE_parse_boot_argn("ruby_txsoften", &txsoften, sizeof(txsoften));
+     ruby_txreset_en = (txreset == 1);
+     ruby_txeprst_en = (txeprst == 1);
+     ruby_txsalv_en = (txsalv == 1);
+@@ -2435,6 +2439,8 @@ ruby_usb_probe(void)
+     printf("RUBY USB: 0272 noise quirk=%d (ruby_noise=1 restores 0185)\n",
+         ruby_noise_en);
+     printf("RUBY USB: 0277 tx replay=%d\n", ruby_txreplay_en);
++    printf("RUBY USB: 0347 txsalv=%d txsoften=%d replay=%d\n",
++        ruby_txsalv_en, ruby_txsoften_en, ruby_txreplay_en);
+     printf("RUBY USB: 0279 txdone snap=%d\n", ruby_txdone_en);
+     printf("RUBY USB: 0283 lpm_hrwe=%d\n", ruby_lpmhrwe_en);
+     printf("RUBY USB: 0285 usb2 parity=%d intr=%d\n",

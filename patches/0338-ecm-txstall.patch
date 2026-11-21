@@ -1,0 +1,103 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -1095,10 +1095,11 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+     uint32_t i, d;
+ 
+     ruby_tx_stall_seen++;
+-    printf("RUBY USB TXSTALL inf=%u tcsr=%08x qcr0=%08x qcr1=%08x "
+-        "qcr2=%08x qcr3=%08x tqcpr=%08x rqcpr=%08x q0=%08x q1=%08x "
+-        "speed=%u tx1csr1=%08x tx1csr2=%08x rx1csr1=%08x rx1csr2=%08x "
+-        "rq=%08x tkstarts=%u txrdy=%u alt=%u tq=%08x\n", ruby_inflight,
++    printf("RUBY USB TXSTALL alt=%u tq=%08x inf=%u tcsr=%08x "
++        "qcr0=%08x qcr1=%08x qcr2=%08x qcr3=%08x tqcpr=%08x rqcpr=%08x "
++        "q0=%08x q1=%08x speed=%u tx1csr1=%08x tx1csr2=%08x "
++        "rx1csr1=%08x rx1csr2=%08x rq=%08x tkstarts=%u txrdy=%u\n",
++        ruby_ecm_alt, ruby_rd32(mac, TQCSR1_OFF), ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, QCR0_OFF),
+         ruby_rd32(mac, QCR1_OFF), ruby_rd32(mac, QCR2_OFF),
+         ruby_rd32(mac, QCR3_OFF), ruby_rd32(mac, TQCPR1_OFF),
+@@ -1108,7 +1109,7 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+         ruby_rd32(mac, TX1CSR1_OFF), ruby_rd32(mac, TX1CSR2_OFF),
+         ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+         ruby_rd32(mac, RQCSR1_OFF), ruby_txkick_starts,
+-        ruby_txrdy_kicks, ruby_ecm_alt, ruby_rd32(mac, TQCSR1_OFF));
++        ruby_txrdy_kicks);
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+@@ -1151,6 +1152,10 @@ ruby_ep2_push_log(vm_offset_t mac)
+     if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_echo_en))
+         return;
+     ruby_ecm_link_poll(mac);   /* ruby ECM: link-up notification on EP 0x83 */
++    if (ruby_ecm_link_step_pending()) {
++        ruby_qmu_push_req = 1;   /* second notification in the next pass */
++        ruby_usb_irq_kick();
++    }
+     ruby_push_tries++;
+ 
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+@@ -1889,6 +1894,11 @@ ruby_func_probe_dispatch(vm_offset_t mac, char *line)
+         ruby_usb_io_status();
+         return;
+     }
++    if (ruby_cmd_streq(line, "en0up")) {
++        ruby_ecm_ioeth_en0up();
++        ruby_ecm_status();
++        return;
++    }
+     if (ruby_cmd_streq(line, "ep1raw")) {
+         ruby_usb_io_force_owner(RUBY_USB_IO_RAW);
+         printf("RUBY CMD: ep1 force-raw\n");
+diff --git a/bsd/dev/ruby_ecm.c b/bsd/dev/ruby_ecm.c
+--- a/bsd/dev/ruby_ecm.c
++++ b/bsd/dev/ruby_ecm.c
+@@ -95,6 +95,12 @@ ruby_ecm_link_arm(void)
+ 	ruby_usb_tx_kick();             /* host is waiting for carrier */
+ }
+ 
++int
++ruby_ecm_link_step_pending(void)
++{
++	return ecm_notify_step != 0;
++}
++
+ static void
+ ecm_fifo_put(vm_offset_t mac, const uint8_t *p, uint32_t n)
+ {
+diff --git a/iokit/Kernel/arm/RubyECMEthernet.cpp b/iokit/Kernel/arm/RubyECMEthernet.cpp
+--- a/iokit/Kernel/arm/RubyECMEthernet.cpp
++++ b/iokit/Kernel/arm/RubyECMEthernet.cpp
+@@ -150,6 +150,9 @@ RubyECMEthernet::nameThread(void *arg, wait_result_t wr __unused)
+ 		OSSafeReleaseNULL(eid);
+ 		stack->release();
+ 	}
++	/* start() ran before the interface was named, so the address ioctl
++	 * there failed; retry now that en0 exists. */
++	ruby_ecm_config_en0();
+ 	self->release();
+ }
+ 
+@@ -242,6 +245,22 @@ RubyECMEthernet::input(const uint8_t *data, uint32_t len)
+ 	fNetif->inputPacket(m, len, 0);
+ }
+ 
++static void
++ruby_ecm_en0up_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	ruby_ecm_config_en0();
++}
++
++extern "C" void
++ruby_ecm_ioeth_en0up(void)
++{
++	thread_t th;
++
++	if (kernel_thread_start((thread_continue_t)&ruby_ecm_en0up_thread,
++	    NULL, &th) == KERN_SUCCESS)
++		thread_deallocate(th);
++}
++
+ extern "C" int
+ ruby_ecm_ioeth_create(void)
+ {

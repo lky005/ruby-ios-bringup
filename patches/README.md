@@ -55,6 +55,18 @@ order.
 | `0156-0179` (current line, 24 files) | current | `bsd/dev/`, `iokit/Kernel/arm/` | 0156/0156b foundation/battery; 0157/0158 HAL/I2C; 0159-0167 EINT/IRQ/demux/diagnostics; 0168 SPI3 touch; 0169 KPD IRQ; 0171-0174 USB hotplug; 0175 RubyGIC/KPD; 0176 EINT B1; 0177 native EINT parent; 0178 child oneshot; 0179 retry/soft reset |
 | `0329a-0333` (split line) | current | `bsd/dev/ruby_usb*.c/h`, `bsd/conf/files` | 0329a + 0329a2-a6 split the driver into ep/qmu/plat/port/gadget; 0330 config/FIFO boundary; 0331 EP0 0x2E test channel; 0332 BOS/MS OS 2.0 behind `rubywinusb=0..3`; 0332b MS OS 2.0 layout fix; 0332i MS OS 1.0 WCID/WinUSB on bcdUSB 2.00 behind `rubywinusb=4` (default 0); 0333 IRQ port events/state machine/suspend-resume behind `rubyusb_hotplug`/`rubyusb_susp` (default 0) |
 | `0334-ruby-usb-ep-queues.patch` | current | `bsd/dev/ruby_usb*.c/h` | 0334 per-endpoint GPD rings (TX 1 KB / RX 256 B per slot, shared payload), vendor-formula per-EP CSR/QMU/HIAR offsets, T2 batch `t331 epmap/eptx/eprx/epall`, and actual FIFO segment allocation (`ruby_epfifo_map`, 3 units per EP at slot 2, oversell refused); inert unless `rubyep_test=1` commands run |
+| `0335-sweet-amfi-probe.patch` | current | `bsd/kern/sweet_amfi.c`, `iokit/Kernel/arm/SweetAMFI.cpp`, `iokit/conf/files.arm64`, `iokit/KernelConfigTables.cpp` | AMFI policy hook plus the small IOKit probe that lets libmis/lsd resolve the policy by the Apple name `AMFI`; records the two observed policy calls, does not replace the AMFI service |
+| `0336-rubysh-timeout-cache-delivery.patch` | current | `bsd/dev/ruby_tty.c`, `bsd/dev/launchd_cache_blob.h` | rubysh `exec` no longer replaces the shell and gains a timeout; the launchd cache is rewritten by path (`/System/Library/xpc/launchd.plist`) so `com.ruby.tty` survives a root whose cache has no fixed-size `_RubyPad` |
+| `0337-usb-ecm-port.patch` | current | `bsd/dev/ruby_ecm.c/h`, `iokit/Kernel/arm/RubyECMEthernet.cpp`, `bsd/dev/ruby_usb*.c/h`, `bsd/dev/ruby_usb_io.c`, `bsd/conf/files`, `iokit/conf/files.arm64`, `iokit/conf/Makefile.template`, `iokit/KernelConfigTables.cpp`, `bsd/kern/bsd_init.c` | USB CDC-ECM port: device IP `192.168.7.2/24` (host `.1`), IONetworkingFamily built in, QMU receive in per-frame mode so out-of-order GPD completions are drained instead of stranding RX |
+| `0338-ecm-txstall.patch` | current | `bsd/dev/ruby_usb.c`, `bsd/dev/ruby_ecm.c`, `iokit/Kernel/arm/RubyECMEthernet.cpp` | TX stall diagnostics and link notifications; the resume path re-kicks a stalled queue instead of waiting out the watchdog |
+| `0339-txsalv-txsoften.patch` | current | `bsd/dev/ruby_usb.c`, `bsd/dev/ruby_usb_qmu.c/h` | `ruby_txsalv` completes a parked TX GPD only when the QMU already released it (`HWO=0`); `ruby_txsoften` rings Q_START to wake a queue that stopped without an event |
+| `0340-bootarg-parse-fix.patch` | current | `bsd/dev/ruby_usb.c` | restores the missing `PE_parse_boot_argn` calls for `ruby_txsalv`/`ruby_txsoften`, so the boot arguments actually take effect (0345/0346 declared them but never parsed them) |
+
+`0341`-`0347` are intentionally absent: those numbers were used on the VM
+working tree for intermediate ECM/TX experiments that were never published as
+standalone patches. Their final content is what `0337`-`0340` carry, so the
+numbering jumps from `0340` to `0348` rather than inventing patch history that
+does not exist.
 
 `0080` and `0085` are the changes used by the current real-touch boot. `0086`
 adds the USB P0 probe and is inert unless `rubyusb=1`; it does not use the
