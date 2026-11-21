@@ -2,7 +2,7 @@
 
 **English** · [中文](README.zh.md)
 
-[![xnu-0334](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![xnu-0349](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
 [![tag v0.7.0](https://img.shields.io/badge/tag-v0.7.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.7.0)
 
@@ -10,19 +10,21 @@
 A research bring-up, packaged as an independent, sanitized delta.
 
 > [!IMPORTANT]
-> **Status 2026-11-18 — 0334 line.** patchset `d87e666f…` (305 files),
-> CI kernel full `5ee3019d…`, exec-data `61c6b1a1…` (run `44296779724`);
-> device images default `561f1026…` (`x16-0334b4-default.img`) and lite
-> `b4b95789…` (`x16-0334b4-lite.img`). Works: UFS root, display, native
-> EINT14 touch, keys, battery read-only, USB device mode with MS OS 1.0
-> WinUSB binding (`rubywinusb=4`), IRQ port events and gated
-> suspend/resume (0333), and per-endpoint GPD rings with a real FIFO
-> allocation (0334: five endpoints per direction, oversell refused;
-> `t331 epmap/epall`). Limits: host-side USB data is measured only on
-> the `0x81` channel; concurrent multi-endpoint traffic and RX data on
-> non-default endpoints are not measured; the 0195-line first-session
-> XactErr `0xC0000011` stays open; no USB host/audio/Wi-Fi/BT/camera/
-> GPU/RTC/sleep; research bring-up.
+> **Status 2026-11-22 — 0349 line.** patchset `5015ae6d…` (313 files),
+> CI kernel full `2eb84a6d02c8e830250b52949a72eebc54a12ae007bae9f283b15a189ddffbc9`, exec-data `1fa119b0c2313d1be9595bb9f4b30a9147d8c7ada4fa70b37a32917fffc3571f` (run `44931937790`);
+> device image `514ea382…` (`x16-amfi-0349-defaults.img`). Works: UFS root,
+> display, native EINT14 touch, keys, battery read-only, USB device mode
+> with MS OS 1.0 WinUSB binding (`rubywinusb=4`), IRQ port events and gated
+> suspend/resume (0333), per-endpoint GPD rings with a real FIFO
+> allocation (0334), and USB CDC-ECM networking with SSH over it
+> (0335-0349: 64 MB wget 14.1 MB/s, TXRESET 0). The 0348/0349 boot-arg
+> work retires 21 dead switches and bakes 15 verified defaults, so the
+> boot line drops from 596 to 397 B while every `PE_parse` stays.
+> Limits: host-side USB data is measured only on the `0x81` channel;
+> concurrent multi-endpoint traffic and RX data on non-default endpoints
+> are not measured; scp pull hits the FIFOFULL half-fetch window (large
+> transfers go over HTTP); no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/
+> sleep; research bring-up.
 > See [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [docs](docs/README.md).
 
 ## Start here
@@ -71,7 +73,7 @@ evidence and the wrong turns.
 | `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0179 USB/probe/keys/battery/touch/native IRQ, 0329a-0334 USB split/per-endpoint queues, 0140/0141 ramdisk; historical 0081-0084 |
 | `ci/` | baseline manifest/recipe, canonical patchset hash, kernel segment hash and provenance |
 | `config/` | 0334 current line; 0329a-0333 split line; 0195 and earlier as history |
-| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash; workflow name `xnu-0334` |
+| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash; workflow name `xnu-0349` |
 | `src/bringup/` | early boot payloads, shim, image packers |
 | `src/ufs-probe/` | read-only MT6877 UFS probe |
 | `tools/image/` | ICL patch, dyld scanner, boot verifier |
@@ -117,7 +119,7 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: d87e666f... (current line, 305 files; historical 10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
+patchset: 5015ae6d... (current line, 313 files; historical d87e666f... 305,  10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -137,16 +139,16 @@ a deterministic image and checks the layout.
 
 | Pin | Value |
 |---|---|
-| Patchset | `d87e666f…` (305 files; 0001-0079 baseline + patches through 0334) |
+| Patchset | `5015ae6d…` (313 files; 0001-0079 baseline + patches through 0349) |
 | Kernel | full `5ee3019d…`, exec-data `61c6b1a1…` (CI `44296779724`) |
 | Image | default `561f1026…` (`x16-0334b4-default.img`), lite `b4b95789…` (`x16-0334b4-lite.img`, `rubyep_test=1`) |
-| CI | `xnu-0334` `44296779724` (success, branch dispatch; exec gate pinned in `config/0334.env`) |
+| CI | `xnu-0349` `44931937790` (success, branch dispatch; exec gate pinned in `config/0349.env`) |
 | Tags | `v0.7.0` → merge `M2`; `p3-usb-0334-final` → feature tip; historical `v0.6.0` → `1e45453` |
 | `boot_a` | 0334b4 default (WinUSB bound, `CM_PROB_NONE`); `boot_b` TWRP |
 | Device evidence | 0331 lite matrix PASS (T0/T1/T3/T4, 512–16K); `t331 epall 511` → `ok_tx=3e err_tx=1c0 ok_rx=3e err_rx=1c0 restore=0`; post-batch matrix PASS; no panic, `fused=0`; rollback 0334b3 `ca2f3bf4…` |
 | Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) · [14](docs/en/14-usb-per-endpoint.md) |
 
-### USB device mode (0334 line)
+### USB device mode (0349 line)
 
 - EP0 `0x2E` command channel and the `0xC0/0x31` mailbox; EP1 pair for data;
   MS OS 1.0 binding under `rubywinusb=4`; port events and suspend gates in 0333.
