@@ -33,21 +33,21 @@ For the public fallback, run
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (no upstream tree copied here)
-patchset: 58e0730b... (current line, 223 files; 0348+0349)
-          historical: d87e666f... (305 files, config/0334.env),
-          da13b6df... (151 files, config/0155.env),
-          9f7b41cf... (141 files, config/0144.env)
-kernel:   local VM build full abdf8acb... (0349; payload 4b13e5a6...)
-          the merge-window CI run is the current-line build gate
-image:    x16-amfi-0349-defaults.img, 514ea382... (payload 4b13e5a6..., cmdline 397 B)
+patchset: 10b1e2e8... (current line, 175 files)
+          historical: da13b6df... (151 files, config/0155.env),
+          9f7b41cf... (141 files, config/0144.env),
+          f47f4c19... (139 files, config/0143.env)
+kernel:   full 2b008e52..., exec-data a4fb021e...
+          (CI 42114854911; gate rerun 42115985782)
+image:    x16-0179-touch-retry.img, d438ba47... (payload 72fc737c...)
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-15, Xcode 16.0, macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
 
-Main builds the current 0348+0349 USB line (ECM network path, compiled-in
-defaults, slimmed cmdline). The 0334/0155 and earlier references below are
-historical.
+Main builds the ramdisk/0140 set and the current 0156-0179 line (HAL/I2C,
+keys, USB hotplug, battery, RubyGIC/KPD and native EINT touch). The 0155 and
+earlier references below are historical.
 
 Run it from **Actions → xnu → Run workflow**, or push a change under `ci/`,
 `patches/`, `config/` or the workflow. Artifacts: `xnu-kernel` and

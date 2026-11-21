@@ -2,7 +2,7 @@
 
 **English** · [中文](README.zh.md)
 
-[![xnu-0349](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![xnu-0334](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
 [![tag v0.7.0](https://img.shields.io/badge/tag-v0.7.0-blue)](https://github.com/lky005/ruby-ios-bringup/tree/v0.7.0)
 
@@ -10,23 +10,19 @@
 A research bring-up, packaged as an independent, sanitized delta.
 
 > [!IMPORTANT]
-> **Status 2026-11-21 — 0349 line.** patchset `58e0730b…` (223 files; 0348
-> retires 21 dead boot-arg parses, 0349 bakes the 15 steady-state USB knobs
-> into compiled-in defaults and slims the cmdline 596 → 397 B); local kernel
-> `abdf8acb…`, device image `514ea382…` (`x16-amfi-0349-defaults.img`,
-> boot_a). Device-verified 2026-11-21: 64 MB wget 14.1 MB/s, scp push
-> 14.3 MB/s, TXRESET 0 all session, salvage/softbell at the 0347-level boot
-> shape, no panic. Works: UFS root, display, native EINT14 touch, keys,
-> battery read-only, USB device mode with MS OS 1.0 WinUSB binding
-> (`rubywinusb=4`, now compiled-in), IRQ port events and gated
-> suspend/resume, per-endpoint GPD rings with a real FIFO allocation
-> (five endpoints per direction, oversell refused; `t331 epmap/epall`), and
-> the ECM network path (`rubyecm`, 14 MB/s-class throughput). Limits:
-> host-side USB data is measured only on the `0x81` channel; concurrent
-> multi-endpoint traffic and RX data on non-default endpoints are not
-> measured; the 0195-line first-session XactErr `0xC0000011` stays open;
-> scp pull is avoided (FIFOFULL half-fetch window); no USB host/audio/
-> Wi-Fi/BT/camera/GPU/RTC/sleep; research bring-up.
+> **Status 2026-11-18 — 0334 line.** patchset `d87e666f…` (305 files),
+> CI kernel full `5ee3019d…`, exec-data `61c6b1a1…` (run `44296779724`);
+> device images default `561f1026…` (`x16-0334b4-default.img`) and lite
+> `b4b95789…` (`x16-0334b4-lite.img`). Works: UFS root, display, native
+> EINT14 touch, keys, battery read-only, USB device mode with MS OS 1.0
+> WinUSB binding (`rubywinusb=4`), IRQ port events and gated
+> suspend/resume (0333), and per-endpoint GPD rings with a real FIFO
+> allocation (0334: five endpoints per direction, oversell refused;
+> `t331 epmap/epall`). Limits: host-side USB data is measured only on
+> the `0x81` channel; concurrent multi-endpoint traffic and RX data on
+> non-default endpoints are not measured; the 0195-line first-session
+> XactErr `0xC0000011` stays open; no USB host/audio/Wi-Fi/BT/camera/
+> GPU/RTC/sleep; research bring-up.
 > See [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [docs](docs/README.md).
 
 ## Start here
@@ -51,7 +47,7 @@ before building.
 | Input | **real Goodix GT9916R** over SPI3; 0179 drives it from EINT14 through a child EINT controller and a dedicated IOWorkLoop oneshot (command/diagnostic path on `IOCommandGate`); unlock, multi-contact HID dispatch, edge; volume/power keys via HID; 0084 synthetic swipe still available |
 | Power | MT6360 battery/charger read-only: 4311 mV, `external=1/full=1`; Type-C read-only; no charger control/OTG |
 | Storage | UFS LUN 2, read/write HFS+ on `iosroot`; 4 MB HFS rescue root via the LK ramdisk slot |
-| Latest runs (separate) | 2026-11-21 0349 (ECM net; 64 MB wget 14.1 MB/s + scp push 14.3 MB/s; TXRESET 0; banner defaults from source), 0348 (21 dead parses retired; v2 wget 10.7 MB/s), 0334 (per-endpoint rings/FIFO; lite matrix PASS, `epall ok=0x3e`), 0333 (10/10 hotplug, two suspend cycles); 2026-11-06 0179 (P2b native EINT touch; G1–G6; 10 min + 5 min stress; no panic); 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot; 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
+| Latest runs (separate) | 2026-11-18 0334 (per-endpoint rings/FIFO; lite matrix PASS, `epall ok=0x3e`), 0333 (10/10 hotplug, two suspend cycles); 2026-11-06 0179 (P2b native EINT touch; G1–G6; 10 min + 5 min stress; no panic); 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot; 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
 | Open | P2b G7/G8 and a full 10 min repeat were cancelled by decision; no ESD health timer; P2.4 battery UI latency (30 s poll; 100→98 on unplug); P3 target (USB host, audio, sensors); second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
 | Not yet | Wi-Fi, Bluetooth, cellular, audio, camera, GPU, RTC; USB host/OTG; sleep/wake; charger control; Type-C role |
 | Safety | AMFI/sandbox/code signing off; data may be lost |
@@ -72,10 +68,10 @@ evidence and the wrong turns.
 | `docs/records/` | status, verification, guarantee, scope, safety, legal, acknowledgements |
 | `docs/en/`, `docs/zh/` | English and Chinese chapters |
 | `touch/` | probe ladder, hardware contract and sanitized lab notes |
-| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0179 USB/probe/keys/battery/touch/native IRQ, 0329a-0334 USB split/per-endpoint queues, 0348/0349 dead-switch retirement + compiled-in defaults, 0140/0141 ramdisk; historical 0081-0084 |
+| `patches/` | own XNU delta: 0080 UFS, 0085 Goodix touch, 0086-0179 USB/probe/keys/battery/touch/native IRQ, 0329a-0334 USB split/per-endpoint queues, 0140/0141 ramdisk; historical 0081-0084 |
 | `ci/` | baseline manifest/recipe, canonical patchset hash, kernel segment hash and provenance |
-| `config/` | 0349 current line; 0334 and the 0329a-0333 split line; 0195 and earlier as history |
-| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash; workflow name `xnu-0349` |
+| `config/` | 0334 current line; 0329a-0333 split line; 0195 and earlier as history |
+| `.github/workflows/xnu.yml` | reproduces the current kernel and gates its patchset/exec-data hash; workflow name `xnu-0334` |
 | `src/bringup/` | early boot payloads, shim, image packers |
 | `src/ufs-probe/` | read-only MT6877 UFS probe |
 | `tools/image/` | ICL patch, dyld scanner, boot verifier |
@@ -121,7 +117,7 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: 58e0730b... (current line, 223 files; 0348+0349; historical d87e666f... 305, 10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
+patchset: d87e666f... (current line, 305 files; historical 10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -133,36 +129,30 @@ the canonical patchset hash matches. See `docs/en/11-ci-baseline.md`. The boot i
 
 Host pipeline (no device, no root): `scripts/test-pipeline.sh` with a base boot
 image, kernel, ADT, shim and the golden 0084 image (the 0084/0085 historical
-harness; the current 0349 path uses the three commands in
-`docs/en/09-reproduce.md` with `config/0349.env`). It builds the payload, packs
+harness; the current 0334 path uses the three commands in
+`docs/en/09-reproduce.md` with `config/0334.env`). It builds the payload, packs
 a deterministic image and checks the layout.
 
 ## Current line & verification
 
 | Pin | Value |
 |---|---|
-| Patchset | `58e0730b…` (223 files; 0001-0079 baseline + patches through 0349) |
-| Kernel | local VM build full `abdf8acb…` (payload `4b13e5a6…`); the merge-window CI run against the new pin is the build gate |
-| Image | default `514ea382…` (`x16-amfi-0349-defaults.img`, cmdline 397 B) |
-| CI | run `44912588343` (branch `0667041`) = format gate only (patchset pin there was still the 0334 set); `config/0349.env` carries the merge-window gate |
+| Patchset | `d87e666f…` (305 files; 0001-0079 baseline + patches through 0334) |
+| Kernel | full `5ee3019d…`, exec-data `61c6b1a1…` (CI `44296779724`) |
+| Image | default `561f1026…` (`x16-0334b4-default.img`), lite `b4b95789…` (`x16-0334b4-lite.img`, `rubyep_test=1`) |
+| CI | `xnu-0334` `44296779724` (success, branch dispatch; exec gate pinned in `config/0334.env`) |
 | Tags | `v0.7.0` → merge `M2`; `p3-usb-0334-final` → feature tip; historical `v0.6.0` → `1e45453` |
-| `boot_a` | 0349 default (ECM net + SSH; boot-args 397 B); `boot_b` TWRP |
-| Device evidence | 2026-11-21: banner defaults from source; 64 MB wget 14.1 MB/s + scp push 14.3 MB/s (md5 match); TXRESET 0 all session; salvage 2 + softbell 25 boot-window shape; rxpk ~93k rxerr=0; no panic; rollback 0347 `b46acd2c…`, 0348v2 `f7b1f8e6…` |
+| `boot_a` | 0334b4 default (WinUSB bound, `CM_PROB_NONE`); `boot_b` TWRP |
+| Device evidence | 0331 lite matrix PASS (T0/T1/T3/T4, 512–16K); `t331 epall 511` → `ok_tx=3e err_tx=1c0 ok_rx=3e err_rx=1c0 restore=0`; post-batch matrix PASS; no panic, `fused=0`; rollback 0334b3 `ca2f3bf4…` |
 | Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) · [14](docs/en/14-usb-per-endpoint.md) |
 
-### USB device mode (0334–0349 line)
+### USB device mode (0334 line)
 
 - EP0 `0x2E` command channel and the `0xC0/0x31` mailbox; EP1 pair for data;
-  MS OS 1.0 binding under `rubywinusb=4` (compiled-in since 0349); port
-  events and suspend gates in 0333.
+  MS OS 1.0 binding under `rubywinusb=4`; port events and suspend gates in 0333.
 - 0334 gives every endpoint slot its own GPD ring and allocates FIFO segments
   the vendor way (`ep_fifo_alloc`): 3 × 512 B units per endpoint at slot 2, so
   EP1–5 fit per direction and EP6–8 are refused instead of overlapping.
-- The ECM network path (`rubyecm`, `ruby_enum=3` compiled-in) provides a
-  cdc_ether NIC over EP1 with SSH at root; 14 MB/s-class bulk throughput.
-  macOS and Linux attach it natively (CDC-ECM is driverless); Windows has no
-  in-box CDC-ECM class driver, so the NIC is bridged through
-  `usbipd-win` + WSL2 (`cdc_ether`) instead.
 - Host-side data is still measured only on `0x81`; see
   [14 — USB per-endpoint queues](docs/en/14-usb-per-endpoint.md) for the
   method, raw evidence and limits.
@@ -174,8 +164,8 @@ a deterministic image and checks the layout.
 | Device | Redmi Note 12 Pro 5G, `ruby` / MT6877, 8 GB + 256 GB |
 | System | Android 12 / MIUI 13.0.4, unlocked, Magisk, slot `_a` |
 | Layout | `userdata` 208.4 GiB + `iosroot` 17 GiB; `boot_a` 128 MiB; `super` ~9.1 GB |
-| Current state | 0349 default image/kernel on `boot_a` (ECM net + SSH); `boot_b` TWRP; 0348/0347, 0334b4, 0194/0195, 0189C, 0155 and 0085/0084 are history; root A/A' snapshots, ICL blocks, boot cmdline; the device is not part of this repository |
-| Success artifacts | 0349 default image, kernel, payload; 0334b4 default/lite images, kernel, root A/A' snapshots, ICL blocks, boot cmdline |
+| Current state | 0334b4 default image/kernel on `boot_a` (WinUSB bound); `boot_b` TWRP; 0194/0195, 0189C, 0155 and 0085/0084 are history; root A/A' snapshots, ICL blocks, boot cmdline; the device is not part of this repository |
+| Success artifacts | 0334b4 default/lite images, kernel, root A/A' snapshots, ICL blocks, boot cmdline |
 | Must match | firmware/GPT, root hash, boot image, boot args, panel/display |
 | Not needed | touch firmware, Wi-Fi/BT, audio, camera/GPU, RTC |
 

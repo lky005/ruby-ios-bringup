@@ -6,10 +6,7 @@
 > without a source is a bug; commands use placeholders, never personal paths.
 > This chapter covers the device-mode queue work; the host-side channel
 > remains [12](12-usb-host.md) and the 0180–0195 EP2 history remains
-> [13](13-usb-ep2-golden.md). The pins below are the 0334-era evidence this
-> chapter documents; the current line (0348+0349, ECM network path,
-> compiled-in defaults) is recorded in the repository README and
-> [11-ci-baseline.md](11-ci-baseline.md).
+> [13](13-usb-ep2-golden.md).
 
 ## Scope
 
