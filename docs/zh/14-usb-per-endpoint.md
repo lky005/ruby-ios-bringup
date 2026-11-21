@@ -5,6 +5,8 @@
 > 状态标注沿用[仓库 README](../../README.zh.md)。没有来源的数字视为
 > bug；命令用占位符，不写个人路径。本章讲 device 模式队列；上位机通道
 > 见 [12](12-usb-host.md)，0180–0195 的 EP2 历史见 [13](13-usb-ep2-golden.md)。
+> 下面的 pin 是本章记录的 0334 时代证据；当前线（0348+0349，ECM 网络通路、
+> 烘焙默认值）记录在仓库 README 与 [11-ci-baseline.md](11-ci-baseline.md)。
 
 ## 范围
 

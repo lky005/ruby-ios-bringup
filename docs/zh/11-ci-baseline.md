@@ -30,6 +30,7 @@
 | main（2026-10-29 集成） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
 | USB 0142 / 0143 分支 | `d0c5ab5e...` / `f47f4c19...` | 138 / 139 | `config/0142.env`、`config/0143.env` | CI `41015790742` / `41022192026` |
 | USB 拆分 0334（`p3-usb-cl0329-driver-split-2026-11-18`） | `d87e666f...` | 305 | `config/0334.env` | full `5ee3019d...`、exec `61c6b1a1...`（CI `44296779724`） |
+| 0348+0349（`p3-usb-cl0349-defaults-slim-2026-11-21`） | `58e0730b...` | 223 | `config/0349.env` | 本地 VM 构建 full `abdf8acb...`；合并窗 CI run 是构建门 |
 | USB（`usb-0131b-probe-write`，历史） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
 
 - main 包含 0080/0084/0085、0086-0131b、0140/0141、0142/0143、
@@ -39,7 +40,7 @@
 - 0142 把 EP2 IN bulk MPS 扩到 512；0143 把每帧日志扩到 511 B（16 B 头
   + 最多 495 B 文本），并在停 QMU 后 reset TX 环。host 侧首会话 XACT
   在 0143 仍未闭环。
-- 0131b 分支保留自己的 workflow 和 patch 列表；当前 0334 线使用
+- 0131b 分支保留自己的 workflow 和 patch 列表；当前 0349 线使用
   `config/0334.env`，`config/0131b.env` 与 `config/0131b-boot.cmdline`
   作为历史保留。
 - 内核 run `41022192026` 构建 0143，exec-data 与 `6fa65088...` 一致；
@@ -68,10 +69,10 @@ ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
-python scripts/verify-local.py --ci-config config/0334.env
+python scripts/verify-local.py --ci-config config/0349.env
 ```
 
-USB 分支使用 `--ci-config config/0334.env`。
+当前线使用 `--ci-config config/0349.env`。
 
 ## 镜像打包参数 [measured]
 
