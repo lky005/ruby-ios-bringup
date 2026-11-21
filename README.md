@@ -10,7 +10,7 @@
 A research bring-up, packaged as an independent, sanitized delta.
 
 > [!IMPORTANT]
-> **Status 2026-11-21 — 0349 line.** patchset `1282a8bd…` (307 files; 0348
+> **Status 2026-11-21 — 0349 line.** patchset `58e0730b…` (223 files; 0348
 > retires 21 dead boot-arg parses, 0349 bakes the 15 steady-state USB knobs
 > into compiled-in defaults and slims the cmdline 596 → 397 B); local kernel
 > `abdf8acb…`, device image `514ea382…` (`x16-amfi-0349-defaults.img`,
@@ -121,7 +121,7 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: 1282a8bd... (current line, 307 files; 0348+0349; historical d87e666f... 305, 10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
+patchset: 58e0730b... (current line, 223 files; 0348+0349; historical d87e666f... 305, 10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -141,7 +141,7 @@ a deterministic image and checks the layout.
 
 | Pin | Value |
 |---|---|
-| Patchset | `1282a8bd…` (307 files; 0001-0079 baseline + patches through 0349) |
+| Patchset | `58e0730b…` (223 files; 0001-0079 baseline + patches through 0349) |
 | Kernel | local VM build full `abdf8acb…` (payload `4b13e5a6…`); the merge-window CI run against the new pin is the build gate |
 | Image | default `514ea382…` (`x16-amfi-0349-defaults.img`, cmdline 397 B) |
 | CI | run `44912588343` (branch `0667041`) = format gate only (patchset pin there was still the 0334 set); `config/0349.env` carries the merge-window gate |

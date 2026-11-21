@@ -7,11 +7,11 @@ status. No phone is attached to this repository or to its CI.
 
 | Item | Result | Evidence |
 |---|---|---|
-| Current line | 0348+0349: dead-switch retirement + compiled-in steady-state defaults, cmdline slimmed 596 → 397 B | patchset `1282a8bd...` (307 files; 0348 `eff8fb22...`, 0349 `0f3599c5...`); `config/0349.env` |
+| Current line | 0348+0349: dead-switch retirement + compiled-in steady-state defaults, cmdline slimmed 596 → 397 B | patchset `58e0730b...` (223 files; 0348 `eff8fb22...`, 0349 `0f3599c5...`); `config/0349.env` |
 | 0348 | 21 dead boot-arg parses retired; 32 parses remain (txsalv/txsoften/txreplay/rxskip kept); statement-for-statement identical init apart from the retired parses; upstream provenance note in the `ruby_usb.c` header | device run 2026-11-21 (v1 fail → v2 PASS: wget 10.7 MB/s, TXRESET 0) |
 | 0349 | 15 steady-state knobs baked in (enable/usbirq/qmuirq/pad/dmauc/enum=3/winusb=4/ecmio/clr01/rxbuf=2048/txgpd=2048/txreset/txsalv/txsoften/txbell); all PE_parse calls stay for runtime override; banner values sourced from the compiled-in defaults | device run 2026-11-21 (boot_a): 64 MB wget 14.1 MB/s (+47% vs 0347), scp push 14.3 MB/s, TXRESET 0 all session, salvage 2 + softbell 25 (boot-window shape), rxpk ~93k rxerr=0, no panic |
 | Kernel | local VM build `abdf8acb...` (payload `4b13e5a6...`, image `514ea382...`, cmdline 397 B) | host build 2026-11-21; `config/0349-boot.cmdline` |
-| CI | run `44912588343` green on `p3-usb-cl0349-defaults-slim-2026-11-21` — **format gate only**: the patchset pin there was still the 0334 set (`d87e666f...`), so that run did not build the 0349 kernel; the merge-window CI run against the new pin `1282a8bd...` is the build gate | 2026-11-21 |
+| CI | run `44912588343` green on `p3-usb-cl0349-defaults-slim-2026-11-21` — **format gate only**: the patchset pin there was still the 0334 set (`d87e666f...`), so that run did not build the 0349 kernel; the merge-window CI run against the new pin `58e0730b...` is the build gate | 2026-11-21 |
 | Known limits | EP2-5 host-side end-to-end, concurrency, suspend unmeasured (0334 boundaries unchanged); scp pull avoided (FIFOFULL half-fetch window; large files go through HTTP); `ruby_txreplay` not yet exercised | 2026-11-21 |
 | Rollback | 0347 `b46acd2c...`; 0348v2 `f7b1f8e6...`; 0334b4 `561f1026...` | local archive |
 

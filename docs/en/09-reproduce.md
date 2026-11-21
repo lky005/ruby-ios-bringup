@@ -33,7 +33,7 @@ For the public fallback, run
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (no upstream tree copied here)
-patchset: 1282a8bd... (current line, 307 files; 0348+0349)
+patchset: 58e0730b... (current line, 223 files; 0348+0349)
           historical: d87e666f... (305 files, config/0334.env),
           da13b6df... (151 files, config/0155.env),
           9f7b41cf... (141 files, config/0144.env)
