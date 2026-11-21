@@ -42,10 +42,10 @@ must not appear in the public tree:
 
 | Check | Result |
 |---|---|
-| Patchset (0334) | `d87e666f...` (305 files); prepare-baseline `baseline ready` |
-| Kernel (0334) | full `5ee3019d...`, exec-data `61c6b1a1...`; xnu `44296779724` (success) |
-| Images (0334) | default `561f1026...`, lite `b4b95789...`; host build, `boot_verify.py` PASS |
-| Toolchain | `macos-15` arm64, Xcode 16.0; workflow `xnu-0334` |
+| Patchset (0349) | `b277f658...` (314 files); prepare-baseline `baseline ready` |
+| Kernel (0349) | full `2eb84a6d...`, exec-data `1fa119b0...`; xnu `44931937790` (success, 18,618,888 B); strict-gate rerun `44933003625` (exec same) |
+| Images (0349) | `514ea382...` (`x16-amfi-0349-defaults.img`, 397 B boot line); host build, `boot_verify.py` PASS |
+| Toolchain | `macos-15` arm64, Xcode 16.0; workflow `xnu-0349` |
 | Device | 0331 lite matrix PASS (T0/T1/T3/T4); `t331 epmap`/`epall` evidence in `docs/en/14-usb-per-endpoint.md`; default image `CM_PROB_NONE`, `fused=0`, no panic |
 | Not measured | host-side data on EP2–8; non-default RX data; concurrent multi-EP |
 
