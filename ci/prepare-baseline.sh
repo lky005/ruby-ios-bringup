@@ -297,11 +297,22 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0332i-ruby-usb-msos1.patch" \
     "$ROOT/patches/0333-ruby-usb-port-events.patch" \
     "$ROOT/patches/0334-ruby-usb-ep-queues.patch" \
+    "$ROOT/patches/0335-sweet-amfi-probe.patch" \
+    "$ROOT/patches/0336-rubysh-timeout-cache-delivery.patch" \
+    "$ROOT/patches/0337-usb-ecm-port.patch" \
+    "$ROOT/patches/0338-ecm-txstall.patch" \
+    "$ROOT/patches/0339-txsalv-txsoften.patch" \
+    "$ROOT/patches/0340-bootarg-parse-fix.patch" \
+    "$ROOT/patches/0348-ruby-usb-dead-switches.patch" \
+    "$ROOT/patches/0349-ruby-usb-defaults-cmdline-slim.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
     "$ROOT/patches/historical/0083-ruby-iokit-match-trace.patch" \
     "$DEST/xnu/patches/"
+# Stage script for the built-in IONetworkingFamily: the ECM driver includes
+# <IOKit/network/IOEthernetController.h>, which only exists after this runs.
+cp "$ROOT/patches/0497-stage-ionet.sh" "$DEST/xnu/patches/"
 
 # SKIP_PATCHES holds patch numbers (prefix match, e.g. "0144" or "0144 0143b").
 # The matching patches are dropped again so the caller can build an older

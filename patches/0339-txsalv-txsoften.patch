@@ -1,0 +1,177 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -546,6 +546,8 @@ uint32_t ruby_bulk_dup_a;
+ uint32_t ruby_bulk_dup_b;
+ int ruby_txreset_en;
+ int ruby_txeprst_en;
++int ruby_txsalv_en;        /* 0345: complete-side park salvage */
++int ruby_txsoften_en;      /* 0346: demote watchdog misfires */
+ static int ruby_noise_en;   /* 0272: 0185 noise quirk, default off */
+ uint32_t ruby_txkick_starts;
+ uint32_t ruby_txrdy_kicks;   /* 0300: retired, kept for the diag ABI */
+@@ -615,6 +617,9 @@ static uint32_t ruby_ep2_last_in_ms;
+ static uint32_t ruby_ep2_stuck_log_ms;
+ static uint32_t ruby_ep2_no_log;
+ uint32_t ruby_ep2_drain_calls;
++uint32_t ruby_ep2_drain_salv;
++uint32_t ruby_tx_softbell;
++uint32_t ruby_tx_softnoop;
+ uint32_t ruby_ep2_drain_freed_total;
+ uint32_t ruby_ep2_drain_max;
+ uint32_t ruby_ep2_drain_noq0;
+@@ -2148,6 +2153,8 @@ ruby_usb_probe(void)
+     int noise = 0;
+     int txreplay = 0;
+     int txdone = 1;
++    int txsalv = 0;
++    int txsoften = 0;
+     int lpmhrwe = 1;
+     int usb2parity = 1;
+     int usbintr = 1;
+@@ -2298,6 +2305,8 @@ ruby_usb_probe(void)
+     PE_parse_boot_argn("ruby_txeprst", &txeprst, sizeof(txeprst));
+     ruby_txreset_en = (txreset == 1);
+     ruby_txeprst_en = (txeprst == 1);
++    ruby_txsalv_en = (txsalv == 1);
++    ruby_txsoften_en = (txsoften == 1);
+     PE_parse_boot_argn("ruby_noise", &noise, sizeof(noise));
+     ruby_noise_en = (noise == 1);
+     PE_parse_boot_argn("ruby_txreplay", &txreplay, sizeof(txreplay));
+diff --git a/bsd/dev/ruby_usb_qmu.c b/bsd/dev/ruby_usb_qmu.c
+--- a/bsd/dev/ruby_usb_qmu.c
++++ b/bsd/dev/ruby_usb_qmu.c
+@@ -665,7 +665,7 @@ ruby_tx_reset_fire(vm_offset_t mac)
+         "tqcsr=%08x mode=%u/%u/%u\n", ruby_tx_reset_cnt,
+         ruby_gpd_deq, ruby_gpd_enq, ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, TQCSR1_OFF),
+-        ruby_txreset_en, ruby_txeprst_en);
++        ruby_txreset_en, ruby_txeprst_en, ruby_txreplay_en);
+     if (ruby_txreplay_en && ruby_echo_en)
+         ruby_tx_replay_snapshot(mac);
+     ruby_ep2_tx_rebuild(mac);
+@@ -694,10 +694,13 @@ ruby_txbell_poll(vm_offset_t mac)
+     tx0 = ruby_rd32(mac, TX1CSR0_OFF);
+     if (tx0 & TX_TXPKTRDY)
+         return;
+-    if (tx0 & TX_FIFOEMPTY)
+-        return;
+     tq = ruby_rd32(mac, TQCSR1_OFF);
+-    if (tq & QMU_Q_ACTIVE)
++    /* 0346: the 0x18100 pseudo-ACTIVE stall (docs/197: FIFOFULL set,
++     * queue claims ACTIVE, no progress) is exactly what a doorbell
++     * fixes; the readback cannot veto a software-owned restart. */
++    if ((tq & QMU_Q_ACTIVE) && !(tx0 & TX_FIFOFULL))
++        return;
++    if (tx0 & TX_FIFOEMPTY)
+         return;
+     ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
+     ruby_tx_queue_started = 1;
+@@ -727,6 +730,45 @@ ruby_tx_recover_poll(vm_offset_t mac)
+         return;
+     if (ruby_inflight == 0 && (tx0 & (1u << 24)))
+         return;
++    /*
++     * 0346: software-state exemptions, gated by ruby_txsoften.  The
++     * boot-window misfires (docs/197 s3) both read as "stall" while the
++     * software state says otherwise:
++     *  - idle: nothing queued (deq==enq, inflight 0) and the 0300 parked
++     *    queue is the normal MAC state; a rebuild there only burns FIFO
++     *    flushes between ARP frames.
++     *  - pseudo-ACTIVE: FIFOFULL with the queue claiming ACTIVE is the
++     *    0x18100 shape push no longer trusts; ring the doorbell first
++     *    (same Q_START the 0304 txbell uses) and only let three
++     *    consecutive no-op polls fall through to the destructive path.
++     */
++    if (ruby_txsoften_en) {
++        if (ruby_inflight == 0 && ruby_gpd_deq == ruby_gpd_enq &&
++            !ruby_tx_queue_started)
++            return;
++        if ((tx0 & (1u << 25)) && (ruby_rd32(mac, TQCSR1_OFF) &
++            QMU_Q_ACTIVE) && ruby_inflight > 0) {
++            if (ruby_tx_softnoop < 3) {
++                ruby_tx_softnoop++;
++                ruby_tx_softbell++;
++                if (ruby_tx_softbell <= 8 ||
++                    (ruby_tx_softbell & 0x3f) == 0)
++                    printf("RUBY USB: 0346 softbell n=%u noop=%u "
++                        "deq=%u enq=%u inf=%u tx0=%08x\n",
++                        ruby_tx_softbell, ruby_tx_softnoop,
++                        ruby_gpd_deq, ruby_gpd_enq, ruby_inflight,
++                        tx0);
++                ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++                ruby_tx_queue_started = 1;
++                ruby_tx_reset_ms = ruby_ms;
++                ruby_tx_reset_tries = 0;
++                return;
++            }
++            ruby_tx_softnoop = 0;
++        } else {
++            ruby_tx_softnoop = 0;
++        }
++    }
+     if ((uint32_t)(ruby_ms - ruby_tx_progress_ms) < 200)
+         return;
+     if ((uint32_t)(ruby_ms - ruby_tx_reset_ms) < 1000)
+@@ -843,6 +885,45 @@ ruby_ep2_drain(vm_offset_t mac, uint32_t q0)
+ 
+     ruby_dma_mb();          /* TQCPR read complete before HWO snapshot */
+     hwo = ruby_ep2_hwo_bits();
++    /*
++     * 0345: park salvage.  With the queue not ACTIVE, FIFO empty and the
++     * GPD at deq HWO-cleared, the QMU has fetched that GPD and parked on
++     * it (docs/192 n=2 shape: inf=16 tqcsr=00000000).  cur == deq then
++     * makes the walk below read zero progress until the watchdog
++     * rebuilds destructively.  Retire the fetched GPD inline, then
++     * Q_START from the new deq so the queue moves again.
++     */
++    if (ruby_txsalv_en && ruby_inflight > 0 && cur == ruby_gpd_deq &&
++        !(hwo & (1ull << ruby_gpd_deq)) &&
++        !(ruby_rd32(mac, TQCSR1_OFF) & QMU_Q_ACTIVE) &&
++        (ruby_rd32(mac, TX1CSR0_OFF) & TX_FIFOEMPTY)) {
++        ruby_ep2_drain_salv++;
++        if (ruby_ep2_drain_salv <= 8 || (ruby_ep2_drain_salv & 0x3f) == 0)
++            printf("RUBY USB: 0345 salvage n=%u deq=%u enq=%u inf=%u "
++                "tqcsr=%08x tx0=%08x\n", ruby_ep2_drain_salv,
++                ruby_gpd_deq, ruby_gpd_enq, ruby_inflight,
++                ruby_rd32(mac, TQCSR1_OFF),
++                ruby_rd32(mac, TX1CSR0_OFF));
++        ruby_tx_reset_ms = ruby_ms;      /* keep the watchdog quiet */
++        /* cur == deq, so the walk below would free nothing: retire the
++         * fetched GPD inline, then re-START from the new deq. */
++        ruby_gpd_deq = (ruby_gpd_deq + 1u) % ruby_tx_ring_n;
++        ruby_inflight--;
++        ruby_txdone_count++;
++        ruby_ep2_drain_freed_total++;
++        ruby_tx_progress_deq = ruby_gpd_deq;
++        ruby_tx_progress_ms = ruby_ms;
++        ruby_tx_reset_tries = 0;
++        ruby_tx_mtr_add(RUBY_MTR_TX_DONE, 1u, ruby_gpd_deq,
++            ruby_rd32(mac, TQCSR1_OFF));
++        if (ruby_inflight == 0 && !ruby_qstart_keep)
++            ruby_tx_queue_started = 0;
++        ruby_wr32(mac, TQCSR1_OFF, QMU_Q_START);
++        ruby_tx_queue_started = 1;
++        ruby_tx_mtr_add(RUBY_MTR_TX_KICK, RUBY_TX_SRC_RECOVER,
++            ruby_rd32(mac, TQCSR1_OFF), ruby_inflight);
++        return 1;
++    }
+     while (ruby_inflight > 0 && ruby_gpd_deq != cur) {
+         i = ruby_gpd_deq;
+         if (hwo & (1ull << i)) {
+diff --git a/bsd/dev/ruby_usb_qmu.h b/bsd/dev/ruby_usb_qmu.h
+--- a/bsd/dev/ruby_usb_qmu.h
++++ b/bsd/dev/ruby_usb_qmu.h
+@@ -256,7 +256,12 @@ extern uint32_t ruby_txbell_ms;
+ extern uint32_t ruby_txbell_cnt;
+ extern uint32_t ruby_txbell_last_ms;
+ extern int ruby_txreset_en;
++extern int ruby_txsalv_en;
++extern int ruby_txsoften_en;
++extern uint32_t ruby_tx_softbell;
++extern uint32_t ruby_tx_softnoop;
+ extern int ruby_txreplay_en;
++extern uint32_t ruby_ep2_drain_salv;
+ extern int ruby_echo_en;
+ extern uint32_t ruby_txdone_count;
+ extern int ruby_qstart_keep;

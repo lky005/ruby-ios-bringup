@@ -1,0 +1,171 @@
+diff --git a/bsd/kern/sweet_amfi.c b/bsd/kern/sweet_amfi.c
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -273,6 +273,21 @@ sweet_amfi_vnode_check_signature(struct vnode *vp, __unused struct label *label,
+ 	return 0;
+ }
+ 
++static int
++sweet_amfi_policy_syscall(struct proc *p, int call, __unused user_addr_t arg)
++{
++	char name[32];
++	proc_name(proc_pid(p), name, sizeof(name));
++	printf("SWEET AMFI syscall: %s call=0x%x\n", name, call);
++	if (call == 0x5a) {
++		return 0;
++	}
++	if (call == 0x60) {
++		return 0x86;
++	}
++	return ENOTSUP;
++}
++
+ /*
+  * Policy "Sandbox": libsystem_sandbox calls __mac_syscall("Sandbox", op,
+  * arg). Without a policy of that name every call fails with ENOPOLICY and
+@@ -307,6 +322,7 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+ 
+ static const struct mac_policy_ops sweet_amfi_mac_ops = {
+ 	.mpo_vnode_check_signature = sweet_amfi_vnode_check_signature,
++	.mpo_policy_syscall = sweet_amfi_policy_syscall,
+ };
+ 
+ /*
+@@ -360,7 +376,7 @@ static struct mac_policy_conf sweet_sandbox_mac_conf = {
+ static mac_policy_handle_t sweet_sandbox_mac_handle;
+ 
+ static struct mac_policy_conf sweet_amfi_mac_conf = {
+-	.mpc_name = "SWEET AMFI",
++	.mpc_name = "AMFI",
+ 	.mpc_fullname = "SWEET built-in Mobile File Integrity",
+ 	.mpc_ops = &sweet_amfi_mac_ops,
+ };
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -17,6 +17,7 @@ iokit/Kernel/arm/SweetKPD.cpp                                    optional iokitc
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp
++iokit/Kernel/arm/SweetAMFI.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+@@ -27,3 +28,18 @@ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitc
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp
++
++# ruby: Apple OSS IONetworkingFamily-170.140.2, staged by xnu/patches/0497-stage-ionet.sh
++iokit/sweet_ionet/IOEthernetController.cpp       optional iokitcpp
++iokit/sweet_ionet/IOEthernetInterface.cpp        optional iokitcpp
++iokit/sweet_ionet/IOKernelDebugger.cpp           optional iokitcpp
++iokit/sweet_ionet/IOMbufMemoryCursor.cpp         optional iokitcpp
++iokit/sweet_ionet/IONetworkController.cpp        optional iokitcpp
++iokit/sweet_ionet/IONetworkData.cpp              optional iokitcpp
++iokit/sweet_ionet/IONetworkInterface.cpp         optional iokitcpp
++iokit/sweet_ionet/IONetworkMedium.cpp            optional iokitcpp
++iokit/sweet_ionet/IONetworkStack.cpp             optional iokitcpp
++iokit/sweet_ionet/IONetworkUserClient.cpp        optional iokitcpp
++iokit/sweet_ionet/IOOutputQueue.cpp              optional iokitcpp
++iokit/sweet_ionet/IOPacketQueue.cpp              optional iokitcpp
++iokit/Kernel/arm/RubyECMEthernet.cpp                           optional iokitcpp
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -53,6 +53,11 @@ const char * gIOKernelConfigTables =
+     "     'IOMatchCategory' = AppleKeyStore;"
+     "   },"
+     "   {"
++    "     'IOClass'         = AppleMobileFileIntegrity;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = AppleMobileFileIntegrity;"
++    "   },"
++    "   {"
+     "     'IOClass'         = IOWatchdog;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
+@@ -68,9 +73,10 @@ const char * gIOKernelConfigTables =
+     "     'IONameMatch'     = 'sweet,display';"
+     "   },"
+     "   {"
+-    "     'IOClass'         = IONetworkController;"
+-    "     'IOProviderClass' = IOPlatformDevice;"
+-    "     'IONameMatch'     = 'marconi-wifi';"
++    "     'IOClass'         = IONetworkStack;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOResourceMatch' = IOBSD;"
++    "     'IOMatchCategory' = IONetworkStack;"
+     "   },"
+     "   {"
+     "     'IOClass'         = SweetHIDButtons;"
+diff --git a/iokit/Kernel/arm/SweetAMFI.cpp b/iokit/Kernel/arm/SweetAMFI.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetAMFI.cpp
+@@ -0,0 +1,65 @@
++/* Minimal 20H392 AMFI IOKit presence probe for SWEET. */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <sys/proc.h>
++
++class AppleMobileFileIntegrityUserClient;
++
++class AppleMobileFileIntegrity : public IOService {
++	OSDeclareDefaultStructors(AppleMobileFileIntegrity);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleMobileFileIntegrity, IOService);
++
++class AppleMobileFileIntegrityUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleMobileFileIntegrityUserClient);
++public:
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleMobileFileIntegrityUserClient, IOUserClient);
++
++bool
++AppleMobileFileIntegrity::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "AppleMobileFileIntegrityUserClient");
++	registerService();
++	IOLog("SWEET AMFI IOKit: service registered\n");
++	return true;
++}
++
++IOReturn
++AppleMobileFileIntegrityUserClient::externalMethod(uint32_t selector,
++    IOExternalMethodArguments *args, __unused IOExternalMethodDispatch *dispatch,
++    __unused OSObject *target, __unused void *reference)
++{
++	uint32_t in_scalars = args ? args->scalarInputCount : 0;
++	uint32_t in_struct = args ? args->structureInputSize : 0;
++	uint32_t out_scalars = args ? args->scalarOutputCount : 0;
++	uint32_t out_struct = args ? args->structureOutputSize : 0;
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOLog("SWEET AMFI IOKit: %s sel %u in %u/%u out %u/%u\n",
++	    name, selector, in_scalars, in_struct, out_scalars, out_struct);
++	if (selector == 6) {
++		if (args && args->scalarOutputCount > 0) {
++			args->scalarOutput[0] = 1;
++			args->scalarOutputCount = 1;
++		}
++		return kIOReturnSuccess;
++	}
++	return kIOReturnUnsupported;
++}
++#endif
