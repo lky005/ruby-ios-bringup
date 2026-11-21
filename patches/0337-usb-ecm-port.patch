@@ -1,0 +1,1244 @@
+diff --git a/bsd/dev/ruby_usb.c b/bsd/dev/ruby_usb.c
+--- a/bsd/dev/ruby_usb.c
++++ b/bsd/dev/ruby_usb.c
+@@ -80,9 +80,12 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+ /* EP0 responses are copied here: handler buffers may live on the stack. */
+ #include "ruby_usb_io.h"
++#include "ruby_ecm.h"
+ #include "ruby_usb_ep.h"
+ #include "ruby_usb_qmu.h"
+ 
++extern uint8_t ruby_ecm_alt;   /* gadget SET_INTERFACE */
++
+ /* 0147: one command line, both on EP2 OUT and EP0 0x2E. */
+ 
+ /*
+@@ -230,7 +233,7 @@ static struct ruby_req ruby_xfer_reqs[RUBY_GPD_NUM];
+  */
+ int ruby_acm_cmd;  /* rubyusbcmd=1 enables CDC-ACM descriptors */
+ /* 0301: zero-build enumeration/ZLP axes (cmdline selected). */
+-int ruby_enum_profile = 1;   /* 0 vendor, 1 ACM, 2 ACM-composite */
++int ruby_enum_profile = 1;   /* 0 vendor, 1 ACM, 2 ACM-composite, 3 ruby CDC-ECM */
+ int ruby_zlp_en;             /* 0 = no ACM echo ZLP (0301 default) */
+ /* 0302: echo behaviour is independent of the declared descriptor class. */
+ int ruby_echo_en;
+@@ -587,6 +590,8 @@ volatile uint32_t ruby_qmu_txrecover_req;
+ /* 0255: read-only stall diagnostics. */
+ volatile uint32_t ruby_qmu_diag_req;
+ uint32_t ruby_qmu_diag_ms;
++static uint32_t ruby_tx_stall_seen;
++static uint32_t ruby_tx_resume_logged;
+ uint32_t ruby_ep2_host_seen;
+ volatile uint32_t ruby_tx_busy;
+ uint64_t ruby_log_pos;
+@@ -1047,6 +1052,17 @@ ruby_usb_rx_kick(void)
+     }
+ }
+ 
++/* ECM link notifications must not wait for the next data frame: a host
++ * that just opened the data interface is waiting for NETWORK_CONNECTION. */
++void
++ruby_usb_tx_kick(void)
++{
++    if (ruby_qmu_irq_mode) {
++        ruby_qmu_push_req = 1;
++        ruby_usb_irq_kick();
++    }
++}
++
+ static uint32_t
+ ruby_acm_echo_dequeue(uint8_t *out, uint32_t max)
+ {
+@@ -1078,10 +1094,11 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+ {
+     uint32_t i, d;
+ 
++    ruby_tx_stall_seen++;
+     printf("RUBY USB TXSTALL inf=%u tcsr=%08x qcr0=%08x qcr1=%08x "
+         "qcr2=%08x qcr3=%08x tqcpr=%08x rqcpr=%08x q0=%08x q1=%08x "
+         "speed=%u tx1csr1=%08x tx1csr2=%08x rx1csr1=%08x rx1csr2=%08x "
+-        "rq=%08x tkstarts=%u txrdy=%u\n", ruby_inflight,
++        "rq=%08x tkstarts=%u txrdy=%u alt=%u tq=%08x\n", ruby_inflight,
+         ruby_rd32(mac, TX1CSR0_OFF), ruby_rd32(mac, QCR0_OFF),
+         ruby_rd32(mac, QCR1_OFF), ruby_rd32(mac, QCR2_OFF),
+         ruby_rd32(mac, QCR3_OFF), ruby_rd32(mac, TQCPR1_OFF),
+@@ -1091,7 +1108,7 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+         ruby_rd32(mac, TX1CSR1_OFF), ruby_rd32(mac, TX1CSR2_OFF),
+         ruby_rd32(mac, RX1CSR1_OFF), ruby_rd32(mac, RX1CSR2_OFF),
+         ruby_rd32(mac, RQCSR1_OFF), ruby_txkick_starts,
+-        ruby_txrdy_kicks);
++        ruby_txrdy_kicks, ruby_ecm_alt, ruby_rd32(mac, TQCSR1_OFF));
+     if (!ruby_dma_uc)
+         ruby_dc_civac(ruby_txq_active->clean_cpu, RUBY_GPD_RING_SZ);
+     d = ruby_gpd_deq;
+@@ -1107,6 +1124,19 @@ ruby_ep2_stall_dump(vm_offset_t mac)
+     }
+ }
+ 
++/* A drain after a stall dump proves the host resumed consuming. */
++static void
++ruby_tx_resume_note(vm_offset_t mac, uint32_t freed)
++{
++    if (!freed || ruby_tx_stall_seen == ruby_tx_resume_logged)
++        return;
++    ruby_tx_resume_logged = ruby_tx_stall_seen;
++    if (ruby_tx_resume_logged <= 8 || (ruby_tx_resume_logged & 0xfu) == 0)
++        printf("RUBY USB TXRESUME n=%u freed=%u inflight=%u tq=%08x alt=%u\n",
++            ruby_tx_resume_logged, freed, ruby_inflight,
++            ruby_rd32(mac, TQCSR1_OFF), ruby_ecm_alt);
++}
++
+ void
+ ruby_ep2_push_log(vm_offset_t mac)
+ {
+@@ -1120,6 +1150,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+ 
+     if (!ruby_ep_ready || (!ruby_ep2log_on && !ruby_echo_en))
+         return;
++    ruby_ecm_link_poll(mac);   /* ruby ECM: link-up notification on EP 0x83 */
+     ruby_push_tries++;
+ 
+     q0 = ruby_rd32(mac, QISAR0_OFF);
+@@ -1161,8 +1192,10 @@ ruby_ep2_push_log(vm_offset_t mac)
+     freed = 0;
+     if (ruby_inflight > 0)
+         freed = ruby_ep2_drain(mac, q0);
+-    if (freed)
++    if (freed) {
+         ruby_busy_ticks = 0;
++        ruby_tx_resume_note(mac, freed);
++    }
+ 
+     /*
+      * 0213: TXQ_EMPTY fast path. The vendor routes this to the QMU ISR
+@@ -1173,8 +1206,10 @@ ruby_ep2_push_log(vm_offset_t mac)
+     if (!freed && ruby_inflight > 0 && ruby_ep2_host_seen &&
+         (q1 & QISAR1_TXQ_EMPTY)) {
+         freed = ruby_ep2_drain(mac, q0);
+-        if (freed)
++        if (freed) {
+             ruby_busy_ticks = 0;
++            ruby_tx_resume_note(mac, freed);
++        }
+     }
+ 
+     if (q0 & RUBY_QMU_TX_DONE) {
+@@ -1378,6 +1413,14 @@ ruby_ep2_push_log(vm_offset_t mac)
+              * The ring budget bounds a single push pass; the remainder
+              * stays queued for the next pass.
+              */
++            if (ruby_ecm_enabled()) {
++                /* ruby ECM: one frame per transfer, never crossing a frame
++                 * boundary; frames end on a short packet (no ZLP). */
++                n = ruby_ecm_tx_dequeue(buf, ruby_tx_gpd_len);
++                if (!n)
++                    break;
++                acm_zlp = 0;
++            } else {
+             n = ruby_acm_echo_dequeue(buf, ruby_tx_gpd_len);
+             if (!n)
+                 break;
+@@ -1385,6 +1428,7 @@ ruby_ep2_push_log(vm_offset_t mac)
+              * dequeue also drained the ring; then this chunk carries ZLP. */
+             acm_zlp = (ruby_zlp_en && n == ruby_tx_gpd_len &&
+                 ruby_acm_echo_head == ruby_acm_echo_tail) ? 1u : 0u;
++            }
+             if (ruby_acm_echo_dbg_tx < 8) {
+                 ruby_acm_echo_dbg_tx++;
+                 printf("RUBY USB ACM TX n=%u enq=%u inflight=%u zlp=%u\n",
+@@ -2133,7 +2177,7 @@ ruby_usb_probe(void)
+         int zlp = 0;
+ 
+         PE_parse_boot_argn("ruby_enum", &enumprof, sizeof(enumprof));
+-        if (enumprof >= 0 && enumprof <= 2) {
++        if (enumprof >= 0 && enumprof <= 3) {
+             ruby_enum_profile = enumprof;
+             ruby_acm_cmd = (enumprof != 0);
+         } else {
+@@ -2221,6 +2265,14 @@ ruby_usb_probe(void)
+     for (uint32_t si = 0; si < sizeof(ruby_str_ser); si++)
+         ruby_str_ser[si] = ruby_str_ser_base[si];
+     ruby_str_ser[8] = (uint8_t)('0' + ruby_enum_profile);
++    if (ruby_enum_profile == 3) {
++        /* ruby: CDC-ECM, a different PID so hosts never mix it with P2 */
++        ruby_dev_desc[4] = 0x02;    /* bDeviceClass: CDC */
++        ruby_dev_desc[5] = 0x00;
++        ruby_dev_desc[6] = 0x00;
++        ruby_dev_desc[10] = 0x03;   /* idProduct 0x0003 */
++        ruby_dev_desc[11] = 0x00;
++    }
+     if (ruby_enum_profile == 2) {
+         ruby_dev_desc[4] = 0xEF;    /* bDeviceClass: Misc */
+         ruby_dev_desc[5] = 0x02;    /* bDeviceSubClass: Common */
+diff --git a/bsd/dev/ruby_usb_qmu.c b/bsd/dev/ruby_usb_qmu.c
+--- a/bsd/dev/ruby_usb_qmu.c
++++ b/bsd/dev/ruby_usb_qmu.c
+@@ -19,6 +19,7 @@
+ #include "ruby_usb_ep.h"
+ #include "ruby_usb_io.h"
+ #include "ruby_usb_qmu.h"
++#include "ruby_ecm.h"
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ /* Boot-tunable ring sizes still defined in ruby_usb.c. */
+@@ -1449,11 +1450,42 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+      * that shape as a full lap so the completed GPDs are drained/re-armed.
+      */
+     full_lap = (cur == ruby_rx_deq && hwo == 0) ? 1u : 0u;
++    /*
++     * ruby ECM: the same shape with only the head consumed: the QMU
++     * completed the GPD at deq (HWO clear), came round to it and stopped
++     * there (cur == deq), while the rest of the ring is still armed. The
++     * walk above would see nothing to drain and RX stayed stopped for
++     * good (back-to-back Ethernet frames, rxhwo=fffe). A GPD at deq with
++     * HWO clear is always a completed one (re-arming sets HWO), unless the
++     * raw consumer left it unarmed on purpose.
++     */
++    if (!full_lap && !raw_owner && cur == ruby_rx_deq &&
++        !(hwo & (1u << cur)))
++        full_lap = 1u;
++
++    /*
++     * ruby ECM frame mode (EP1 owner NET, ruby_rxbuf >= 2048): every GPD
++     * holds one whole Ethernet frame, and the QMU does not always complete
++     * GPDs in ring order (0267). Walk the whole ring from the QMU's
++     * current slot (the oldest completed GPD follows it) and take every
++     * completed GPD, stepping over armed ones instead of stopping at the
++     * first: the in-order walk stranded completed frames behind an armed
++     * slot (deq ahead of cur, seconds of RX stall).
++     */
++    int frame_mode = (ruby_usb_io_owner() == RUBY_USB_IO_NET &&
++        ruby_rx_buf_size >= 2048u);
++    if (frame_mode)
++        ruby_rx_deq = cur;
+ 
+-    for (n = 0; n < ruby_rx_ring_n && (full_lap || ruby_rx_deq != cur); n++) {
++    for (n = 0; n < ruby_rx_ring_n &&
++        (frame_mode || full_lap || ruby_rx_deq != cur); n++) {
+         i = ruby_rx_deq;
+         g = ruby_rx_gpd_ring_cpu + i * 16;
+         if (hwo & (1u << i)) {
++            if (frame_mode) {
++                ruby_rx_deq = (i + 1u) % ruby_rx_ring_n;
++                continue;
++            }
+             /*
+              * 0267: the QMU can skip the ring head (its HWO stays set)
+              * and complete later slots.  Advance past the orphaned head
+@@ -1545,7 +1577,8 @@ ruby_ep2_rx_drain(vm_offset_t mac)
+     }
+     /* 0231: hand the echo bytes to the TX ring right away; the QMU workloop
+      * owns both ends, so this is the same-thread producer -> consumer step. */
+-    if (ruby_echo_en && ruby_acm_echo_head != ruby_acm_echo_tail)
++    if (ruby_echo_en && (ruby_acm_echo_head != ruby_acm_echo_tail ||
++        ruby_ecm_tx_pending()))
+         ruby_ep2_push_log(mac);
+ }
+ 
+diff --git a/bsd/dev/ruby_usb_gadget.c b/bsd/dev/ruby_usb_gadget.c
+--- a/bsd/dev/ruby_usb_gadget.c
++++ b/bsd/dev/ruby_usb_gadget.c
+@@ -23,6 +23,7 @@ extern volatile int ruby_usb_suspended;
+ #include "ruby_battery.h"
+ #include "ruby_probe.h"
+ #include "ruby_usb_gadget.h"
++#include "ruby_ecm.h"
+ 
+ static inline uint32_t
+ ruby_rd32(vm_offset_t base, uint32_t off)
+@@ -94,6 +95,8 @@ void ruby_func_register(const char *name,
+  * tied to the same constant. */
+ #define RUBY_VENDOR_IFACE_P2 2u
+ 
++uint8_t ruby_ecm_alt;          /* ruby ECM data interface alt */
++
+ uint32_t
+ ruby_build_cfg_desc(uint8_t *out)
+ {
+@@ -108,6 +111,42 @@ ruby_build_cfg_desc(uint8_t *out)
+             continue;
+         n_eps_total++;
+     }
++    if (ruby_enum_profile == 3) {
++        /*
++         * ruby CDC-ECM (ECM120): Config + Iface0 Comm (subclass 6) with
++         * Header/Union/Ethernet functional descriptors and the notification
++         * EP 0x83, Iface1 Data alt 0 (no EPs) and alt 1 (bulk 0x01/0x81).
++         */
++        vout[off++] = 9; vout[off++] = 2; vout[off++] = 0; vout[off++] = 0;
++        vout[off++] = 2; vout[off++] = 1; vout[off++] = 0; vout[off++] = 0x80; vout[off++] = 250;
++        vout[off++] = 9; vout[off++] = 4; vout[off++] = 0; vout[off++] = 0;
++        vout[off++] = 1; vout[off++] = 0x02; vout[off++] = 0x06; vout[off++] = 0; vout[off++] = 0;
++        vout[off++] = 5; vout[off++] = 0x24; vout[off++] = 0x00; vout[off++] = 0x10; vout[off++] = 0x01;
++        vout[off++] = 5; vout[off++] = 0x24; vout[off++] = 0x06; vout[off++] = 0; vout[off++] = 1;
++        /* Ethernet Networking: iMACAddress=4, stats 0, wMaxSegmentSize 1514,
++         * no MC filters, no power filters */
++        vout[off++] = 13; vout[off++] = 0x24; vout[off++] = 0x0F; vout[off++] = 4;
++        vout[off++] = 0; vout[off++] = 0; vout[off++] = 0; vout[off++] = 0;
++        vout[off++] = 0xEA; vout[off++] = 0x05; vout[off++] = 0; vout[off++] = 0;
++        vout[off++] = 0;
++        vout[off++] = 7; vout[off++] = 5; vout[off++] = 0x83; vout[off++] = 3;
++        vout[off++] = 16; vout[off++] = 0; vout[off++] = 9;
++        vout[off++] = 9; vout[off++] = 4; vout[off++] = 1; vout[off++] = 0;
++        vout[off++] = 0; vout[off++] = 0x0A; vout[off++] = 0; vout[off++] = 0; vout[off++] = 0;
++        vout[off++] = 9; vout[off++] = 4; vout[off++] = 1; vout[off++] = 1;
++        vout[off++] = 2; vout[off++] = 0x0A; vout[off++] = 0; vout[off++] = 0; vout[off++] = 0;
++        vout[off++] = 7; vout[off++] = 5; vout[off++] = 0x01; vout[off++] = 2;
++        vout[off++] = (uint8_t)(ruby_eps[1].mps & 0xffu);
++        vout[off++] = (uint8_t)((ruby_eps[1].mps >> 8) & 0xffu);
++        vout[off++] = 0;
++        vout[off++] = 7; vout[off++] = 5; vout[off++] = 0x81; vout[off++] = 2;
++        vout[off++] = (uint8_t)(ruby_eps[3].mps & 0xffu);
++        vout[off++] = (uint8_t)((ruby_eps[3].mps >> 8) & 0xffu);
++        vout[off++] = 0;
++        vout[2] = (uint8_t)(off & 0xffu);
++        vout[3] = (uint8_t)((off >> 8) & 0xffu);
++        return off;
++    }
+     if (ruby_enum_profile == 1 || ruby_enum_profile == 2) {
+         /* 0225 CDC-ACM full 75B: Config(9)+IAD(8)+Iface0(9)+CDC(19)+EP83(7)+Iface1(9)+EP01(7)+EP81(7) */
+         vout[off++] = 9; vout[off++] = 2; vout[off++] = 0; vout[off++] = 0;
+@@ -831,6 +870,16 @@ ruby_descriptor(uint32_t value, uint32_t *len)
+     case 0x0303:
+         *len = sizeof(ruby_str_ser);
+         return ruby_str_ser;
++    case 0x0304: {  /* ruby ECM iMACAddress: host side 02:00:5E:77:EE:01 */
++        static const uint8_t mac_str[26] = {
++            26, 3, '0', 0, '2', 0, '0', 0, '0', 0, '5', 0, 'E', 0,
++            '7', 0, '7', 0, 'E', 0, 'E', 0, '0', 0, '1', 0
++        };
++        if (ruby_enum_profile != 3)
++            return NULL;
++        *len = sizeof(mac_str);
++        return mac_str;
++    }
+     default:
+         return NULL;
+     }
+@@ -966,10 +1015,16 @@ ruby_ep0_standard(vm_offset_t mac, uint32_t t, uint8_t type, uint8_t req,
+         ruby_ep0_send(mac, t, key, status, 2, wlen);
+         return;
+     case 10: /* GET_INTERFACE */
+-        byte = 0;
++        byte = (ruby_enum_profile == 3 && index == 1) ? ruby_ecm_alt : 0;
+         ruby_ep0_send(mac, t, key, &byte, 1, wlen);
+         return;
+     case 11: /* SET_INTERFACE */
++        if (ruby_enum_profile == 3 && index == 1) {
++            ruby_ecm_alt = (uint8_t)(value & 1u);
++            printf("RUBY USB: ECM data alt %u\n", ruby_ecm_alt);
++            if (ruby_ecm_alt == 1)
++                ruby_ecm_link_arm();
++        }
+         ruby_ep0_ack(mac, t, key, wlen);
+         return;
+     case 1: /* CLEAR_FEATURE */ {
+@@ -1149,6 +1204,10 @@ ruby_ep0_capture(vm_offset_t mac, uint32_t t)
+         ruby_ep0_send(mac, t, key, ruby_acm_line_coding, 7, len);
+     } else if (st[0] == 0xA1 && st[1] == 0x20) {
+         ruby_ep0_stall(mac, t, key, len);
++    } else if (ruby_enum_profile == 3 && st[0] == 0x21 &&
++        st[1] >= 0x40 && st[1] <= 0x44 && len == 0) {
++        /* ruby ECM: SET_ETHERNET_MULTICAST_FILTERS .. PACKET_FILTER */
++        ruby_ep0_ack(mac, t, key, len);
+     } else
+         ruby_ep0_stall(mac, t, key, len);
+ }
+diff --git a/bsd/dev/ruby_usb_port.c b/bsd/dev/ruby_usb_port.c
+--- a/bsd/dev/ruby_usb_port.c
++++ b/bsd/dev/ruby_usb_port.c
+@@ -18,6 +18,7 @@
+ #include "ruby_battery.h"
+ #include "ruby_probe.h"
+ #include "ruby_usb_port.h"
++#include "ruby_ecm.h"
+ 
+ static inline uint32_t
+ ruby_rd32(vm_offset_t base, uint32_t off)
+@@ -610,6 +611,7 @@ ruby_ep2_tick_assist(vm_offset_t mac)
+     }
+     /* 0255: once per second, ask the workloop for a read-only stall dump. */
+     if (ruby_inflight > 0 &&
++        (uint32_t)(ruby_ms - ruby_tx_progress_ms) >= 1000 &&
+         (uint32_t)(ruby_ms - ruby_qmu_diag_ms) >= 1000) {
+         ruby_qmu_diag_ms = ruby_ms;
+         ruby_qmu_diag_req = 1;
+@@ -626,7 +628,8 @@ ruby_ep2_tick_assist(vm_offset_t mac)
+     }
+     if ((ruby_ep_ready && ruby_ep2log_on &&
+         sweet_log_position() != ruby_log_pos) ||
+-        (ruby_ep_ready && ruby_acm_echo_head != ruby_acm_echo_tail)) {
++        (ruby_ep_ready && (ruby_acm_echo_head != ruby_acm_echo_tail ||
++        ruby_ecm_tx_pending()))) {
+         ruby_qmu_push_req = 1;
+         ruby_qmu_primer_kicks++;
+         ruby_usb_irq_kick();
+diff --git a/bsd/dev/ruby_usb_io.h b/bsd/dev/ruby_usb_io.h
+--- a/bsd/dev/ruby_usb_io.h
++++ b/bsd/dev/ruby_usb_io.h
+@@ -8,6 +8,7 @@
+ #define RUBY_USB_IO_ECHO 0u
+ #define RUBY_USB_IO_TTY  1u
+ #define RUBY_USB_IO_RAW  2u
++#define RUBY_USB_IO_NET  3u      /* ruby CDC-ECM (ruby_ecm.c) */
+ 
+ void ruby_usb_io_init(void);
+ uint32_t ruby_usb_io_owner(void);
+@@ -35,6 +36,7 @@ int ruby_ep2_data_ready(void);
+ uint32_t ruby_ep2_data_space(void);
+ uint32_t ruby_raw_space(void);
+ void ruby_usb_rx_kick(void);
++void ruby_usb_tx_kick(void);
+ uint32_t ruby_ep2_data_enqueue(const uint8_t *data, uint32_t len);
+ 
+ #endif /* _RUBY_USB_IO_H_ */
+\ No newline at end of file
+diff --git a/bsd/dev/ruby_usb_io.c b/bsd/dev/ruby_usb_io.c
+--- a/bsd/dev/ruby_usb_io.c
++++ b/bsd/dev/ruby_usb_io.c
+@@ -12,6 +12,7 @@
+ #include <sys/types.h>
+ 
+ #include "ruby_usb_io.h"
++#include "ruby_ecm.h"
+ 
+ static volatile uint32_t ruby_io_owner = RUBY_USB_IO_ECHO;
+ static volatile uint32_t ruby_io_gen;
+@@ -38,6 +39,8 @@ ruby_usb_io_owner_name(uint32_t owner)
+ 		return "tty";
+ 	case RUBY_USB_IO_RAW:
+ 		return "raw";
++	case RUBY_USB_IO_NET:
++		return "net";
+ 	default:
+ 		return "echo";
+ 	}
+@@ -126,6 +129,10 @@ ruby_usb_io_rx(const uint8_t *data, uint32_t len)
+ 		ruby_raw_input(data, len);
+ 		return 1;
+ 	}
++	if (owner == RUBY_USB_IO_NET) {
++		ruby_ecm_rx(data, len);
++		return 1;
++	}
+ 	return 0;
+ }
+ 
+diff --git a/bsd/dev/ruby_ecm.c b/bsd/dev/ruby_ecm.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/ruby_ecm.c
+@@ -0,0 +1,468 @@
++/*
++ * ruby (MT6877): CDC-ECM network function on ruby's MTU3 USB device
++ * stack (boot-arg ruby_enum=3, needs rubyusb=1 ruby_echo=1).
++ *
++ * The EP1 data plane (bulk OUT 0x01 / IN 0x81) carries one Ethernet frame
++ * per USB transfer:
++ *   RX: ruby's QMU hands over <= 512-byte GPD chunks; a chunk shorter than
++ *       the 512-byte max packet (or a zero-length one) ends the frame.
++ *   TX: frames sit in a length-prefixed ring; the TX pump takes at most one
++ *       max packet per GPD and never crosses a frame boundary, so every
++ *       frame's last GPD is a short packet. A frame whose length is a
++ *       multiple of 512 gets one pad byte (as sweet's ue0: IP ignores it),
++ *       so no zero-length packet is needed.
++ *
++ * The kernel interface is ue0 (sweet 0075): Ethernet ifnet, phone
++ * 192.168.7.2/24, the Mac is expected at 192.168.7.1.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/locks.h>
++#include <pexpert/pexpert.h>
++#include <sys/kpi_mbuf.h>
++#include <sys/kpi_socket.h>
++#include <sys/sockio.h>
++#include <net/if.h>
++#include <net/if_types.h>
++#include <net/ethernet.h>
++#include <net/if_ether.h>
++#include <net/ether_if_module.h>
++#include <net/kpi_interface.h>
++#include <net/kpi_protocol.h>
++#include <netinet/in.h>
++#include <netinet/in_var.h>
++
++#include "ruby_usb_io.h"
++#include "ruby_ecm.h"
++
++#define ECM_MPS         512u
++#define ECM_FRAME_MAX   1536u
++#define ECM_TXQ_BYTES   (64u * 1024u)
++
++extern int ruby_enum_profile;
++extern uint32_t ruby_rx_buf_size;
++extern int ruby_ecm_ioeth_create(void);
++extern void ruby_ecm_ioeth_input(const uint8_t *data, uint32_t len);
++
++/* phone side MAC (the host's MAC is the iMACAddress string, 02005E77EE01) */
++static const uint8_t ecm_phone_mac[ETHER_ADDR_LEN] = {
++	0x02, 0x00, 0x5e, 0x77, 0xee, 0x02
++};
++
++static struct {
++	ifnet_t ifp;
++	int ioeth;                      /* rubyecmio=1: RubyECMEthernet */
++	lck_grp_t *grp;
++	lck_spin_t *lock;
++	int on;
++	/* RX assembly */
++	uint8_t rx[ECM_FRAME_MAX + ECM_MPS];
++	uint32_t rx_len;
++	int rx_bad;
++	/* TX ring: [u16 len][bytes]... */
++	uint8_t txq[ECM_TXQ_BYTES];
++	uint32_t txq_head, txq_tail;    /* free-running byte counters */
++	uint32_t tx_left;               /* bytes left of the frame being sent */
++	/* stats */
++	uint32_t rx_frames, rx_drops, tx_frames, tx_drops;
++} ecm;
++
++int
++ruby_ecm_enabled(void)
++{
++	return ecm.on;
++}
++
++/*
++ * Link notifications on the interrupt EP 0x83 (PIO, EP3 FIFO at
++ * FIFO0 + 3 * 0x10): NETWORK_CONNECTION(1), then CONNECTION_SPEED_CHANGE
++ * 480/480 Mb/s. macOS keeps the interface "inactive" (no IPv4) without
++ * them. Armed by SET_INTERFACE(data, alt 1), sent from the TX pump.
++ */
++#define ECM_TX3CSR0     0x0130u
++#define ECM_EP3_FIFO    (0x0300u + 3u * 0x10u)
++#define ECM_TXPKTRDY    (1u << 16)
++
++static volatile uint32_t ecm_notify_step;       /* 0 idle, 1 connect, 2 speed */
++static uint32_t ecm_notify_sent;
++
++void
++ruby_ecm_link_arm(void)
++{
++	ecm_notify_step = 1;
++	ruby_usb_tx_kick();             /* host is waiting for carrier */
++}
++
++static void
++ecm_fifo_put(vm_offset_t mac, const uint8_t *p, uint32_t n)
++{
++	for (uint32_t i = 0; i < n; i += 4) {
++		uint32_t w = (uint32_t)p[i] | ((uint32_t)p[i + 1] << 8) |
++		    ((uint32_t)p[i + 2] << 16) | ((uint32_t)p[i + 3] << 24);
++		*(volatile uint32_t *)(mac + ECM_EP3_FIFO) = w;
++	}
++}
++
++void
++ruby_ecm_link_poll(vm_offset_t mac)
++{
++	uint32_t step = ecm_notify_step;
++
++	if (!ecm.on || step == 0 || mac == 0) {
++		return;
++	}
++	if (*(volatile uint32_t *)(mac + ECM_TX3CSR0) & ECM_TXPKTRDY) {
++		return;                 /* previous notification not taken yet */
++	}
++	if (step == 1) {
++		static const uint8_t conn[8] = { 0xA1, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
++		ecm_fifo_put(mac, conn, sizeof(conn));
++		*(volatile uint32_t *)(mac + ECM_TX3CSR0) = 16u | ECM_TXPKTRDY;
++		ecm_notify_step = 2;
++	} else {
++		static const uint8_t speed[16] = {
++			0xA1, 0x2A, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00,
++			0x00, 0x38, 0x9C, 0x1C, 0x00, 0x38, 0x9C, 0x1C  /* 480000000 x2 */
++		};
++		ecm_fifo_put(mac, speed, sizeof(speed));
++		*(volatile uint32_t *)(mac + ECM_TX3CSR0) = 16u | ECM_TXPKTRDY;
++		ecm_notify_step = 0;
++	}
++	ecm_notify_sent++;
++	printf("RUBY ECM: link notification %u sent\n", ecm_notify_sent);
++}
++
++static void
++ecm_txq_put(const uint8_t *p, uint32_t n)
++{
++	for (uint32_t i = 0; i < n; i++) {
++		ecm.txq[(ecm.txq_head + i) % ECM_TXQ_BYTES] = p[i];
++	}
++	ecm.txq_head += n;
++}
++
++static void
++ecm_txq_get(uint8_t *p, uint32_t n)
++{
++	for (uint32_t i = 0; i < n; i++) {
++		p[i] = ecm.txq[(ecm.txq_tail + i) % ECM_TXQ_BYTES];
++	}
++	ecm.txq_tail += n;
++}
++
++int
++ruby_ecm_tx_pending(void)
++{
++	return ecm.on && (ecm.tx_left != 0 || ecm.txq_head != ecm.txq_tail);
++}
++
++/*
++ * TX pump hook (ruby_ep2_push_log): copy at most max bytes of the current
++ * frame into buf. Returns 0 when nothing is queued.
++ */
++uint32_t
++ruby_ecm_tx_dequeue(uint8_t *buf, uint32_t max)
++{
++	uint32_t n = 0;
++
++	if (!ecm.on) {
++		return 0;
++	}
++	lck_spin_lock(ecm.lock);
++	if (ecm.tx_left == 0 && ecm.txq_head != ecm.txq_tail) {
++		uint8_t h[2];
++		ecm_txq_get(h, 2);
++		ecm.tx_left = (uint32_t)h[0] | ((uint32_t)h[1] << 8);
++	}
++	if (ecm.tx_left != 0) {
++		n = ecm.tx_left < max ? ecm.tx_left : max;
++		ecm_txq_get(buf, n);
++		ecm.tx_left -= n;
++	}
++	lck_spin_unlock(ecm.lock);
++	return n;
++}
++
++/* RX hook (ruby_usb_io_rx with owner NET): one GPD chunk. */
++void
++ruby_ecm_rx(const uint8_t *data, uint32_t len)
++{
++	if (!ecm.on) {
++		return;
++	}
++	if (ecm.rx_len + len > sizeof(ecm.rx)) {
++		ecm.rx_bad = 1;         /* oversized: drop until the frame ends */
++	} else if (len) {
++		memcpy(ecm.rx + ecm.rx_len, data, len);
++		ecm.rx_len += len;
++	}
++	/*
++	 * A GPD that came back full means the transfer continues in the next
++	 * one. With ruby_rxbuf=2048 a whole frame fits one GPD (the QMU joins
++	 * packets until the short one), so every completion is a frame end;
++	 * with the default 512 a full 512-byte chunk continues.
++	 */
++	if (len != 0 && len == (ruby_rx_buf_size ? ruby_rx_buf_size : ECM_MPS)) {
++		return;
++	}
++	uint32_t flen = ecm.rx_len;
++	int bad = ecm.rx_bad;
++	ecm.rx_len = 0;
++	ecm.rx_bad = 0;
++	if (bad || flen < ETHER_HDR_LEN || flen > ECM_FRAME_MAX) {
++		ecm.rx_drops++;
++		return;
++	}
++	if (ecm.ioeth) {
++		ecm.rx_frames++;
++		ruby_ecm_ioeth_input(ecm.rx, flen);
++		return;
++	}
++	if (ecm.ifp == NULL) {
++		ecm.rx_drops++;
++		return;
++	}
++	mbuf_t m = NULL;
++	if (mbuf_gethdr(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) != 0 ||
++	    mbuf_mclget(MBUF_DONTWAIT, MBUF_TYPE_DATA, &m) != 0 ||
++	    !(mbuf_flags(m) & MBUF_EXT) || mbuf_maxlen(m) < flen) {
++		if (m != NULL) {
++			mbuf_freem(m);
++		}
++		ecm.rx_drops++;
++		return;
++	}
++	struct ifnet_stat_increment_param stats = {};
++	memcpy(mbuf_data(m), ecm.rx, flen);
++	mbuf_setlen(m, flen);
++	mbuf_pkthdr_setlen(m, flen);
++	void *frame_header = mbuf_data(m);
++	mbuf_pkthdr_setrcvif(m, ecm.ifp);
++	mbuf_pkthdr_setheader(m, frame_header);
++	mbuf_pkthdr_adjustlen(m, -ETHER_HDR_LEN);
++	(void)mbuf_setdata(m, (char *)mbuf_data(m) + ETHER_HDR_LEN, mbuf_len(m) - ETHER_HDR_LEN);
++	stats.packets_in = 1;
++	stats.bytes_in = flen;
++	ecm.rx_frames++;
++	if (ecm.rx_frames <= 4) {
++		printf("RUBY ECM: rx frame %u len %u type %02x%02x\n", ecm.rx_frames,
++		    flen, ecm.rx[12], ecm.rx[13]);
++	}
++	ifnet_input(ecm.ifp, m, &stats);
++}
++
++/* Queue one Ethernet frame (ue0 and RubyECMEthernet). 0 = queued. */
++int
++ruby_ecm_queue_frame(const uint8_t *data, uint32_t len)
++{
++	uint8_t pad = 0;
++
++	if (!ecm.on || len < ETHER_HDR_LEN || len > ECM_FRAME_MAX) {
++		ecm.tx_drops++;
++		return -1;
++	}
++	uint32_t wire = len + (((len % ECM_MPS) == 0) ? 1u : 0u);   /* short packet end */
++	lck_spin_lock(ecm.lock);
++	if ((ecm.txq_head - ecm.txq_tail) + wire + 2 > ECM_TXQ_BYTES) {
++		lck_spin_unlock(ecm.lock);
++		ecm.tx_drops++;
++		return -1;
++	}
++	uint8_t h[2] = { (uint8_t)wire, (uint8_t)(wire >> 8) };
++	ecm_txq_put(h, 2);
++	ecm_txq_put(data, len);
++	if (wire != len) {
++		ecm_txq_put(&pad, 1);
++	}
++	lck_spin_unlock(ecm.lock);
++	ecm.tx_frames++;
++	ruby_usb_rx_kick();             /* IRQ mode: wake the QMU workloop */
++	return 0;
++}
++
++static errno_t
++ecm_if_output(ifnet_t ifp, mbuf_t m)
++{
++	uint32_t len = (uint32_t)mbuf_pkthdr_len(m);
++	uint8_t frame[ECM_FRAME_MAX];
++
++	if (len < ETHER_HDR_LEN || len > ECM_FRAME_MAX) {
++		mbuf_freem(m);
++		ifnet_stat_increment_out(ifp, 0, 0, 1);
++		return 0;
++	}
++	mbuf_copydata(m, 0, len, frame);
++	mbuf_freem(m);
++	if (ruby_ecm_queue_frame(frame, len) != 0) {
++		ifnet_stat_increment_out(ifp, 0, 0, 1);
++	} else {
++		ifnet_stat_increment_out(ifp, 1, len, 0);
++	}
++	return 0;
++}
++
++static errno_t
++ecm_if_ioctl(ifnet_t ifp, unsigned long cmd, void *data __unused)
++{
++	switch (cmd) {
++	case SIOCSIFADDR:
++	case SIOCAIFADDR:
++		ifnet_set_flags(ifp, IFF_UP, IFF_UP);
++		return 0;
++	case SIOCSIFFLAGS:
++	case SIOCADDMULTI:
++	case SIOCDELMULTI:
++		return 0;
++	default:
++		return EOPNOTSUPP;
++	}
++}
++
++static void
++ecm_if_detach(ifnet_t ifp __unused)
++{
++}
++
++void
++ruby_ecm_start(void)
++{
++	struct ifnet_init_eparams init;
++
++	if (ruby_enum_profile != 3) {
++		return;
++	}
++	ecm.grp = lck_grp_alloc_init("ruby_ecm", LCK_GRP_ATTR_NULL);
++	ecm.lock = lck_spin_alloc_init(ecm.grp, LCK_ATTR_NULL);
++
++	int io = 0;
++	PE_parse_boot_argn("rubyecmio", &io, sizeof(io));
++	if (io == 1) {
++		/* IONetworkingFamily path: configd names it and runs DHCP. */
++		ruby_usb_io_force_owner(RUBY_USB_IO_NET);
++		ecm.on = 1;
++		if (ruby_ecm_ioeth_create() == 0) {
++			ecm.ioeth = 1;
++			printf("RUBY ECM: IOEthernetController path (rubyecmio=1), EP1 owner=net\n");
++			return;
++		}
++		printf("RUBY ECM: IOEthernetController failed, falling back to ue0\n");
++	}
++
++	bzero(&init, sizeof(init));
++	init.ver = IFNET_INIT_CURRENT_VERSION;
++	init.len = sizeof(init);
++	init.flags = IFNET_INIT_LEGACY;
++	init.uniqueid = "ruby-usb-ecm";
++	init.uniqueid_len = sizeof("ruby-usb-ecm") - 1;
++	init.name = "ue";
++	init.unit = 0;
++	init.family = IFNET_FAMILY_ETHERNET;
++	init.type = IFT_ETHER;
++	init.output = ecm_if_output;
++	init.demux = ether_demux;
++	init.add_proto = ether_add_proto;
++	init.del_proto = ether_del_proto;
++	init.check_multi = ether_check_multi;
++	init.framer_extended = ether_frameout_extended;
++	init.ioctl = ecm_if_ioctl;
++	init.detach = ecm_if_detach;
++	init.broadcast_addr = etherbroadcastaddr;
++	init.broadcast_len = ETHER_ADDR_LEN;
++	if (ifnet_allocate_extended(&init, &ecm.ifp) != 0) {
++		printf("RUBY ECM: ifnet_allocate failed\n");
++		ecm.ifp = NULL;
++		return;
++	}
++	ifnet_set_addrlen(ecm.ifp, ETHER_ADDR_LEN);
++	ifnet_set_hdrlen(ecm.ifp, sizeof(struct ether_header));
++	ifnet_set_mtu(ecm.ifp, ETHERMTU);
++	ifnet_set_baudrate(ecm.ifp, 480000000);
++	ifnet_set_flags(ecm.ifp, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST, 0xffff);
++	if (ifnet_attach(ecm.ifp, NULL) != 0) {
++		printf("RUBY ECM: ifnet_attach failed\n");
++		ecm.ifp = NULL;
++		return;
++	}
++	ifnet_set_lladdr(ecm.ifp, ecm_phone_mac, ETHER_ADDR_LEN);
++
++	errno_t err = proto_plumb(PF_INET, ecm.ifp);
++	socket_t so = NULL;
++	if (err == 0) {
++		err = sock_socket(PF_INET, SOCK_DGRAM, 0, NULL, NULL, &so);
++	}
++	if (err == 0) {
++		struct ifaliasreq ifra;
++		bzero(&ifra, sizeof(ifra));
++		snprintf(ifra.ifra_name, sizeof(ifra.ifra_name), "ue0");
++		struct sockaddr_in *a = (struct sockaddr_in *)&ifra.ifra_addr;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0xc0a80702);         /* 192.168.7.2 */
++		a = (struct sockaddr_in *)&ifra.ifra_mask;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0xffffff00);
++		a = (struct sockaddr_in *)&ifra.ifra_broadaddr;
++		a->sin_len = sizeof(*a);
++		a->sin_family = AF_INET;
++		a->sin_addr.s_addr = htonl(0xc0a807ff);
++		err = sock_ioctl(so, SIOCAIFADDR, &ifra);
++		sock_close(so);
++	}
++	ifnet_set_flags(ecm.ifp, IFF_UP | IFF_RUNNING, IFF_UP | IFF_RUNNING);
++	ruby_usb_io_force_owner(RUBY_USB_IO_NET);
++	ecm.on = 1;
++	printf("RUBY ECM: ue0 192.168.7.2/24 %s (err %d), EP1 owner=net\n",
++	    err ? "NOT configured" : "up", err);
++}
++
++void
++ruby_ecm_config_en0(void)
++{
++	socket_t so = NULL;
++	errno_t err;
++	struct ifaliasreq ifra;
++	struct ifreq ifr;
++
++	err = sock_socket(PF_INET, SOCK_DGRAM, 0, NULL, NULL, &so);
++	if (err != 0) {
++		printf("RUBY ETH: en0 socket err %d\n", err);
++		return;
++	}
++	bzero(&ifra, sizeof(ifra));
++	snprintf(ifra.ifra_name, sizeof(ifra.ifra_name), "en0");
++	struct sockaddr_in *a = (struct sockaddr_in *)&ifra.ifra_addr;
++	a->sin_len = sizeof(*a);
++	a->sin_family = AF_INET;
++	a->sin_addr.s_addr = htonl(0xc0a80702);         /* 192.168.7.2 */
++	a = (struct sockaddr_in *)&ifra.ifra_mask;
++	a->sin_len = sizeof(*a);
++	a->sin_family = AF_INET;
++	a->sin_addr.s_addr = htonl(0xffffff00);
++	a = (struct sockaddr_in *)&ifra.ifra_broadaddr;
++	a->sin_len = sizeof(*a);
++	a->sin_family = AF_INET;
++	a->sin_addr.s_addr = htonl(0xc0a807ff);
++	err = sock_ioctl(so, SIOCAIFADDR, &ifra);
++	bzero(&ifr, sizeof(ifr));
++	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "en0");
++	ifr.ifr_flags = IFF_UP | IFF_RUNNING;
++	(void)sock_ioctl(so, SIOCSIFFLAGS, &ifr);
++	sock_close(so);
++	printf("RUBY ETH: en0 192.168.7.2/24 %s (err %d)\n",
++	    err ? "NOT configured" : "up", err);
++}
++
++void
++ruby_ecm_status(void)
++{
++	if (!ecm.on) {
++		return;
++	}
++	printf("RUBY ECM: rx %u drop %u | tx %u drop %u | txq %u left %u\n",
++	    ecm.rx_frames, ecm.rx_drops, ecm.tx_frames, ecm.tx_drops,
++	    ecm.txq_head - ecm.txq_tail, ecm.tx_left);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/ruby_ecm.h b/bsd/dev/ruby_ecm.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/ruby_ecm.h
+@@ -0,0 +1,21 @@
++#ifndef _RUBY_ECM_H_
++#define _RUBY_ECM_H_
++
++#include <sys/types.h>
++
++/* ruby CDC-ECM (ruby_enum=3), bsd/dev/ruby_ecm.c */
++void ruby_ecm_start(void);
++int ruby_ecm_enabled(void);
++int ruby_ecm_tx_pending(void);
++uint32_t ruby_ecm_tx_dequeue(uint8_t *buf, uint32_t max);
++void ruby_ecm_rx(const uint8_t *data, uint32_t len);
++void ruby_ecm_status(void);
++int ruby_ecm_queue_frame(const uint8_t *data, uint32_t len);
++void ruby_ecm_link_arm(void);
++int ruby_ecm_link_step_pending(void);
++void ruby_ecm_config_en0(void);
++void ruby_ecm_ioeth_en0up(void);
++#include <mach/vm_types.h>
++void ruby_ecm_link_poll(vm_offset_t mac);
++
++#endif /* _RUBY_ECM_H_ */
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -904,6 +904,9 @@ bsd_init(void)
+ 	/* Single ruby USB probe call site: UFS and ramdisk roots both reach here. */
+ 	extern void ruby_usb_probe(void);
+ 	ruby_usb_probe();
++	/* ruby: CDC-ECM ue0 on the ruby USB data plane (ruby_enum=3) */
++	extern void ruby_ecm_start(void);
++	ruby_ecm_start();
+ #endif
+ 
+ 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -123,6 +123,7 @@ bsd/dev/ruby_usb_gadget.c			standard
+ bsd/dev/ruby_usb_config.c			standard
+ bsd/dev/ruby_usb_ep_test.c			standard
+ bsd/dev/ruby_usb_io.c			standard
++bsd/dev/ruby_ecm.c			standard
+ bsd/dev/ruby_tty.c			standard
+ bsd/dev/ruby_raw.c			standard
+ bsd/dev/ruby_probe.c			standard
+diff --git a/iokit/conf/Makefile.template b/iokit/conf/Makefile.template
+--- a/iokit/conf/Makefile.template
++++ b/iokit/conf/Makefile.template
+@@ -63,6 +63,12 @@ COMP_SUBDIRS = \
+ # DO NOT ADD MORE HERE.
+ #
+ # -Wno-cast-align
++# ruby: IONetworkingFamily built in (iokit/sweet_ionet), compiled like its kext.
++RUBY_IONET_ROOT = $(SRCROOT)/iokit/sweet_ionet
++RUBY_IONET_OBJS = RubyECMEthernet.cpo IOEthernetController.cpo IOEthernetInterface.cpo IOKernelDebugger.cpo IOMbufMemoryCursor.cpo IONetworkController.cpo IONetworkData.cpo IONetworkInterface.cpo IONetworkMedium.cpo IONetworkStack.cpo IONetworkUserClient.cpo IOOutputQueue.cpo IOPacketQueue.cpo
++$(foreach o,$(RUBY_IONET_OBJS),$(eval $(o)_CFLAGS_ADD += -D__PRIVATE_SPI__ -include libkern/c++/OSMetaClass.h -I$(RUBY_IONET_ROOT)/include -I$(RUBY_IONET_ROOT) -idirafter $(SRCROOT)/bsd))
++$(foreach o,$(RUBY_IONET_OBJS),$(eval $(o)_CXXWARNFLAGS_ADD += -w -Wno-error))
++
+ IODataQueue.cpo_CXXWARNFLAGS_ADD += -Wno-cast-align
+ IOHibernateIO.cpo_CXXWARNFLAGS_ADD += -Wno-cast-align
+ IOHibernateRestoreKernel.o_CWARNFLAGS_ADD += -Wno-cast-align
+diff --git a/iokit/Kernel/arm/RubyECMEthernet.cpp b/iokit/Kernel/arm/RubyECMEthernet.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyECMEthernet.cpp
+@@ -0,0 +1,273 @@
++/*
++ * ruby (MT6877): the USB CDC-ECM link (bsd/dev/ruby_ecm.c) as a real
++ * IOEthernetController from the built-in IONetworkingFamily (0497), so the
++ * system sees an Ethernet adapter: IONetworkStack/configd name it (en*),
++ * IPConfiguration runs DHCP on it and apps get a network path.
++ *
++ * Boot-arg rubyecmio=1 selects this path instead of the kernel-only ue0.
++ * Frames still go through ruby_ecm.c's per-frame TX ring and RX assembly.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++#include <IOKit/IOLib.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/network/IOEthernetController.h>
++#include <IOKit/network/IOEthernetInterface.h>
++#include <IOKit/network/IONetworkMedium.h>
++#include <IOKit/network/IOOutputQueue.h>
++#include <sys/kpi_mbuf.h>
++
++#include <kern/thread.h>
++#include <kern/clock.h>
++#include <pexpert/pexpert.h>
++
++extern "C" int ruby_ecm_queue_frame(const uint8_t *frame, uint32_t len);
++extern "C" void ruby_ecm_config_en0(void);
++extern "C" kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern "C" void thread_deallocate(thread_t);
++
++class RubyECMEthernet : public IOEthernetController {
++	OSDeclareDefaultStructors(RubyECMEthernet);
++
++public:
++	IOEthernetInterface *fNetif;
++	IONetworkMedium     *fMedium;
++	IOWorkLoop          *fWorkLoop;
++	volatile bool        fEnabled;
++	uint32_t             fRx, fTx, fRxDrops, fTxDrops;
++
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	bool createWorkLoop(void) APPLE_KEXT_OVERRIDE;
++	IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
++	IOReturn enable(IONetworkInterface *netif) APPLE_KEXT_OVERRIDE;
++	IOReturn disable(IONetworkInterface *netif) APPLE_KEXT_OVERRIDE;
++	UInt32 outputPacket(mbuf_t m, void *param) APPLE_KEXT_OVERRIDE;
++	IOReturn getHardwareAddress(IOEthernetAddress *addr) APPLE_KEXT_OVERRIDE;
++	IOReturn setPromiscuousMode(bool active) APPLE_KEXT_OVERRIDE;
++	IOReturn setMulticastMode(bool active) APPLE_KEXT_OVERRIDE;
++	IOReturn setMulticastList(IOEthernetAddress *addrs, UInt32 count) APPLE_KEXT_OVERRIDE;
++	void input(const uint8_t *data, uint32_t len);
++	static void nameThread(void *arg, wait_result_t wr);
++};
++
++OSDefineMetaClassAndStructors(RubyECMEthernet, IOEthernetController);
++
++static RubyECMEthernet *gRubyEth;
++
++bool
++RubyECMEthernet::createWorkLoop(void)
++{
++	fWorkLoop = IOWorkLoop::workLoop();
++	return fWorkLoop != NULL;
++}
++
++IOWorkLoop *
++RubyECMEthernet::getWorkLoop(void) const
++{
++	return fWorkLoop;
++}
++
++bool
++RubyECMEthernet::start(IOService *provider)
++{
++	if (!IOEthernetController::start(provider)) {
++		IOLog("RUBY ETH: IOEthernetController::start failed\n");
++		return false;
++	}
++	OSDictionary *media = OSDictionary::withCapacity(1);
++	fMedium = IONetworkMedium::medium(kIOMediumEthernetAuto, 480000000);
++	if (media == NULL || fMedium == NULL ||
++	    !IONetworkMedium::addMedium(media, fMedium) ||
++	    !publishMediumDictionary(media)) {
++		IOLog("RUBY ETH: medium setup failed\n");
++		OSSafeReleaseNULL(media);
++		return false;
++	}
++	media->release();
++	setProperty("IOModel", "ruby USB CDC-ECM");
++	setProperty("IOVendor", "ruby");
++	if (!attachInterface((IONetworkInterface **)&fNetif, false)) {
++		IOLog("RUBY ETH: attachInterface failed\n");
++		return false;
++	}
++	fNetif->registerService();
++	IOLog("RUBY ETH: IOEthernetController up, interface registered\n");
++	setLinkStatus(kIONetworkLinkValid | kIONetworkLinkActive, fMedium, 480000000);
++	ruby_ecm_config_en0();
++
++	/*
++	 * configd's InterfaceNamer only names a new interface once IOKit is
++	 * quiet, and on ruby something never settles: it gave up after its
++	 * 240 s timeout. Ask IONetworkStack for the name ourselves (the same
++	 * request InterfaceNamer sends: lowest free unit from 0); configd then
++	 * finds an attached en0 and configures it (rubyecmname=0: leave it
++	 * to configd).
++	 */
++	int name = 1;
++	PE_parse_boot_argn("rubyecmname", &name, sizeof(name));
++	if (name) {
++		thread_t th;
++		retain();
++		if (kernel_thread_start((thread_continue_t)&RubyECMEthernet::nameThread,
++		    this, &th) == KERN_SUCCESS) {
++			thread_deallocate(th);
++		} else {
++			release();
++		}
++	}
++	return true;
++}
++
++void
++RubyECMEthernet::nameThread(void *arg, wait_result_t wr __unused)
++{
++	RubyECMEthernet *self = (RubyECMEthernet *)arg;
++	OSDictionary *match = IOService::serviceMatching("IONetworkStack");
++	IOService *stack = match ? IOService::waitForMatchingService(match,
++	    30ULL * NSEC_PER_SEC) : NULL;
++	OSSafeReleaseNULL(match);
++	if (stack == NULL || self->fNetif == NULL) {
++		IOLog("RUBY ETH: no IONetworkStack, naming left to configd\n");
++	} else {
++		uint64_t id = self->fNetif->getRegistryEntryID();
++		OSDictionary *cmd = OSDictionary::withCapacity(3);
++		OSNumber *type = OSNumber::withNumber(1ULL, 32);   /* lowest unit */
++		OSNumber *unit = OSNumber::withNumber(0ULL, 32);
++		OSData *eid = OSData::withBytes(&id, sizeof(id));
++		IOReturn ret = kIOReturnNoMemory;
++		if (cmd && type && unit && eid) {
++			cmd->setObject("IONetworkStackUserCommand", type);
++			cmd->setObject("IOInterfaceUnit", unit);
++			cmd->setObject("IORegistryEntryID", eid);
++			ret = stack->setProperties(cmd);
++		}
++		IOLog("RUBY ETH: asked IONetworkStack for a name: 0x%x, now %s%u\n",
++		    ret, self->fNetif->getNamePrefix(), self->fNetif->getUnitNumber());
++		OSSafeReleaseNULL(cmd);
++		OSSafeReleaseNULL(type);
++		OSSafeReleaseNULL(unit);
++		OSSafeReleaseNULL(eid);
++		stack->release();
++	}
++	self->release();
++}
++
++IOReturn
++RubyECMEthernet::enable(IONetworkInterface *netif __unused)
++{
++	fEnabled = true;
++	setLinkStatus(kIONetworkLinkValid | kIONetworkLinkActive, fMedium, 480000000);
++	IOLog("RUBY ETH: enabled, link up\n");
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyECMEthernet::disable(IONetworkInterface *netif __unused)
++{
++	fEnabled = false;
++	setLinkStatus(kIONetworkLinkValid, NULL, 0);
++	IOLog("RUBY ETH: disabled\n");
++	return kIOReturnSuccess;
++}
++
++UInt32
++RubyECMEthernet::outputPacket(mbuf_t m, void *param __unused)
++{
++	uint8_t frame[1600];
++	size_t len = mbuf_pkthdr_len(m);
++	int queued = 0;
++
++	if (fEnabled && len >= 14 && len <= 1536 &&
++	    mbuf_copydata(m, 0, len, frame) == 0)
++		queued = ruby_ecm_queue_frame(frame, (uint32_t)len) == 0;
++	freePacket(m);
++	if (queued) {
++		fTx++;
++		if (fTx <= 6)
++			IOLog("RUBY ETH: tx %u len=%u\n", fTx, (uint32_t)len);
++	} else {
++		fTxDrops++;
++		if (fTxDrops <= 8)
++			IOLog("RUBY ETH: tx drop %u len=%u enabled=%d\n",
++			    fTxDrops, (uint32_t)len, fEnabled ? 1 : 0);
++	}
++	return kIOReturnOutputSuccess;
++}
++
++IOReturn
++RubyECMEthernet::getHardwareAddress(IOEthernetAddress *addr)
++{
++	static const uint8_t mac[6] = { 0x02, 0x00, 0x5e, 0x77, 0xee, 0x02 };
++	bcopy(mac, addr->bytes, 6);
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyECMEthernet::setPromiscuousMode(bool active __unused)
++{
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyECMEthernet::setMulticastMode(bool active __unused)
++{
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyECMEthernet::setMulticastList(IOEthernetAddress *addrs __unused, UInt32 count __unused)
++{
++	return kIOReturnSuccess;
++}
++
++void
++RubyECMEthernet::input(const uint8_t *data, uint32_t len)
++{
++	if (!fEnabled || fNetif == NULL) {
++		if (++fRxDrops <= 4)
++			IOLog("RUBY ETH: rx drop %u enabled=%d\n",
++			    fRxDrops, fEnabled ? 1 : 0);
++		return;
++	}
++	mbuf_t m = allocatePacket(len);
++	if (m == NULL) {
++		return;
++	}
++	if (mbuf_copyback(m, 0, len, data, MBUF_DONTWAIT) != 0) {
++		freePacket(m);
++		return;
++	}
++	fRx++;
++	fNetif->inputPacket(m, len, 0);
++}
++
++extern "C" int
++ruby_ecm_ioeth_create(void)
++{
++	RubyECMEthernet *e = new RubyECMEthernet;
++	IOService *prov = IOService::getResourceService();
++
++	if (e == NULL || !e->init(NULL) || !e->attach(prov)) {
++		IOLog("RUBY ETH: create failed\n");
++		OSSafeReleaseNULL(e);
++		return -1;
++	}
++	if (!e->start(prov)) {
++		e->detach(prov);
++		e->release();
++		return -1;
++	}
++	e->registerService();
++	gRubyEth = e;
++	return 0;
++}
++
++extern "C" void
++ruby_ecm_ioeth_input(const uint8_t *data, uint32_t len)
++{
++	if (gRubyEth != NULL) {
++		gRubyEth->input(data, len);
++	}
++}
++#endif /* SWEET */

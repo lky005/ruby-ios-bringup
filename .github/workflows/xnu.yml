@@ -1,4 +1,4 @@
-name: xnu-0334
+name: xnu-0349
 
 # Builds the ruby kernel without vendoring the upstream tree.
 # ci/prepare-baseline.sh takes a content-pinned 82-file baseline (private
@@ -22,13 +22,13 @@ on:
         default: "16.0"
       hash_config:
         description: config carrying the expected kernel hash (empty expectation = record only)
-        default: "config/0334.env"
+        default: "config/0349.env"
       skip_patches:
         description: patch numbers to drop (prefix match, e.g. 0144) for an older line
         default: ""
       patchset_sha256:
         description: expected patchset hash; must match the patch set actually built
-        default: "d87e666ff903ad8dc214773495feac827558ab53bf5b8fd3edfc30734c19ff71"
+        default: "5015ae6df0bfac07dba34ebd67ed52e42554495948d1da1bf96cbfc4e42a2856"
       kernel_config:
         description: RELEASE / DEVELOPMENT / DEBUG
         default: DEVELOPMENT
@@ -59,14 +59,14 @@ env:
   # BASELINE_SSH_KEY. The public pin is the manifest root, not a URL.
   BASELINE_MANIFEST_SHA256: 829d759826607027bc4a1d9818b6dd4956a312a087217b6ce7e5ce31fa3ae910
   BASELINE_FILES: "82"
-  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || 'd87e666ff903ad8dc214773495feac827558ab53bf5b8fd3edfc30734c19ff71' }}
+  PATCHSET_SHA256: ${{ inputs.patchset_sha256 || '5015ae6df0bfac07dba34ebd67ed52e42554495948d1da1bf96cbfc4e42a2856' }}
   SKIP_PATCHES: ${{ inputs.skip_patches || '' }}
   DXB_REPO: https://github.com/blacktop/darwin-xnu-build
   DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   RUNNER_IMAGE: ${{ inputs.runner || 'macos-15' }}
   XCODE_VERSION: ${{ inputs.xcode_version || '16.0' }}
-  HASH_CONFIG: ${{ inputs.hash_config || 'config/0334.env' }}
+  HASH_CONFIG: ${{ inputs.hash_config || 'config/0349.env' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
   # ccache: xnu is ~2000 compiles; a patch usually changes a few of them
@@ -173,8 +173,32 @@ jobs:
           GIT_CONFIG_VALUE_0: https://www.bearssl.org/git/BearSSL
         run: |
           ccache -z
-          bash build.sh
+          bash build.sh 2>&1 | tee /tmp/build-apply.log
           ccache -s
+
+      # dxb's build.sh treats a failed `git apply` as a warning and keeps going,
+      # so a patch that does not fit the tree silently builds the previous line.
+      # The patchset hash gate cannot catch that: it only proves the files are
+      # present. Fail the job if any patch we copied into base/xnu/patches was
+      # skipped. dxb's own patches (iobuffermemd/skywalk/syntax_checker/TrustCache)
+      # are allowed to be skipped because the tree may already carry them.
+      - name: Assert every project patch applied
+        if: always()
+        run: |
+          log=/tmp/build-apply.log
+          [ -f "$log" ] || { echo "no build log; cannot verify patch application"; exit 1; }
+          project=$(mktemp)
+          skipped_file=$(mktemp)
+          for p in base/xnu/patches/*.patch; do basename "$p"; done | sort > "$project"
+          grep -oE 'Skipping patch [^ ]+\.patch' "$log" | sed 's#.*/##' | sort -u > "$skipped_file" || true
+          hits=$(comm -12 "$project" "$skipped_file")
+          if [ -n "$hits" ]; then
+            echo "::error::project patches were skipped by dxb/build.sh:"
+            printf '  %s\n' $hits
+            echo "the built kernel is NOT the pinned patchset; refusing to report success"
+            exit 1
+          fi
+          echo "all $(wc -l < "$project") project patches applied"
 
       - name: Package build tree for local compiles
         if: always()
