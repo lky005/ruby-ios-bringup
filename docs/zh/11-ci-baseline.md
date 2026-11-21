@@ -30,7 +30,7 @@
 | main（2026-10-29 集成） | `27894e7b...` | 137 | `config/0140.env` | full `3acefe47...`，exec `721e5daf...` |
 | USB 0142 / 0143 分支 | `d0c5ab5e...` / `f47f4c19...` | 138 / 139 | `config/0142.env`、`config/0143.env` | CI `41015790742` / `41022192026` |
 | USB 拆分 0334（`p3-usb-cl0329-driver-split-2026-11-18`） | `d87e666f...` | 305 | `config/0334.env` | full `5ee3019d...`、exec `61c6b1a1...`（CI `44296779724`） |
-| 0348+0349（`p3-usb-cl0349-defaults-slim-2026-11-21`） | `1282a8bd...` | 307 | `config/0349.env` | 本地 VM 构建 full `abdf8acb...`；合并窗 CI run 是构建门 |
+| 0348+0349（`p3-usb-cl0349-defaults-slim-2026-11-21`） | `1282a8bd...` | 307 | `config/0349.env` | 本地 VM 构建 full `abdf8acb...`；合并窗 CI `44918530808` 绿：full `b1fa07fe...`、exec `61c6b1a1...`（与 0334 线相同） |
 | USB（`usb-0131b-probe-write`，历史） | `29449e32...` | 135 | `config/0131b.env` | full `4e945ce6...`，exec `06db2bb3...` |
 
 - main 包含 0080/0084/0085、0086-0131b、0140/0141、0142/0143、

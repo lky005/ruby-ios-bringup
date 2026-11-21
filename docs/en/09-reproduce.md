@@ -38,7 +38,7 @@ patchset: 1282a8bd... (current line, 307 files; 0348+0349)
           da13b6df... (151 files, config/0155.env),
           9f7b41cf... (141 files, config/0144.env)
 kernel:   local VM build full abdf8acb... (0349; payload 4b13e5a6...)
-          the merge-window CI run is the current-line build gate
+          CI full b1fa07fe..., exec-data 61c6b1a1... (run 44918530808, green)
 image:    x16-amfi-0349-defaults.img, 514ea382... (payload 4b13e5a6..., cmdline 397 B)
 dxb:      blacktop/darwin-xnu-build @ 663906528d1cd5ea8fde7de6f16de73db9511549
 runner:   macos-15, Xcode 16.0, macOS 13.5 xnu
