@@ -1243,53 +1243,14 @@ new file mode 100644
 +}
 +#endif /* SWEET */
 diff --git a/iokit/Kernel/arm/SweetNetwork.cpp b/iokit/Kernel/arm/SweetNetwork.cpp
-new file mode 100644
---- /dev/null
+--- a/iokit/Kernel/arm/SweetNetwork.cpp
 +++ b/iokit/Kernel/arm/SweetNetwork.cpp
-@@ -0,0 +1,46 @@
-+/*
-+ * Minimal IONetworkController for SWEET.
-+ *
-+ * MobileGestalt's MGIOKitSupport waits for an IOServiceMatched notification
-+ * with IOProviderClass=IONetworkController when it needs the WiFi MAC. The
-+ * ADT publishes /arm-io/marconi-wifi with mac-address-wifi0; this driver
-+ * attaches to that IOPlatformDevice, copies the MAC, and registers as an
-+ * IONetworkController so the notification fires.
-+ */
-+#include <pexpert/arm64/board_config.h>
-+
+@@ -9,7 +9,7 @@
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
 +#if defined(SWEET) && 0  /* ruby 0497: the real IONetworkingFamily is built in */
-+#include <IOKit/IOService.h>
-+#include <IOKit/IOLib.h>
-+#include <libkern/c++/OSData.h>
-+
-+class IONetworkController : public IOService {
-+	OSDeclareDefaultStructors(IONetworkController);
-+
-+public:
-+	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
-+};
-+
-+OSDefineMetaClassAndStructors(IONetworkController, IOService);
-+
-+bool
-+IONetworkController::start(IOService *provider)
-+{
-+	if (!IOService::start(provider)) {
-+		return false;
-+	}
-+
-+	OSData *mac = OSDynamicCast(OSData, provider->getProperty("mac-address-wifi0"));
-+	if (mac != NULL && mac->getLength() >= 6) {
-+		const uint8_t *p = (const uint8_t *)mac->getBytesNoCopy();
-+		setProperty("mac-address-wifi0", mac);
-+		registerService();
-+		IOLog("SWEET NET: IONetworkController up, mac %02x:%02x:%02x:%02x:%02x:%02x\n",
-+		    p[0], p[1], p[2], p[3], p[4], p[5]);
-+	} else {
-+		registerService();
-+		IOLog("SWEET NET: IONetworkController up, no mac-address-wifi0\n");
-+	}
-+	return true;
-+}
-+#endif /* SWEET */
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSData.h>
