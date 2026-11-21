@@ -17,7 +17,7 @@ A research bring-up, packaged as an independent, sanitized delta.
 > with MS OS 1.0 WinUSB binding (`rubywinusb=4`), IRQ port events and gated
 > suspend/resume (0333), per-endpoint GPD rings with a real FIFO
 > allocation (0334), and USB CDC-ECM networking with SSH over it
-> (0335-0349: 64 MB wget 14.1 MB/s, TXRESET 0). The 0348/0349 boot-arg
+> (0349 run: 64 MB wget 14.1 MB/s, TXRESET 0). The 0348/0349 boot-arg
 > work retires 21 dead switches and bakes 15 verified defaults, so the
 > boot line drops from 596 to 397 B while every `PE_parse` stays.
 > Limits: host-side USB data is measured only on the `0x81` channel;
@@ -49,7 +49,7 @@ before building.
 | Input | **real Goodix GT9916R** over SPI3; 0179 drives it from EINT14 through a child EINT controller and a dedicated IOWorkLoop oneshot (command/diagnostic path on `IOCommandGate`); unlock, multi-contact HID dispatch, edge; volume/power keys via HID; 0084 synthetic swipe still available |
 | Power | MT6360 battery/charger read-only: 4311 mV, `external=1/full=1`; Type-C read-only; no charger control/OTG |
 | Storage | UFS LUN 2, read/write HFS+ on `iosroot`; 4 MB HFS rescue root via the LK ramdisk slot |
-| Latest runs (separate) | 2026-11-18 0334 (per-endpoint rings/FIFO; lite matrix PASS, `epall ok=0x3e`), 0333 (10/10 hotplug, two suspend cycles); 2026-11-06 0179 (P2b native EINT touch; G1–G6; 10 min + 5 min stress; no panic); 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot; 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
+| Latest runs (separate) | 2026-11-21/22 0349 (USB CDC-ECM + SSH over it; 64 MB wget 14.1 MB/s, TXRESET 0; 0348 retires 21 dead parses, 0349 bakes 15 defaults and slims the boot line to 397 B), 2026-11-18 0334 (per-endpoint rings/FIFO; lite matrix PASS, `epall ok=0x3e`), 0333 (10/10 hotplug, two suspend cycles); 2026-11-06 0179 (P2b native EINT touch; G1–G6; 10 min + 5 min stress; no panic); 2026-11-02 0155 (P1/P2/P3: probe, keys, battery, touch; 19/19, 8/8 I2C5, no panic); 2026-10-30 USB 0143 (512 MPS/511 B; stability runs 13/7/23 frames, one drop); 2026-10-29 rescue root (8/8 rescue `/etc/rc` checks); 0085 real-touch boot; 0084 B+NOP first boot -> A' (22 s / 30 s from the Apple logo) |
 | Open | P2b G7/G8 and a full 10 min repeat were cancelled by decision; no ESD health timer; P2.4 battery UI latency (30 s poll; 100→98 on unplug); P3 target (USB host, audio, sensors); second unit/clean-room; from-IPSW root/shim/ADT builders; strict pinned payload; USB EP2 host-side XACT |
 | Not yet | Wi-Fi, Bluetooth, cellular, audio, camera, GPU, RTC; USB host/OTG; sleep/wake; charger control; Type-C role |
 | Safety | AMFI/sandbox/code signing off; data may be lost |
@@ -140,12 +140,12 @@ a deterministic image and checks the layout.
 | Pin | Value |
 |---|---|
 | Patchset | `b277f658…` (314 files; 0001-0079 baseline + patches through 0349) |
-| Kernel | full `5ee3019d…`, exec-data `61c6b1a1…` (CI `44296779724`) |
-| Image | default `561f1026…` (`x16-0334b4-default.img`), lite `b4b95789…` (`x16-0334b4-lite.img`, `rubyep_test=1`) |
+| Kernel | full `2eb84a6d…`, exec-data `1fa119b0…` (CI `44931937790`; 18,618,888 B, same segment layout as the on-device 0349 kernel) |
+| Image | `514ea382…` (`x16-amfi-0349-defaults.img`, 397 B boot line) |
 | CI | `xnu-0349` `44931937790` (success, branch dispatch; exec gate pinned in `config/0349.env`) |
-| Tags | `v0.7.0` → merge `M2`; `p3-usb-0334-final` → feature tip; historical `v0.6.0` → `1e45453` |
-| `boot_a` | 0334b4 default (WinUSB bound, `CM_PROB_NONE`); `boot_b` TWRP |
-| Device evidence | 0331 lite matrix PASS (T0/T1/T3/T4, 512–16K); `t331 epall 511` → `ok_tx=3e err_tx=1c0 ok_rx=3e err_rx=1c0 restore=0`; post-batch matrix PASS; no panic, `fused=0`; rollback 0334b3 `ca2f3bf4…` |
+| Tags | `v0.8.0` → merge `M2`; `p3-usb-0349-final` → feature tip; historical `v0.7.0` → `0e66bf6`, `v0.6.0` → `1e45453` |
+| `boot_a` | 0349 default (`x16-amfi-0349-defaults.img`, ECM + SSH); `boot_b` TWRP |
+| Device evidence | 0349 run: 64 MB wget 14.1 MB/s + scp push 14.3 MB/s, TXRESET 0, banner values from compiled-in defaults, DHCP ACK + DNS + TCP out; 0334 lite matrix PASS (T0/T1/T3/T4, 512–16K); rollback 0347 `b46acd2c…` |
 | Evidence | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) · [14](docs/en/14-usb-per-endpoint.md) |
 
 ### USB device mode (0349 line)

@@ -16,7 +16,7 @@
 > 显示、原生 EINT14 触摸、按键、电池只读、USB device 模式 + MS OS 1.0
 > WinUSB 绑定（`rubywinusb=4`）、0333 端口事件与门控 suspend/resume、
 > 0334 每端点 GPD 环与实际 FIFO 分配、以及 USB CDC-ECM 联网并在其上
-> 跑 SSH（0335–0349：64 MB wget 14.1 MB/s、TXRESET 0）。0348/0349 退役
+> 跑 SSH（0349 轮：64 MB wget 14.1 MB/s、TXRESET 0）。0348/0349 退役
 > 21 个死开关并把 15 个已验证默认值烘焙进源码，启动行从 596 B 降到
 > 397 B，同时保留全部 `PE_parse` 覆写能力。限制：宿主侧数据仍只在
 > `0x81` 通道实测；多端点并发与非默认端点 RX 数据未测；scp 拉取会撞
@@ -45,7 +45,7 @@ tag、内容固定的 82 文件基线 + 本项目增量构建；工作流会先�
 | 输入 | **真实 Goodix GT9916R**，SPI3；0179 由 EINT14 经子 EINT controller + 专用 IOWorkLoop oneshot 驱动（命令/诊断走 `IOCommandGate`）；解锁、多指 contact 上报、edge；音量/电源键经 HID；0084 合成上滑仍保留 |
 | 电源 | MT6360 电池/充电只读：4311 mV、`external=1/full=1`；Type-C read-only；无充电控制/OTG |
 | 存储 | UFS LUN 2，`iosroot` 上读写 HFS+；4 MB HFS 救援根走 LK ramdisk 槽 |
-| 最新 runs（分开记录） | 2026-11-18 0334（每端点环/FIFO；lite 矩阵 PASS、`epall ok=0x3e`）、0333（10/10 拔插、两次 suspend）；2026-11-06 0179（P2b 原生 EINT 触摸；G1–G6；10 min + 5 min 压测；0 panic）；2026-11-02 0155（P1/P2/P3：探针、按键、电池、触摸；19/19、8/8 I2C5、0 panic）；2026-10-30 USB 0143（512 MPS/511 B；稳定性 13/7/23 帧，一次掉链）；2026-10-29 救援根（8/8 救援 `/etc/rc` 自检）；真实触摸 0085 启动；0084 B+NOP 首启 -> A'（从 Apple logo 起 22 秒 / 30 秒） |
+| 最新 runs（分开记录） | 2026-11-21/22 0349（USB CDC-ECM 并在其上跑 SSH；64 MB wget 14.1 MB/s、TXRESET 0；0348 退役 21 个死 parse、0349 烘焙 15 项默认并把启动行瘦到 397 B）、2026-11-18 0334（每端点环/FIFO；lite 矩阵 PASS、`epall ok=0x3e`）、0333（10/10 热插拔、两次 suspend 周期）；2026-11-06 0179（P2b 原生 EINT 触摸；G1–G6；10 min + 5 min 压测；无 panic）；2026-11-02 0155（P1/P2/P3：探针、按键、电池、触摸；19/19、8/8 I2C5、无 panic）；2026-10-30 USB 0143（512 MPS/511 B；稳定性 13/7/23 帧，一次丢包）；2026-10-29 救援根（8/8 `/etc/rc` 检查）；0085 真触摸启动；0084 B+NOP 首启 -> A'（22 s / 30 s 从 Apple logo） |
 | 未闭环 | P2b G7/G8 与完整 10 min 复跑已按决定取消；无 ESD 健康检查；P2.4 电池 UI 滞后（30 s 轮询；拔电 100→98）；P3 目标（USB host/音频/传感器）；第二台/干净室；从 IPSW 造 root/shim/ADT；严格 pin 的 payload；USB EP2 主机侧 XACT |
 | 未通 | Wi-Fi、Bluetooth、蜂窝、音频、相机、GPU、RTC；USB host/OTG；sleep/wake；充电控制；Type-C role |
 | 安全 | AMFI/sandbox/签名关闭；可能丢数据 |
@@ -131,12 +131,12 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0334 �
 | Pin | 值 |
 |---|---|
 | Patchset | `b277f658…`（314 文件；0001-0079 基线 + 至 0349 的项目补丁） |
-| 内核 | full `5ee3019d…`、exec-data `61c6b1a1…`（CI `44296779724`） |
-| 镜像 | default `561f1026…`（`x16-0334b4-default.img`）、lite `b4b95789…`（`x16-0334b4-lite.img`，`rubyep_test=1`） |
+| 内核 | full `2eb84a6d…`、exec-data `1fa119b0…`（CI `44931937790`；18,618,888 B，段布局与设备上的 0349 内核一致） |
+| 镜像 | `514ea382…`（`x16-amfi-0349-defaults.img`，397 B 启动行） |
 | CI | `xnu-0349` `44931937790`（成功，分支 dispatch；exec 门禁已写入 `config/0349.env`） |
-| Tags | `v0.7.0` → 合并 `M2`；`p3-usb-0334-final` → 特性分支终点；历史 `v0.6.0` → `1e45453` |
-| `boot_a` | 0334b4 default（WinUSB 已绑定，`CM_PROB_NONE`）；`boot_b` TWRP |
-| 设备证据 | 0331 lite 矩阵 PASS（T0/T1/T3/T4，512–16K）；`t331 epall 511` → `ok_tx=3e err_tx=1c0 ok_rx=3e err_rx=1c0 restore=0`；批量后再跑矩阵 PASS；无 panic、`fused=0`；回滚 0334b3 `ca2f3bf4…` |
+| Tags | `v0.8.0` → 合并 `M2`；`p3-usb-0349-final` → 特性分支终点；历史 `v0.7.0` → `0e66bf6`、`v0.6.0` → `1e45453` |
+| `boot_a` | 0349 default（`x16-amfi-0349-defaults.img`，ECM + SSH）；`boot_b` TWRP |
+| 设备证据 | 0349 轮：64 MB wget 14.1 MB/s + scp 推 14.3 MB/s、TXRESET 0、banner 全部来自源码默认、DHCP ACK + DNS + TCP 出网；0334 lite 矩阵 PASS（T0/T1/T3/T4，512–16K）；回滚 0347 `b46acd2c…` |
 | 证据 | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE.zh.md](docs/records/GUARANTEE.zh.md) · [14](docs/zh/14-usb-per-endpoint.md) |
 
 ### USB device 模式（0349 线）
