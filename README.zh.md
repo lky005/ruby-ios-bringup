@@ -133,9 +133,9 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0349 �
 | Pin | 值 |
 |---|---|
 | Patchset | `1282a8bd…`（307 文件；0001-0079 基线 + 至 0349 的项目补丁） |
-| 内核 | 本地 VM 构建 full `abdf8acb…`（payload `4b13e5a6…`）；CI full `b1fa07fe…`、exec-data `61c6b1a1…`（run `44918530808`，绿） |
+| 内核 | 本地 VM 构建 full `abdf8acb…`（payload `4b13e5a6…`）；对新 pin 的合并窗 CI run 是构建门 |
 | 镜像 | default `514ea382…`（`x16-amfi-0349-defaults.img`，cmdline 397 B） |
-| CI | 合并窗 `44918530808` 在新 pin `1282a8bd…`（307 文件）上绿；badge push run `44920381027` 绿；exec-data 与 0334 pin 一致 |
+| CI | run `44912588343`（分支 `0667041`）= 仅格式门（该 run 的 patchset pin 仍是 0334 集）；`config/0349.env` 承载合并窗门禁 |
 | Tags | `v0.8.0` → 合并 `M2`；`p3-usb-0349-final` → 特性分支终点；历史 `v0.7.0` → 0334 `M2`、`v0.6.0` → `1e45453` |
 | `boot_a` | 0349 default（ECM 网络 + SSH；boot-args 397 B）；`boot_b` TWRP |
 | 设备证据 | 2026-11-21：banner 默认值全部来自源码；64 MB wget 14.1 MB/s + scp 推 14.3 MB/s（md5 一致）；全程 TXRESET=0；salvage 2 + softbell 25 开机窗形态；rxpk ~93k rxerr=0；无 panic；回滚 0347 `b46acd2c…`、0348v2 `f7b1f8e6…` |

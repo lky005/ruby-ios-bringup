@@ -142,9 +142,9 @@ a deterministic image and checks the layout.
 | Pin | Value |
 |---|---|
 | Patchset | `1282a8bd…` (307 files; 0001-0079 baseline + patches through 0349) |
-| Kernel | local VM build full `abdf8acb…` (payload `4b13e5a6…`); CI full `b1fa07fe…`, exec-data `61c6b1a1…` (run `44918530808`, green) |
+| Kernel | local VM build full `abdf8acb…` (payload `4b13e5a6…`); the merge-window CI run against the new pin is the build gate |
 | Image | default `514ea382…` (`x16-amfi-0349-defaults.img`, cmdline 397 B) |
-| CI | merge-window `44918530808` green on the new pin `1282a8bd…` (307 files); badge push run `44920381027` green; exec-data equals the 0334 pin |
+| CI | run `44912588343` (branch `0667041`) = format gate only (patchset pin there was still the 0334 set); `config/0349.env` carries the merge-window gate |
 | Tags | `v0.8.0` → merge `M2`; `p3-usb-0349-final` → feature tip; historical `v0.7.0` → 0334 `M2`, `v0.6.0` → `1e45453` |
 | `boot_a` | 0349 default (ECM net + SSH; boot-args 397 B); `boot_b` TWRP |
 | Device evidence | 2026-11-21: banner defaults from source; 64 MB wget 14.1 MB/s + scp push 14.3 MB/s (md5 match); TXRESET 0 all session; salvage 2 + softbell 25 boot-window shape; rxpk ~93k rxerr=0; no panic; rollback 0347 `b46acd2c…`, 0348v2 `f7b1f8e6…` |
