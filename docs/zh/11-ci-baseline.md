@@ -41,8 +41,8 @@
   + 最多 495 B 文本），并在停 QMU 后 reset TX 环。host 侧首会话 XACT
   在 0143 仍未闭环。
 - 0131b 分支保留自己的 workflow 和 patch 列表；当前 0349 线使用
-  `config/0334.env`，`config/0131b.env` 与 `config/0131b-boot.cmdline`
-  作为历史保留。
+  `config/0349.env`，`config/0334.env`、`config/0131b.env` 与
+  `config/0131b-boot.cmdline` 作为历史保留。
 - 内核 run `41022192026` 构建 0143，exec-data 与 `6fa65088...` 一致；
   `41015790742` 对应 0142（`99d98d80...`）。2026-10-29 的
   `40822689195` / `40824668335` 作为历史 main/USB 参考保留。

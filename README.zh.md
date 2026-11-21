@@ -114,7 +114,7 @@ python tools/sweetlog/decode.py <area.bin> <out.txt>
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 文件（sweet 0001-0079），清单根 829d7598...
 recipe:   ci/prepare-baseline.sh（私有镜像；公开回退 ALLOW_PUBLIC_UPSTREAM=1）
-patchset: d87e666f...（当前线，305 文件；历史 10b1e2e8... 175、da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
+patchset: 58e0730b...（当前线，223 文件；0348+0349；历史 d87e666f... 305、10b1e2e8... 175、da13b6df... 151、9f7b41cf... 141、f47f4c19... 139、27894e7b... 137、29449e32... 135）
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -150,7 +150,9 @@ boot、kernel、ADT、shim 和 0084 golden（0084/0085 为历史；当前 0349 �
   FIFO 段（slot 2 下每端点 3×512 B；每方向 EP1–5 放得下，EP6–8 拒绝而不是
   重叠）。
 - ECM 网络通路（`rubyecm`，`ruby_enum=3` 已烘焙）经 EP1 提供 cdc_ether
-  网卡与 root SSH；批量吞吐 14 MB/s 级。
+  网卡与 root SSH；批量吞吐 14 MB/s 级。macOS / Linux 原生免驱直挂
+  （CDC-ECM 免驱动）；Windows 无内置 CDC-ECM 类驱动，网卡需经
+  `usbipd-win` + WSL2（`cdc_ether`）桥接使用。
 - 宿主侧数据仍只在 `0x81` 实测；方法、原始证据与边界见
   [14 — USB 每端点队列](docs/zh/14-usb-per-endpoint.md)。
 

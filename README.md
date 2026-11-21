@@ -121,7 +121,7 @@ The kernel workflow uses:
 apple:    apple-oss-distributions/xnu @ xnu-8796.141.3 (f625db25...)
 baseline: 82 files (sweet 0001-0079), manifest root 829d7598...
 recipe:   ci/prepare-baseline.sh (private mirror; public fallback ALLOW_PUBLIC_UPSTREAM=1)
-patchset: d87e666f... (current line, 305 files; historical 10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
+patchset: 58e0730b... (current line, 223 files; 0348+0349; historical d87e666f... 305, 10b1e2e8... 175, da13b6df... 151, 9f7b41cf... 141, f47f4c19... 139, 27894e7b... 137, 29449e32... 135)
 runner:   macos-15 / Xcode 16.0 / macOS 13.5 xnu
 config:   DEVELOPMENT, MACHINE_CONFIG=SWEET, -mcpu=cortex-a55
 ```
@@ -160,6 +160,9 @@ a deterministic image and checks the layout.
   EP1–5 fit per direction and EP6–8 are refused instead of overlapping.
 - The ECM network path (`rubyecm`, `ruby_enum=3` compiled-in) provides a
   cdc_ether NIC over EP1 with SSH at root; 14 MB/s-class bulk throughput.
+  macOS and Linux attach it natively (CDC-ECM is driverless); Windows has no
+  in-box CDC-ECM class driver, so the NIC is bridged through
+  `usbipd-win` + WSL2 (`cdc_ether`) instead.
 - Host-side data is still measured only on `0x81`; see
   [14 — USB per-endpoint queues](docs/en/14-usb-per-endpoint.md) for the
   method, raw evidence and limits.
