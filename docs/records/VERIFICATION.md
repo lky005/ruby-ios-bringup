@@ -3,6 +3,20 @@
 This file records what was actually checked, and what was not. It is updated
 after each verification pass.
 
+## Device-verified (2026-11-21, 0349 line)
+
+0349 (`x16-amfi-0349-defaults.img` `514ea382...`, kernel `abdf8acb...`,
+payload `4b13e5a6...`, boot-args 397 B) on `boot_a`:
+
+- The boot banner reports the 15 steady-state values from the compiled-in
+  defaults (no cmdline override present for the baked tokens).
+- 64 MB HTTP transfer: wget 14.1 MB/s (md5 match); scp push 14.3 MB/s
+  (md5 match). TXRESET 0 for the whole session; salvage 2 + softbell 25 in
+  the boot window (0347-level shape); rxpk ~93k rxerr=0; no panic.
+- Not covered: EP2-5 host-side end-to-end, concurrency, suspend (0334
+  boundaries unchanged); scp pull is avoided (FIFOFULL half-fetch window);
+  `ruby_txreplay` not yet exercised.
+
 ## Environment
 
 - Host: Windows 10 (build 26300), Git Bash, Python 3.13.13.
