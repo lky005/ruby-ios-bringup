@@ -1,0 +1,342 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -51,6 +51,11 @@
+ #include <kern/clock.h>
+ #include <sys/proc.h>
+ #include <machine/machine_routines.h>
++#include <libkern/c++/OSCollectionIterator.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSSymbol.h>
++
++extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -150,6 +155,318 @@
+ 
+ OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
+ 
++/*
++ * Manual backlight v1: the brightness service backboardd looks for, plus
++ * a bounded DSI VM_CMD writer. The service needs rubybacklight=1, DSI
++ * writes need rubyblhw=1. With no boot-args none of this is reached.
++ */
++#define SWEET_DSI_PA            0x14013000u
++#define SWEET_DSI_SIZE          0x1000u
++#define SWEET_DSI_START         0x00u
++#define SWEET_DSI_INTSTA        0x0cu
++#define SWEET_DSI_MODE_CTRL     0x14u
++#define SWEET_DSI_VM_CMD_CON    0x130u
++#define SWEET_DSI_VM_CMD_DATA0  0x134u
++#define SWEET_DSI_VM_CMD_START  (1u << 16)
++#define SWEET_DSI_VM_CMD_DONE   (1u << 5)
++#define SWEET_DSI_VM_CMD_EN     (1u << 0)
++#define SWEET_DSI_TS_VFP_EN     (1u << 5)
++#define SWEET_DSI_VM_LONG       (1u << 1)
++#define SWEET_DCS_LONG_WRITE    0x39u
++#define SWEET_BL_MIN            8u
++#define SWEET_BL_MAX            4095u
++#define SWEET_BL_SMOOTH_DIFF    48u
++#define SWEET_BL_SMOOTH_STEPS   4u
++#define SWEET_BL_SMOOTH_MS      10u
++
++/* gamma 2.6 over raw>>11, level = 8 + 4087 * (i/32)^2.6 */
++static const uint16_t sweet_bl_gamma[33] = {
++	8, 8, 11, 17, 26, 41, 61, 87, 119, 159, 207,
++	262, 327, 401, 484, 578, 682, 797, 924, 1062, 1212, 1375,
++	1551, 1740, 1942, 2159, 2390, 2636, 2896, 3172, 3464, 3771, 4095
++};
++
++static volatile uint32_t *sweet_dsi;
++static int sweet_bl_hw;
++static uint32_t sweet_bl_last;
++static IOLock *sweet_bl_lock;
++static int sweet_bl_fails;
++static int sweet_bl_gen;
++static uint32_t sweet_bl_target;
++
++static inline uint32_t
++sweet_dsi_read(uint32_t off)
++{
++	return *(volatile uint32_t *)((uintptr_t)sweet_dsi + off);
++}
++
++static inline void
++sweet_dsi_write(uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)((uintptr_t)sweet_dsi + off) = val;
++	__asm__ volatile("dmb sy" ::: "memory");
++}
++
++static bool
++sweet_dsi_map(void)
++{
++	vm_offset_t va;
++
++	if (sweet_dsi != NULL) {
++		return true;
++	}
++	va = ml_io_map(SWEET_DSI_PA, SWEET_DSI_SIZE);
++	if (va == 0) {
++		IOLog("SWEET BL: DSI map failed\n");
++		return false;
++	}
++	sweet_dsi = (volatile uint32_t *)va;
++	IOLog("SWEET BL: DSI mapped at 0x%llx\n", (unsigned long long)va);
++	return true;
++}
++
++static bool
++sweet_bl_send_locked(uint32_t level)
++{
++	uint32_t mode, value, start;
++	bool done = false;
++
++	if (level == sweet_bl_last) {
++		return true;
++	}
++	if (!sweet_dsi_map()) {
++		return false;
++	}
++	mode = sweet_dsi_read(SWEET_DSI_MODE_CTRL);
++	if (mode == 0xffffffffu || (mode & 3u) == 0) {
++		IOLog("SWEET BL: DSI mode 0x%x, not sending\n", mode);
++		return false;
++	}
++	value = 0x51u | (((level >> 8) & 0xffu) << 8) | ((level & 0xffu) << 16);
++	sweet_dsi_write(SWEET_DSI_VM_CMD_DATA0, value);
++	sweet_dsi_write(SWEET_DSI_VM_CMD_CON,
++	    (3u << 16) | (SWEET_DCS_LONG_WRITE << 8) |
++	    SWEET_DSI_VM_LONG | SWEET_DSI_VM_CMD_EN | SWEET_DSI_TS_VFP_EN);
++	sweet_dsi_write(SWEET_DSI_INTSTA,
++	    sweet_dsi_read(SWEET_DSI_INTSTA) & ~SWEET_DSI_VM_CMD_DONE);
++	start = sweet_dsi_read(SWEET_DSI_START) & ~SWEET_DSI_VM_CMD_START;
++	sweet_dsi_write(SWEET_DSI_START, start);
++	sweet_dsi_write(SWEET_DSI_START, start | SWEET_DSI_VM_CMD_START);
++	for (int i = 0; i < 200; i++) {
++		if ((sweet_dsi_read(SWEET_DSI_INTSTA) & SWEET_DSI_VM_CMD_DONE) == 0) {
++			done = true;
++			break;
++		}
++		IOSleep(1);
++	}
++	IOLog("SWEET BL: DSI level=%u mode=0x%x %s\n", level, mode,
++	    done ? "done" : "TIMEOUT");
++	if (done) {
++		sweet_bl_last = level;
++	}
++	return done;
++}
++
++static uint32_t
++sweet_bl_level(uint32_t raw)
++{
++	uint32_t idx, frac, a, b;
++
++	if (raw > 65536u) {
++		raw = 65536u;
++	}
++	idx = raw >> 11;
++	frac = raw & 2047u;
++	a = sweet_bl_gamma[idx];
++	b = sweet_bl_gamma[idx < 32u ? idx + 1u : 32u];
++	return a + (uint32_t)(((b - a) * frac + 1024u) >> 11);
++}
++
++static void
++sweet_bl_request(uint32_t raw)
++{
++	uint32_t target = sweet_bl_level(raw);
++	uint32_t start, next;
++	int32_t delta;
++	int gen, step;
++	bool ok;
++
++	if (!sweet_bl_hw || sweet_bl_lock == NULL) {
++		return;
++	}
++	IOLockLock(sweet_bl_lock);
++	if (target == sweet_bl_target) {
++		IOLockUnlock(sweet_bl_lock);
++		return;
++	}
++	sweet_bl_target = target;
++	gen = ++sweet_bl_gen;
++	start = sweet_bl_last;
++	IOLockUnlock(sweet_bl_lock);
++
++	if (target == start) {
++		return;
++	}
++	IOLog("SWEET BL: raw=%u level=%u\n", raw, target);
++	delta = (int32_t)target - (int32_t)start;
++	if (start == 0 ||
++	    (delta > -(int32_t)SWEET_BL_SMOOTH_DIFF &&
++	    delta < (int32_t)SWEET_BL_SMOOTH_DIFF)) {
++		IOLockLock(sweet_bl_lock);
++		if (gen != sweet_bl_gen) {
++			IOLockUnlock(sweet_bl_lock);
++			return;
++		}
++		ok = sweet_bl_send_locked(target);
++		IOLockUnlock(sweet_bl_lock);
++	} else {
++		ok = true;
++		for (step = 1; step <= (int)SWEET_BL_SMOOTH_STEPS; step++) {
++			next = (uint32_t)((int32_t)start +
++			    (int32_t)(((int64_t)delta * step) /
++			    (int)SWEET_BL_SMOOTH_STEPS));
++			IOLockLock(sweet_bl_lock);
++			if (gen != sweet_bl_gen) {
++				IOLockUnlock(sweet_bl_lock);
++				return;
++			}
++			ok = sweet_bl_send_locked(next);
++			IOLockUnlock(sweet_bl_lock);
++			if (!ok) {
++				break;
++			}
++			if (step < (int)SWEET_BL_SMOOTH_STEPS) {
++				IOSleep(SWEET_BL_SMOOTH_MS);
++			}
++		}
++	}
++	if (ok) {
++		sweet_bl_fails = 0;
++		return;
++	}
++	IOLockLock(sweet_bl_lock);
++	sweet_bl_target = 0xffffffffu;
++	IOLockUnlock(sweet_bl_lock);
++	sweet_bl_fails++;
++	if (sweet_bl_fails >= 5) {
++		IOLog("SWEET BL: hw disabled after %d failures\n", sweet_bl_fails);
++		sweet_bl_hw = 0;
++	} else {
++		IOLog("SWEET BL: send failed %d/5, will retry\n", sweet_bl_fails);
++	}
++}
++
++class AppleARMBacklight : public IOService {
++	OSDeclareDefaultStructors(AppleARMBacklight);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
++	    OSDictionary *properties, IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleARMBacklight, IOService);
++
++bool
++AppleARMBacklight::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setName("backlight");
++	setProperty("backlight-control", kOSBooleanTrue);
++	{
++		OSDictionary *brightness = OSDictionary::withCapacity(3);
++		OSDictionary *parameters = OSDictionary::withCapacity(1);
++
++		if (brightness != NULL && parameters != NULL) {
++			brightness->setObject("min", OSNumber::withNumber((unsigned long long)0, 32));
++			brightness->setObject("max", OSNumber::withNumber((unsigned long long)65536, 32));
++			brightness->setObject("value", OSNumber::withNumber((unsigned long long)32768, 32));
++			parameters->setObject("brightness", brightness);
++			setProperty("IODisplayParameters", parameters);
++		}
++		OSSafeReleaseNULL(brightness);
++		OSSafeReleaseNULL(parameters);
++	}
++	registerService();
++	IOLog("SWEET BL: backlight service registered\n");
++	return true;
++}
++
++IOReturn
++AppleARMBacklight::setProperties(OSObject *properties)
++{
++	OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
++	char name[32];
++
++	proc_selfname(name, sizeof(name));
++	if (dict == NULL) {
++		IOLog("SWEET BL: %s bad properties type\n", name);
++		return kIOReturnBadArgument;
++	}
++	OSCollectionIterator *keys = OSCollectionIterator::withCollection(dict);
++	const OSSymbol *key;
++
++	while (keys != NULL && (key = OSDynamicCast(OSSymbol, keys->getNextObject())) != NULL) {
++		OSObject *value = dict->getObject(key);
++		OSNumber *number = OSDynamicCast(OSNumber, value);
++
++		if (number != NULL && key->isEqualTo("backlight-level")) {
++			sweet_bl_request((uint32_t)number->unsigned64BitValue());
++		}
++		if (value != NULL) {
++			setProperty(key, value);
++		}
++	}
++	OSSafeReleaseNULL(keys);
++	return kIOReturnSuccess;
++}
++
++IOReturn
++AppleARMBacklight::newUserClient(task_t, void *, UInt32 type, OSDictionary *, IOUserClient **handler)
++{
++	char name[32];
++
++	proc_selfname(name, sizeof(name));
++	IOLog("SWEET BL: %s user client type %u\n", name, (unsigned)type);
++	*handler = NULL;
++	return kIOReturnUnsupported;
++}
++
++static void
++sweet_backlight_start(void)
++{
++	int on = 0, hw = 0;
++	IOService *platform;
++	AppleARMBacklight *light;
++
++	PE_parse_boot_argn("rubybacklight", &on, sizeof(on));
++	PE_parse_boot_argn("rubyblhw", &hw, sizeof(hw));
++	sweet_bl_hw = (hw == 1);
++	if (on != 1) {
++		return;
++	}
++	sweet_bl_lock = IOLockAlloc();
++	if (sweet_bl_lock == NULL) {
++		IOLog("SWEET BL: lock unavailable\n");
++		return;
++	}
++	platform = (IOService *)IOService::getPlatform();
++	light = OSTypeAlloc(AppleARMBacklight);
++	if (platform == NULL || light == NULL || !light->init() || !light->attach(platform)) {
++		OSSafeReleaseNULL(light);
++		IOLog("SWEET BL: cannot create service\n");
++		return;
++	}
++	if (!light->start(platform)) {
++		light->detach(platform);
++	}
++	light->release();
++	IOLog("SWEET BL: service on hw=%d\n", sweet_bl_hw);
++}
++
+ bool
+ AppleCLCD::start(IOService *provider)
+ {
+@@ -202,6 +519,7 @@
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
++	sweet_backlight_start();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+ 	return true;
