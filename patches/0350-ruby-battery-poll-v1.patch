@@ -1,0 +1,99 @@
+diff --git a/iokit/Kernel/arm/SweetBattery.cpp b/iokit/Kernel/arm/SweetBattery.cpp
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -1,8 +1,8 @@
+ /*
+  * Built-in iOS battery bring-up service. Default: 100%, AC, not charging.
+- * rubybatt=1: read-only MT6360 I2C5 polling every 5 seconds (2 s after a
+- * charger/full state change; VBAT/CHG_STAT/FOD_STAT; no PMIC/charger/rail
+- * writes).  sweetbattery=1 (PM6150 SPMI) is
++ * rubybatt=1: read-only MT6360 I2C5 polling every second (rubybattms
++ * overrides; VBAT/CHG_STAT/FOD_STAT; no PMIC/charger/rail writes).
++ * sweetbattery=1 (PM6150 SPMI) is
+  * intercepted on MT6877 so the Qualcomm arbiter is never touched.  SOC is an
+  * UNCALIBRATED voltage estimate; a failed read keeps the last valid sample.
+  */
+@@ -36,6 +36,7 @@
+ 	unsigned fRubyFails;
+ 	int fLastMode;
+ 	uint32_t fNextPollMs;
++	uint32_t fPollMs;
+ 	bool fFullLatch;
+ 	void putNumber(const char *key, UInt32 value);
+ 	void putBool(const char *key, bool value);
+@@ -65,6 +66,8 @@
+ 	fLastOcv = 0;
+ 	fLastExternal = fLastCharging = fLastFull = false;
+ 	fRubyFails = 0;
++	fNextPollMs = 1000;
++	fPollMs = 1000;
+ 	if (dictionary) {
+ 		OSCollectionIterator *it = OSCollectionIterator::withCollection(dictionary);
+ 		if (!it) {
+@@ -229,21 +232,21 @@
+ 		if (ruby_battery_read(&s) == 0) {
+ 			unsigned chg = (s.chg_stat >> 6) & 3u;
+ 			bool external = (s.fod_stat & 0x10u) != 0;
+-			bool charging = chg == 1u;
+-			bool full = chg == 2u;
+-			bool changed = (external != fLastExternal) ||
+-			    (charging != fLastCharging) || (full != fLastFull);
++			bool charging = external && chg == 1u;
++			bool full = external && chg == 2u;
+ 			unsigned percent;
+ 
+ 			mv = (unsigned)(((uint64_t)s.ocv_code * 1250u) / 1000u);
+ 			if (mv >= 2800 && mv <= 4600) {
+-				if (full)
++				if (!external)
++					fFullLatch = false;
++				else if (full)
+ 					fFullLatch = true;
+ 				else if (fFullLatch && mv < 4300)
+ 					fFullLatch = false;
+ 				percent = (full || (fFullLatch && mv >= 4300)) ?
+ 				    100 : estimatePercent(mv);
+-				fNextPollMs = changed ? 2000 : 5000;
++				fNextPollMs = fPollMs;
+ 				fLastOcv = s.ocv_code;
+ 				fLastExternal = external;
+ 				fLastCharging = charging;
+@@ -260,7 +263,9 @@
+ 			if ((fRubyFails++ % 4u) == 0) {
+ 				IOLog("SWEET BATTERY: MT6360 read failed; holding last %umV\n", mv);
+ 			}
+-			fNextPollMs = 5000;
++			fNextPollMs = fPollMs;
++			if (!fLastExternal)
++				fFullLatch = false;
+ 			publish((fLastFull || (fFullLatch && mv >= 4300)) ?
+ 			    100 : estimatePercent(mv), mv, 0, fLastExternal,
+ 			    fLastExternal, fLastCharging, fLastFull, true, false);
+@@ -329,12 +334,18 @@
+ 	int real = 0, ruby = 0;
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+ 	(void)PE_parse_boot_argn("rubybatt", &ruby, sizeof(ruby));
++	int pollms = 0;
++	(void)PE_parse_boot_argn("rubybattms", &pollms, sizeof(pollms));
++	fPollMs = (pollms >= 500 && pollms <= 30000) ? (uint32_t)pollms : 1000;
+ 	if (real == 1) {
+ 		IOLog("SWEET BATTERY: PM6150 SPMI disabled on MT6877; use rubybatt=1\n");
+ 		real = 0;
+ 	}
+ 	fRuby = (ruby == 1) && ruby_battery_init() == 0;
+ 	fReal = real == 1 && sweet_spmi_init() == 0;
++	if (fRuby) {
++		IOLog("SWEET BATTERY: ruby poll %u ms\n", fPollMs);
++	}
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+ 	if (fReal || fRuby) {
+@@ -343,7 +354,7 @@
+ 		if (fLoop && fTimer && fLoop->addEventSource(fTimer) == kIOReturnSuccess) {
+ 			fTimerAdded = true;
+ 			fRunning = true;
+-			fTimer->setTimeoutMS(fRuby ? 5000 : 30000);
++			fTimer->setTimeoutMS(fRuby ? fPollMs : 30000);
+ 		} else {
+ 			fReal = false;
+ 			fRuby = false;

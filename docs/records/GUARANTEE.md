@@ -2,21 +2,24 @@
 
 **English** · [中文](GUARANTEE.zh.md)
 
-**Status 2026-11-06 — documented recipe with one-unit device evidence.**
+**Status 2026-11-22 — documented recipe with one-unit device evidence.**
 B+NOP first boot -> A', a CI kernel boot, a real-touch 0085 boot and the
-0155/0179 lines were observed on the author's unit. The 0179 line adds the
-native EINT14 touch path (child controller + dedicated IOWorkLoop oneshot);
-it was observed on the same unit on 2026-11-06. This is not an independently
+0155/0179, 0349 and 0351 lines were observed on the author's unit. The 0351
+line adds the DSI backlight and 1 s battery polling; its v1.3 hand feel and
+Night Shift recovery were not user-accepted. This is not an independently
 reproduced second-unit or clean-room guarantee. Detailed test guarantees are
 deferred.
 
-**Scope note (2026-11-06):** the current line uses the pins in
-`config/0179.env` (patchset `10b1e2e8...`, 175 files, exec-data
-`a4fb021e...`). The 0155 line used `config/0155.env` (patchset
-`da13b6df...`, exec-data `2e98fd85...`); the 2026-11-01 probe line used
-`config/0144.env` (patchset `9f7b41cf...`, exec-data `62a17d48...`); the
-0085/0084 success bundle is historical. The earlier USB lines used
-`config/0140.env` and `config/0131b.env`; see `docs/en/11-ci-baseline.md`.
+**Scope note (2026-11-22):** the current line uses the pins in
+`config/0351.env` (patchset `bce06bba...`, 316 files, exec-data
+`9febbe97...`). The 0349 line used `config/0349.env` (patchset
+`b277f658...`, exec-data `1fa119b0...`); the 0179 line used
+`config/0179.env` (patchset `10b1e2e8...`, exec-data `a4fb021e...`); the
+0155 line used `config/0155.env` (patchset `da13b6df...`, exec-data
+`2e98fd85...`); the 2026-11-01 probe line used `config/0144.env` (patchset
+`9f7b41cf...`, exec-data `62a17d48...`); the 0085/0084 success bundle is
+historical. The earlier USB lines used `config/0140.env` and
+`config/0131b.env`; see `docs/en/11-ci-baseline.md`.
 
 ## Scope
 
@@ -41,16 +44,16 @@ Given all of the following:
 - the same device situation (ruby / MT6877, Android 12 / MIUI 13.0.4, unlocked,
   slot `_a`, the partition layout in `docs/en/device.md`);
 - the same boot image and iOS root/ICL state (hashes below);
-- the boot args in `config/0179-boot.cmdline` for the current line
-  (`config/0155-boot.cmdline` and `config/0085-boot.cmdline` for the
-  historical real-touch images; `config/0084-boot.cmdline` for the
-  synthetic-swipe image);
+- the boot args in `config/0351-boot.cmdline` for the current line
+  (`config/0349-boot.cmdline` for the 0349 line; `config/0179-boot.cmdline`
+  and older configs for the historical lines);
 - the documented procedure in `docs/en/09-reproduce.md` and
   `docs/en/05-userland.md`;
 
 the success state is **expected** to reproduce. One author's unit was tested on
-2026-10-22, again on 2026-11-02 (0155) and again on 2026-11-06 (0179); no
-second-unit or clean-room device validation has been performed.
+2026-10-22, again on 2026-11-02 (0155), 2026-11-06 (0179), 2026-11-21 (0349)
+and 2026-11-22 (0351); no second-unit or clean-room device validation has been
+performed.
 
 If any hash differs, this guarantee does not apply; treat it as a different
 configuration.
@@ -60,10 +63,12 @@ configuration.
 | Item | Value | Note |
 |---|---|---|
 | Baseline | `MakrSas/ios-topaz@5095ac1` | upstream commit |
-| Patchset (current line) | `10b1e2e8...` | 175 files; recipe output; the workflow refuses to build on anything else |
-| Current kernel | `2b008e52...` | exec-data `a4fb021e...`; CI `42114854911`; gate rerun `42115985782`; host-checks `42115991259` |
-| Current image | `d438ba47...` | payload `72fc737c...`; external; not in the repo |
-| Current boot args | `config/0179-boot.cmdline` | native EINT touch, keys, battery, USB probe/hotplug |
+| Patchset (current line) | `bce06bba...` | 316 files; recipe output; the workflow refuses to build on anything else |
+| Current kernel | `e077f36c...` | exec-data `9febbe97...`; CI `45001473122` |
+| Current image | `f0f7d454...` | `x16-blv13.img`, 440 B boot line; external; not in the repo |
+| Current boot args | `config/0351-boot.cmdline` | 0349 defaults plus backlight and 1 s battery polling |
+| 0349 line (previous) | `b277f658...` | 314 files; exec-data `1fa119b0...`; image `514ea382...`; `config/0349.env` |
+| 0179 line (historical) | `10b1e2e8...` | 175 files; exec-data `a4fb021e...`; image `d438ba47...`; `config/0179.env` |
 | 0155 line (historical) | `da13b6df...` | 151 files; exec-data `2e98fd85...`; image `3b44c0e2...`; `config/0155.env` |
 | 2026-11-01 probe line | `9f7b41cf...` | 141 files; exec-data `62a17d48...`; image `66352038...`; `config/0144.env` |
 | Patchset (0085) | `cf4008e3...` | 88 files; recipe output; same as the harness build |

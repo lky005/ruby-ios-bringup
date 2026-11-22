@@ -3,10 +3,20 @@
 **English** · [中文](../zh/appendix-bootargs.md)
 
 > Status tags follow the [repository README](../../README.md). Defaults below
-> were read from the 0334 sources (`ruby_usb_probe()` and friends); the
-> baseline cmdline is 587 B, the limit is 607 B.
+> were read from the 0334/0351 sources (`ruby_usb_probe()` and friends); the
+> current 0351 boot line is 440 B, the limit is 607 B. The presets in the
+> "Historical presets" section are 0332i/0334-era and are kept for the record.
 
-## Recommended cmdline presets (copy-paste)
+## Current 0351 boot line (440 B, copy-paste)
+
+```text
+debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0 ufsroot=iosroot ufsrw=1 rootrw=1 sweethw=0 ufslun=2 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1 wdt_test=no_user_checkin sweetfb_noconsole=1 sweetfb_hz=30 ufslogsecs=1 rubyprobe=1 rubypwrap=1 rubkeys=1 rubybatt=1 rubyeint=1 rubymt6360=1 rubyeintirq=1 rubykpdirq=1 rubyeintb1=1 ruby_rxskip=1 rubyreboot=1 rubybacklight=1 rubyblhw=1 rubybattms=1000
+```
+
+The string is `config/0351-boot.cmdline`; the kernel defaults remain safe
+without it (backlight off, battery at 1 s).
+
+## Historical presets (0332i/0334, copy-paste)
 
 All three strings below are full, ready-to-use `--cmdline` values. They were
 taken from the verified 0332i/0334 builds; the kernel does not change its
@@ -75,6 +85,9 @@ Notes:
 | `ruby_iddump=1` | 0 | identity property dump at boot |
 | `rubywinusb=4` | 0 | MS OS 1.0 binding (0 off, 1–3 MS OS 2.0, 4 MS OS 1.0) |
 | `rubysetupdump=1` | 0 | SETUP packet trace |
+| `rubybacklight=1` | 0 | create the `AppleARMBacklight` service; no hardware write by itself |
+| `rubyblhw=1` | 0 | allow DSI DCS `0x51` writes |
+| `rubybattms=N` | 1000 | battery poll interval, 500-30000 ms |
 
 ## USB driver arguments not in the presets (grouped)
 

@@ -24,6 +24,27 @@ SpringBoard/CoreAnimation -> IOSurface -> IOMFB -> memcpy -> LK fb -> panel
 The Apple logo is the boot-snapshot surface, not a stale LK frame. The copy is
 driven by IOMFB, not by the bootloader after handoff.
 
+## Backlight
+
+The panel backlight is separate from the framebuffer copy. backboardd talks to
+the `AppleARMBacklight` service through `setProperties` (`backlight-level`,
+0..65536, 16.16); the service writes DCS `0x51` through the MT6877 DSI
+VM_CMD registers (`0x130/0x134`, START bit 16, INTSTA bit 5), with no GCE.
+
+| Item | Value |
+|---|---|
+| Panel | m16_36_02_0b OLED, 12-bit DCS level |
+| Curve | gamma 2.6 LUT (33 points), level 0..4095, minimum 8 |
+| Smoothing | jumps >48 levels split into 4 steps of 10 ms, preemptible |
+| Failure policy | 200 ms timeout, retry on the next request, disable only after 5 consecutive failures |
+| Gate | `rubybacklight=1` creates the service; `rubyblhw=1` enables DSI writes; both default off |
+
+Verified: G1b wrote 409/2048/409 and the panel visibly changed; the v1.2
+slider was user-verified (50% ~= 470 lx, 100% ~= 1700 lx). v1.3's LUT and
+ramp were confirmed in the console only; hand feel and Night Shift recovery
+are not user-accepted. The vendor kernel carries no brightness curve; the
+DCS level is the hardware contract.
+
 ## Cache maintenance
 
 | Attempt | Result |
