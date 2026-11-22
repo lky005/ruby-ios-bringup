@@ -59,6 +59,13 @@ PROJECT_URLS = {
     "https://github.com/lky005/ruby-ios-probes",
 }
 
+# Same two projects, referenced by path (badges carry a suffix and the README
+# links them by name); a bare handle is still flagged.
+PROJECT_REFS = {
+    "lky005/ruby-ios-bringup",
+    "lky005/ruby-ios-probes",
+}
+
 hard_failures = []
 warnings = []
 
@@ -185,6 +192,8 @@ def check_pii():
             continue
         for url in PROJECT_URLS:
             text = text.replace(url, "")
+        for ref in PROJECT_REFS:
+            text = text.replace(ref, "")
         for pattern, label in PII_PATTERNS:
             for match in pattern.finditer(text):
                 hits.append(f"{os.path.relpath(path, ROOT)}: {label}: {match.group(0)}")
