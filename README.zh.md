@@ -16,8 +16,8 @@
 
 ## 状态
 
-当前线：0349（`v0.8.0`）。0348/0349 的启动参数工作退役 21 个死开关，并把 15
-个已验证默认值烘焙进源码；启动行 397 B，全部 `PE_parse` 覆写能力保留。
+当前线：0349（`v0.8.0`）。0348/0349 的启动参数工作移除 21 个冗余启动开关，并把
+15 个已验证默认值烘焙进源码；启动行 397 B，全部 `PE_parse` 覆写能力保留。
 
 | 项 | 值 |
 |---|---|
@@ -34,7 +34,7 @@
 | 触摸 | 已验证 | Goodix GT9916R 走 SPI3，原生 EINT14 中断 |
 | 实体按键 | 已验证 | 音量与电源键，经 KPD/TOPSTATUS 与 HID |
 | 首启 | 已验证 | 锁屏到桌面；staged app 与小组件正常渲染 |
-| USB 设备模式 | 已验证 | EP0 命令通道、MS OS 1.0 WinUSB 绑定、CDC-ECM 网卡 + SSH；0349 轮 64 MB wget 14.1 MB/s、TXRESET 0 |
+| USB 设备模式 | 已验证 | EP0 命令通道、MS OS 1.0 WinUSB 绑定、CDC-ECM 网卡（macOS/Linux 原生免驱；Windows 需经 usbipd-win + WSL2）+ SSH；0349 轮 64 MB wget 14.1 MB/s、TXRESET 0 |
 | 电池与 Type-C | 只读 | MT6360 电压/状态遥测；无充电控制 |
 | Wi-Fi、蓝牙、蜂窝 | 未实现 | connsys 仅 stub |
 | 音频、相机、GPU | 未实现 | — |
@@ -116,8 +116,8 @@ docs/      双语指南与记录
 
 ## 安全与范围
 
-刷写实验性 boot 镜像并重划 `iosroot` 可能清空 Android `userdata`。请按会丢
-数据处理，并在刷机前阅读 [SAFETY](docs/records/SAFETY.md) 与
+刷写实验性 boot 镜像并重划 `iosroot` 可能清空 Android `userdata`。操作前请务必
+备份全部个人数据，并在刷机前阅读 [SAFETY](docs/records/SAFETY.md) 与
 [SCOPE](docs/records/SCOPE.md)。双系统布局是方法记录，不是安装器。AMFI、
 sandbox 与代码签名均已关闭，用户态不具备加固。
 

@@ -37,7 +37,7 @@ dead switches and bakes 15 verified defaults into the source; the boot line is
 | Touch | Verified | Goodix GT9916R over SPI3 with a native EINT14 interrupt |
 | Physical keys | Verified | Volume and power keys through KPD/TOPSTATUS and HID |
 | First boot | Verified | Lock screen to home screen; staged apps and widgets render |
-| USB device mode | Verified | EP0 command channel, MS OS 1.0 WinUSB binding, CDC-ECM NIC with SSH; 64 MB wget at 14.1 MB/s, TXRESET 0 on the 0349 run |
+| USB device mode | Verified | EP0 command channel, MS OS 1.0 WinUSB binding, CDC-ECM NIC (macOS/Linux native; Windows via usbipd-win + WSL2) with SSH; 64 MB wget at 14.1 MB/s, TXRESET 0 on the 0349 run |
 | Battery and Type-C | Read-only | MT6360 voltage and status telemetry; no charging control |
 | Wi-Fi, Bluetooth, cellular | Not implemented | connsys stub only |
 | Audio, camera, GPU | Not implemented | — |
