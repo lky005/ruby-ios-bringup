@@ -23,6 +23,26 @@ SpringBoard/CoreAnimation -> IOSurface -> IOMFB -> memcpy -> LK fb -> panel
 Apple logo 是启动快照 surface，不是 LK 残留帧；拷贝由 IOMFB 驱动，不是
 bootloader 交接后还在画。
 
+## 背光
+
+背光与 framebuffer 拷贝是两条独立路径。backboardd 通过 `setProperties`
+向 `AppleARMBacklight` 服务下发 `backlight-level`（0–65536，16.16）；
+服务再经 MT6877 DSI VM_CMD 寄存器（`0x130/0x134`、START bit 16、
+INTSTA bit 5）写 DCS `0x51`，不使用 GCE。
+
+| 项 | 值 |
+|---|---|
+| 面板 | m16_36_02_0b OLED，12-bit DCS 档位 |
+| 曲线 | γ2.6 LUT（33 点），level 0–4095，最小值 8 |
+| 平滑 | 跳变 >48 档拆 4 段、每段 10 ms，可被新请求抢占 |
+| 失败策略 | 200 ms 超时，下一次请求重试；连续 5 次失败才关闭硬件 |
+| 门控 | `rubybacklight=1` 创建服务；`rubyblhw=1` 允许 DSI 写入；两者默认关 |
+
+已验证：G1b 下发 409/2048/409，面板可见亮暗变化；v1.2 亮度条经用户实测
+（50% ≈ 470 lx，100% ≈ 1700 lx）。v1.3 的 LUT 与分段仅在 console 验证；
+手感与夜览恢复未获用户验收。vendor 内核不带亮度曲线；DCS 档位就是硬件
+契约。
+
 ## 缓存维护
 
 | 尝试 | 结果 |

@@ -50,6 +50,13 @@ The full upstream tree and `ci/ruby-baseline.diff` are **not** in the repo.
 
 ## Branches
 
+- `main` (2026-11-22 integration): patchset `bce06bba...` (316 files),
+  config `config/0351.env`, workflow `xnu-0351`. It adds the native DSI
+  backlight (DCS `0x51`, gamma LUT, preemptible ramp) and 1 s read-only
+  battery polling on top of the 0349 line.
+- `main` (2026-11-21 integration): patchset `b277f658...` (314 files),
+  config `config/0349.env`, workflow `xnu-0349`. It carries the 0335-0340
+  ECM chain, the 0348 dead-switch retirement and the 0349 baked defaults.
 - `main` (2026-11-06 integration, `22cdb29`): patchset `10b1e2e8...` (175 files),
   config `config/0179.env`, workflow `xnu-0179`. It combines the 0156-0174
   HAL/keys/USB/battery work with the 0175-0179 native IRQ and touch line

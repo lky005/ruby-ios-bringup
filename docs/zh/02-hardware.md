@@ -70,6 +70,7 @@ XNU UFS 驱动用 LUN 2，GPT header 在 512、entries 在 1024。作者布局�
 | DSC | 1080×2400，slice 540×20，128 bpp | `DDP_COMPONENT_DSC0` |
 | 面板 GPIO | reset 40，VDDI 108，VDD 167，LED6 | [DTS] |
 | iOS 呈现 | 逻辑 1125×2436，面板 1080×2400 | display-scale=3，偏移 22/18 |
+| 背光 | `AppleARMBacklight` 服务，DCS `0x51` | MT6877 DSI VM_CMD 直写；v1.2 已实测，v1.3 仅 console |
 
 ## 触摸、按键与电源
 

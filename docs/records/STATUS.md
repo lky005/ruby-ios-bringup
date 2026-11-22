@@ -1,9 +1,21 @@
 # Status
 
-As of **2026-11-18**. This is a snapshot of verified results, not a live device
+As of **2026-11-22**. This is a snapshot of verified results, not a live device
 status. No phone is attached to this repository or to its CI.
 
-## 2026-11-18 state (0334 line)
+## 2026-11-22 state (0351 line)
+
+| Item | Result | Evidence |
+|---|---|---|
+| Current line | 0351: native DSI backlight and 1 s battery polling on the 0349 USB/ECM line | patchset `bce06bba...` (316 files); `config/0351.env` |
+| Kernel | full `e077f36cd7717422dfc61d2f89bc5a5fc0e5f8990bf97f048698d570da78cbd4`, exec-data `9febbe9737cb434ed4a361c4cc3d62398d963fafe922088c7f6f54ddef20be55`; CI `45001473122` (success, 18,623,000 B) | `config/0351.env`; workflow `xnu-0351` |
+| Backlight | G1b DSI path PASS (409/2048/409); v1.2 slider user-verified (50% ~= 470 lx, 100% ~= 1700 lx); v1.3 gamma/ramp console-verified only | device runs 2026-11-22; private docs 210 |
+| Battery | 1 s MT6360 polling; 100 -> 97% on unplug; no I2C5/lock errors | device run 2026-11-22 |
+| Images | device `f0f7d454...` (`x16-blv13.img`, 440 B boot line) | host build 2026-11-22; CI kernel artifact above |
+| Known limits | backlight v1.3 hand feel and Night Shift recovery not user-accepted; battery touch A/B (`rubybattms=5000`) not run; USB limits unchanged | 2026-11-22 |
+| Rollback | v1.2 `72e72935...`; battery v1 `3e08c3f0...`; 0349 `514ea382...` | local archive |
+
+## 2026-11-18 state (0349 line)
 
 | Item | Result | Evidence |
 |---|---|---|

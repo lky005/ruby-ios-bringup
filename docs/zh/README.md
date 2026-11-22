@@ -9,11 +9,11 @@
 
 | 项 | 值 |
 |---|---|
-| 线 | 0334 |
-| Patchset | `d87e666f…`（305 文件） |
-| 内核 | full `5ee3019d…`、exec-data `61c6b1a1…`（CI `44296779724`） |
-| 镜像 | default `561f1026…`（`x16-0334b4-default.img`）、lite `b4b95789…`（`x16-0334b4-lite.img`） |
-| 已知限制 | 宿主侧数据只在 `0x81` 实测；多端点并发与非默认 RX 数据未测；511 B 帧封装；XactErr `0xC0000011`；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep；研究性 bring-up |
+| 线 | 0351 |
+| Patchset | `bce06bba…`（316 文件） |
+| 内核 | full `e077f36c…`、exec-data `9febbe97…`（CI `45001473122`） |
+| 镜像 | `f0f7d454…`（`x16-blv13.img`，440 B 启动行） |
+| 已知限制 | 背光 v1.3 手感与夜览未获用户验收；电池触摸 A/B（`rubybattms=5000`）未做；宿主侧数据只在 `0x81` 实测；多端点并发与非默认 RX 数据未测；511 B 帧封装；XactErr `0xC0000011`；无 USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep；研究性 bring-up |
 
 见 [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md) · [GUARANTEE.zh.md](../records/GUARANTEE.zh.md)。
 

@@ -24,6 +24,8 @@ project's delta.
 
 | Line | Patchset | Files | Config | Kernel reference |
 |---|---|---|---|---|
+| main (2026-11-22 integration) | `bce06bba...` | 316 | `config/0351.env` | full `e077f36c...`, exec `9febbe97...` (CI `45001473122`) |
+| main (2026-11-21 integration) | `b277f658...` | 314 | `config/0349.env` | full `2eb84a6d...`, exec `1fa119b0...` (CI `44933912917`) |
 | main (2026-11-06 integration) | `10b1e2e8...` | 175 | `config/0179.env` | full `2b008e52...`, exec `a4fb021e...` (main CI `42227326083`; prep `42225956551`) |
 | main (2026-11-02 integration) | `da13b6df...` | 151 | `config/0155.env` | full `491f2373...`, exec `2e98fd85...` (CI `41354317810`; gate `41355922057`) |
 | main (2026-11-01 integration) | `9f7b41cf...` | 141 | `config/0144.env` | full `9c82ea75...`, exec `62a17d48...` (CI `41222632828`) |
@@ -36,13 +38,15 @@ project's delta.
 - Main includes 0080/0084/0085, 0086-0131b, 0140/0141, 0142/0143,
   0144/0145, the historical 0146a-0155 line (probe/pwrap, keys/reboot,
   battery, touch), the 0156-0179 line (HAL/I2C, USB hotplug, RubyGIC/KPD
-  and native EINT touch) and the current 0329a-0334 USB split/queue line.
+  and native EINT touch), the 0335-0340 ECM chain, the 0348/0349
+  dead-switch retirement and baked defaults, and the 0350/0351 backlight and
+  battery patches.
 - 0142 widens the EP2 IN bulk MPS to 512; 0143 grows each log frame to
   511 bytes (16 B header + up to 495 B text) and resets the TX ring on
   rearm after stopping the QMU. The host-side first-session XACT remains
   open in 0143.
-- The 0131b branch keeps its own workflow and patch list; the current 0334
-  line carries `config/0334.env`, with `config/0131b.env` and
+- The 0131b branch keeps its own workflow and patch list; the current 0351
+  line carries `config/0351.env`, with `config/0131b.env` and
   `config/0131b-boot.cmdline` kept as history.
 - Kernel run `41022192026` built 0143 and matched exec-data `6fa65088...`;
   `41015790742` did the same for 0142 (`99d98d80...`). The 2026-10-29
@@ -73,10 +77,10 @@ ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 python ci/baseline_manifest.py --patches <dest>/xnu/patches \
   --expect-root <manifest-root> --expect-count 82
 python ci/patchset_hash.py <dest>/xnu/patches
-python scripts/verify-local.py --ci-config config/0334.env
+python scripts/verify-local.py --ci-config config/0351.env
 ```
 
-The USB branch passes `--ci-config config/0334.env`.
+The USB branch passes `--ci-config config/0351.env`.
 
 ## Image packaging parameters [measured]
 

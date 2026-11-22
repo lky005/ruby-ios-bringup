@@ -73,6 +73,7 @@ author's layout puts the iOS root on `iosroot`; the upstream path uses
 | DSC | 1080×2400, slice 540×20, 128 bpp | `DDP_COMPONENT_DSC0` |
 | Panel GPIO | reset 40, VDDI 108, VDD 167, LED6 | [DTS] |
 | iOS presentation | 1125×2436 logical, 1080×2400 panel | display-scale=3, offsets 22/18 |
+| Backlight | `AppleARMBacklight` service, DCS `0x51` | MT6877 DSI VM_CMD; v1.2 user-verified, v1.3 console-only |
 
 ## Touch, keys and power
 
