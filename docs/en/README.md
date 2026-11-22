@@ -10,11 +10,11 @@ personal paths, device identifiers or Apple binaries here.
 
 | Item | Value |
 |---|---|
-| Line | 0334 |
-| Patchset | `d87e666f…` (305 files) |
-| Kernel | full `5ee3019d…`, exec-data `61c6b1a1…` (CI `44296779724`) |
-| Image | default `561f1026…` (`x16-0334b4-default.img`), lite `b4b95789…` (`x16-0334b4-lite.img`) |
-| Known limits | host-side data measured on `0x81` only; concurrent multi-EP and non-default RX data unmeasured; 511 B framing; XactErr `0xC0000011`; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep; research bring-up |
+| Line | 0351 |
+| Patchset | `bce06bba…` (316 files) |
+| Kernel | full `e077f36c…`, exec-data `9febbe97…` (CI `45001473122`) |
+| Image | `f0f7d454…` (`x16-blv13.img`, 440 B boot line) |
+| Known limits | backlight v1.3 hand feel and Night Shift not user-accepted; battery touch A/B (`rubybattms=5000`) not run; host-side data measured on `0x81` only; concurrent multi-EP and non-default RX data unmeasured; 511 B framing; XactErr `0xC0000011`; no USB host/audio/Wi-Fi/BT/camera/GPU/RTC/sleep; research bring-up |
 
 See [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md) · [GUARANTEE](../records/GUARANTEE.md).
 

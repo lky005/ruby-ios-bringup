@@ -2,8 +2,8 @@
 
 **English** · [中文](zh/README.md)
 
-> **Current line:** 0334 · patchset `d87e666f…` (305 files) ·
-> exec-data `61c6b1a1…` · images `561f1026…` (default) / `b4b95789…` (lite)
+> **Current line:** 0351 · patchset `bce06bba…` (316 files) ·
+> exec-data `9febbe97…` · image `f0f7d454…` (`x16-blv13.img`, 440 B boot line)
 >
 > **Status legend:** `[measured]` = observed on the named build;
 > `[inferred]` = derived from evidence; `[historical]` = kept for the record.

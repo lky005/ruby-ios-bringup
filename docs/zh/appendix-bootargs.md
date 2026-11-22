@@ -2,10 +2,20 @@
 
 **中文** · [English](../en/appendix-bootargs.md)
 
-> 状态标注沿用[仓库 README](../../README.zh.md)。下表默认值取自 0334
-> 源码（`ruby_usb_probe()` 等）；基线 cmdline 587 B，上限 607 B。
+> 状态标注沿用[仓库 README](../../README.zh.md)。下表默认值取自 0334/0351
+> 源码（`ruby_usb_probe()` 等）；当前 0351 启动行 440 B，上限 607 B。
+> “历史预设”一节是 0332i/0334 时代的值，仅作记录。
 
-## 推荐 cmdline 预设（可直接复制）
+## 当前 0351 启动行（440 B，可直接复制）
+
+```text
+debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0 ufsroot=iosroot ufsrw=1 rootrw=1 sweethw=0 ufslun=2 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1 wdt_test=no_user_checkin sweetfb_noconsole=1 sweetfb_hz=30 ufslogsecs=1 rubyprobe=1 rubypwrap=1 rubkeys=1 rubybatt=1 rubyeint=1 rubymt6360=1 rubyeintirq=1 rubykpdirq=1 rubyeintb1=1 ruby_rxskip=1 rubyreboot=1 rubybacklight=1 rubyblhw=1 rubybattms=1000
+```
+
+该字符串即 `config/0351-boot.cmdline`；不传它时内核默认仍安全（背光关、
+电池 1 s）。
+
+## 历史预设（0332i/0334，可直接复制）
 
 下面三条都是完整的 `--cmdline` 值，来自已验证的 0332i/0334 构建；内核
 默认值未改。
@@ -73,6 +83,9 @@ debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0 ufsroot=iosroot ufs
 | `ruby_iddump=1` | 0 | 启动时身份属性 dump |
 | `rubywinusb=4` | 0 | MS OS 1.0 绑定（0 关、1–3 MS OS 2.0、4 MS OS 1.0） |
 | `rubysetupdump=1` | 0 | SETUP 包追踪 |
+| `rubybacklight=1` | 0 | 创建 `AppleARMBacklight` 服务；本身不写硬件 |
+| `rubyblhw=1` | 0 | 允许 DSI DCS `0x51` 写入 |
+| `rubybattms=N` | 1000 | 电池轮询间隔，500–30000 ms |
 
 ## 不在预设中的 USB 驱动参数（分组）
 

@@ -2,18 +2,21 @@
 
 [English](GUARANTEE.md) · **中文**
 
-**状态 2026-11-06 —— 有单台设备证据的文档化配方。**
-B+NOP 首启 -> A'、CI kernel 启动、0085 真实触摸启动以及 0155/0179 线已在
-作者设备上观察到。0179 线补上原生 EINT14 触摸路径（子 controller + 专用
-IOWorkLoop oneshot），并在同一台设备上于 2026-11-06 观察到。这不是已经
-独立复现的第二台/干净室保证；更详细的测试保证暂缓。
+**状态 2026-11-22 —— 有单台设备证据的文档化配方。**
+B+NOP 首启 -> A'、CI kernel 启动、0085 真实触摸启动以及 0155/0179、0349、
+0351 线已在作者设备上观察到。0351 线新增 DSI 背光与 1 s 电池轮询；其
+v1.3 手感与夜览恢复未获用户验收。这不是已经独立复现的第二台/干净室
+保证；更详细的测试保证暂缓。
 
-**范围说明（2026-11-06）：** 当前线使用 `config/0179.env` 的 pin
-（patchset `10b1e2e8...`，175 文件；exec-data `a4fb021e...`）。0155 线
-使用 `config/0155.env`（patchset `da13b6df...`，exec-data `2e98fd85...`）；
-2026-11-01 探针线使用 `config/0144.env`（patchset `9f7b41cf...`，
-exec-data `62a17d48...`）；0085/0084 成功包为历史。更早的 USB 线使用
-`config/0140.env` 与 `config/0131b.env`，见 `docs/zh/11-ci-baseline.md`。
+**范围说明（2026-11-22）：** 当前线使用 `config/0351.env` 的 pin
+（patchset `bce06bba...`，316 文件；exec-data `9febbe97...`）。0349 线
+使用 `config/0349.env`（patchset `b277f658...`，exec-data `1fa119b0...`）；
+0179 线使用 `config/0179.env`（patchset `10b1e2e8...`，exec-data
+`a4fb021e...`）；0155 线使用 `config/0155.env`（patchset `da13b6df...`，
+exec-data `2e98fd85...`）；2026-11-01 探针线使用 `config/0144.env`
+（patchset `9f7b41cf...`，exec-data `62a17d48...`）；0085/0084 成功包为
+历史。更早的 USB 线使用 `config/0140.env` 与 `config/0131b.env`，见
+`docs/zh/11-ci-baseline.md`。
 
 ## 范围
 
@@ -36,13 +39,15 @@ stock LK -> XNU 8796 -> iOS 16.7.16 用户态
 - 同一设备情况（ruby / MT6877，Android 12 / MIUI 13.0.4，已解锁，slot
   `_a`，分区布局见 `docs/zh/device.md`）；
 - 同一 boot 镜像和 iOS root/ICL 状态（见下方 hash）；
-- 当前线启动参数为 `config/0179-boot.cmdline`（历史真实触摸镜像用
+- 当前线启动参数为 `config/0351-boot.cmdline`（0349 线用
+  `config/0349-boot.cmdline`；历史真实触摸镜像用 `config/0179-boot.cmdline`、
   `config/0155-boot.cmdline` 与 `config/0085-boot.cmdline`；合成上滑镜像用
   `config/0084-boot.cmdline`）；
 - 按 `docs/zh/09-reproduce.md` 和 `docs/zh/05-userland.md` 的步骤操作；
 
-则**预期**能复现成功状态。2026-10-22、2026-11-02（0155）和 2026-11-06
-（0179）在作者一台设备上做过验证；没有做第二台设备或干净室验证。
+则**预期**能复现成功状态。2026-10-22、2026-11-02（0155）、2026-11-06
+（0179）、2026-11-21（0349）与 2026-11-22（0351）在作者一台设备上做过
+验证；没有做第二台设备或干净室验证。
 
 任何一项 hash 不同，本保证不适用；那是一个不同的配置。
 
@@ -51,10 +56,12 @@ stock LK -> XNU 8796 -> iOS 16.7.16 用户态
 | 项 | 值 | 说明 |
 |---|---|---|
 | 基线 | `MakrSas/ios-topaz@5095ac1` | 上游 commit |
-| Patchset（当前线） | `10b1e2e8...` | 175 个文件；recipe 输出；workflow 只认这个哈希 |
-| 当前内核 | `2b008e52...` | exec-data `a4fb021e...`；CI `42114854911`；gate rerun `42115985782`；host-checks `42115991259` |
-| 当前镜像 | `d438ba47...` | payload `72fc737c...`；外部文件，不在仓库里 |
-| 当前启动参数 | `config/0179-boot.cmdline` | 原生 EINT 触摸、按键、电池、USB 探针/热插拔 |
+| Patchset（当前线） | `bce06bba...` | 316 个文件；recipe 输出；workflow 只认这个哈希 |
+| 当前内核 | `e077f36c...` | exec-data `9febbe97...`；CI `45001473122` |
+| 当前镜像 | `f0f7d454...` | `x16-blv13.img`，440 B 启动行；外部文件，不在仓库里 |
+| 当前启动参数 | `config/0351-boot.cmdline` | 0349 默认值 + 背光 + 1 s 电池轮询 |
+| 0349 线（上一版） | `b277f658...` | 314 个文件；exec-data `1fa119b0...`；镜像 `514ea382...`；`config/0349.env` |
+| 0179 线（历史） | `10b1e2e8...` | 175 个文件；exec-data `a4fb021e...`；镜像 `d438ba47...`；`config/0179.env` |
 | 0155 线（历史） | `da13b6df...` | 151 个文件；exec-data `2e98fd85...`；镜像 `3b44c0e2...`；`config/0155.env` |
 | 2026-11-01 探针线 | `9f7b41cf...` | 141 个文件；exec-data `62a17d48...`；镜像 `66352038...`；`config/0144.env` |
 | Patchset（0085） | `cf4008e3...` | 88 个文件；与 harness 构建一致 |
