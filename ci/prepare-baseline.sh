@@ -305,6 +305,8 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0340-bootarg-parse-fix.patch" \
     "$ROOT/patches/0348-ruby-usb-dead-switches.patch" \
     "$ROOT/patches/0349-ruby-usb-defaults-cmdline-slim.patch" \
+    "$ROOT/patches/0350-ruby-battery-poll-v1.patch" \
+    "$ROOT/patches/0351-sweetfb-backlight-dsi.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
