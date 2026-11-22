@@ -24,7 +24,7 @@
 | 项 | 值 |
 |---|---|
 | 补丁集 | `bce06bba` —— 316 文件，CI 门禁 |
-| 内核 | exec-data `9febbe97`（CI `45001473122`）；完整哈希见 VERIFICATION |
+| 内核 | exec-data `9febbe97`（CI `45001473122`；门禁二跑 `45003136758`）；完整哈希见 VERIFICATION |
 | 设备镜像 | `f0f7d454`（`x16-blv13.img`），440 B 启动行 |
 | 标签 | `v0.9.0` / `p4-bl-batt-final` |
 

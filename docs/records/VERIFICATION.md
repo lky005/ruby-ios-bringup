@@ -44,6 +44,7 @@ must not appear in the public tree:
 |---|---|
 | Patchset (0351) | `bce06bba...` (316 files); prepare-baseline `baseline ready`; the 314-file list reproduces `b277f658...` |
 | Kernel (0351) | full `e077f36c...`, exec-data `9febbe97...`; xnu `45001473122` (success, 18,623,000 B); `SHA256SUMS` OK |
+| Gate rerun (0351) | xnu `45003136758` (success, 6m42s); `Kernel hash gate` success with the pinned exec-data |
 | Content markers | `SWEET BL:` 13; `rubybacklight`, `rubyblhw`, `rubybattms`, `SWEET BATTERY: ruby poll` each 1; `rubyfblog`/`rubybltest`/`G1b` 0 |
 | Device backlight | G1b 409/2048/409 PASS; v1.2 user-verified (50% ~= 470 lx, 100% ~= 1700 lx); v1.3 LUT/ramp console only; hand feel and Night Shift not accepted |
 | Device battery | 1 s polling; 100 -> 97% on unplug; no I2C5/lock errors; touch A/B not run |

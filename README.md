@@ -28,7 +28,7 @@ Shift are not user-accepted.
 | Pin | Value |
 |---|---|
 | Patchset | `bce06bba` — 316 files, gated in CI |
-| Kernel | exec-data `9febbe97` (CI `45001473122`); full hash in VERIFICATION |
+| Kernel | exec-data `9febbe97` (CI `45001473122`; gate rerun `45003136758`); full hash in VERIFICATION |
 | Device image | `f0f7d454` (`x16-blv13.img`), 440 B boot line |
 | Tags | `v0.9.0` / `p4-bl-batt-final` |
 
