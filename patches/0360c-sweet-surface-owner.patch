@@ -1,0 +1,89 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 7f90c56..64eb74e 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -39,6 +39,8 @@
+ #include <libkern/c++/OSNumber.h>
+ #include <libkern/c++/OSUnserialize.h>
+ #include <sys/proc.h>
++#include <kern/task.h>
++#include <kern/task_ref.h>
+ 
+ enum {
+ 	kSweetSurfaceCreate             = 0,
+@@ -80,6 +82,10 @@ OSDefineMetaClassAndStructors(SweetSurface, OSObject);
+ void
+ SweetSurface::free()
+ {
++	if (owner_task != TASK_NULL) {
++		task_deallocate(owner_task);
++		owner_task = TASK_NULL;
++	}
+ 	if (OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
+ 		OSAddAtomic64(-(SInt64)allocSize, (volatile SInt64 *)&sweet_surface_wired);
+ 	}
+@@ -183,6 +189,12 @@ sweet_surface_copy(uint32_t id)
+ 	return s;
+ }
+ 
++bool
++sweet_surface_owned_by(SweetSurface *s, task_t task)
++{
++	return s != NULL && task != TASK_NULL && s->owner_task == task;
++}
++
+ /* The table lock; the framebuffer may publish a surface before the root starts. */
+ static void
+ sweet_surface_init_lock(void)
+@@ -204,6 +216,7 @@ sweet_surface_alloc(void)
+ 		OSSafeReleaseNULL(s);
+ 		return NULL;
+ 	}
++	s->owner_task = TASK_NULL;
+ 	s->state = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
+ 	    kIODirectionInOut | kIOMemoryKernelUserShared, page_size, page_size);
+ 	if (s->state == NULL) {
+@@ -232,6 +245,8 @@ sweet_surface_create_physical(uint64_t phys, uint32_t width, uint32_t height,
+ 	if (s == NULL) {
+ 		return NULL;
+ 	}
++	s->owner_task = kernel_task;
++	task_reference(kernel_task);
+ 	s->width = width;
+ 	s->height = height;
+ 	s->bytesPerRow = bytesPerRow;
+@@ -682,6 +697,10 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 		props->release();
+ 		return kIOReturnNoMemory;
+ 	}
++	s->owner_task = fTask;
++	if (fTask != TASK_NULL) {
++		task_reference(fTask);
++	}
+ 	s->parentID = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
+ 	ret = sweet_surface_layout(s, props);
+ 	if (ret == kIOReturnSuccess) {
+diff --git a/iokit/Kernel/arm/SweetSurface.h b/iokit/Kernel/arm/SweetSurface.h
+index fbcdfac..9756666 100644
+--- a/iokit/Kernel/arm/SweetSurface.h
++++ b/iokit/Kernel/arm/SweetSurface.h
+@@ -39,6 +39,7 @@ public:
+ 	IOOptionBits              mapCache;     /* cache mode for user mappings */
+ 	IOBufferMemoryDescriptor *state;        /* shared state page, read-only for users */
+ 	IOMemoryMap              *kernelMap;    /* lazily created for kernel copies */
++	task_t                    owner_task;   /* task that created/published it */
+ 
+ 	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
+ 	void free() APPLE_KEXT_OVERRIDE;
+@@ -50,6 +51,11 @@ public:
+ /* Retained surface for an id, or NULL. */
+ SweetSurface *sweet_surface_copy(uint32_t id);
+ 
++/* True when task created this surface and may import its memory into a GPU
++ * BO. Surfaces published by the kernel (the panel framebuffer) are owned by
++ * kernel_task and never importable by user tasks. */
++bool sweet_surface_owned_by(SweetSurface *surface, task_t task);
++
+ /*
+  * Publish physical memory (the panel framebuffer) as a surface. Returns a
+  * retained surface that stays in the id table until released by the caller

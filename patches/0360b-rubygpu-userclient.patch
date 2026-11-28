@@ -1,0 +1,625 @@
+diff --git a/iokit/Kernel/arm/RubyGPUUserAPI.h b/iokit/Kernel/arm/RubyGPUUserAPI.h
+new file mode 100644
+index 0000000..a2f42fd
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGPUUserAPI.h
+@@ -0,0 +1,153 @@
++#ifndef _RUBYGPU_USERAPI_H
++#define _RUBYGPU_USERAPI_H
++
++/*
++ * RubyGPU user client ABI (P3.2). Plain C types so the same header
++ * compiles in the XNU kernel and in the iOS test program.
++ */
++
++#define RUBYGPU_UC_VERSION     1u
++#define RUBYGPU_MAX_BO_SIZE    (64ull << 20)
++#define RUBYGPU_JOB_TIMEOUT_MS 1000u
++
++enum {
++	RUBYGPU_OK = 0,
++	RUBYGPU_E_ARG = 1,
++	RUBYGPU_E_NORES = 2,
++	RUBYGPU_E_NOPWR = 3,
++	RUBYGPU_E_TIMEOUT = 4,
++	RUBYGPU_E_NOENT = 5,
++	RUBYGPU_E_BUSY = 6,
++	RUBYGPU_E_IO = 7,
++	RUBYGPU_E_PERM = 8,
++};
++
++enum {
++	kRubyGPUMethodGetParam = 0,
++	kRubyGPUMethodBOCreate = 1,
++	kRubyGPUMethodBORelease = 2,
++	kRubyGPUMethodBOSync = 3,
++	kRubyGPUMethodVMCreate = 4,
++	kRubyGPUMethodVMDestroy = 5,
++	kRubyGPUMethodVMBind = 6,
++	kRubyGPUMethodVMUnbind = 7,
++	kRubyGPUMethodSubmit = 8,
++	kRubyGPUMethodBOCreateFromSurface = 9,
++	kRubyGPUMethodCount
++};
++
++enum {
++	kRubyGPUParamVAStart = 0,
++	kRubyGPUParamVARange = 1,
++	kRubyGPUParamPowered = 2,
++	kRubyGPUParamIRQIntID = 3,
++	kRubyGPUParamVersion = 4,
++};
++
++enum {
++	kRubyGPUBOFlagLow4G = 1u << 0,
++};
++
++enum {
++	kRubyGPUSyncOut = 0,
++	kRubyGPUSyncIn = 1,
++	kRubyGPUSyncInOut = 2,
++};
++
++struct ruby_gpu_get_param_req {
++	unsigned int param;
++	unsigned int reserved;
++};
++
++struct ruby_gpu_get_param_rep {
++	unsigned long long value;
++};
++
++struct ruby_gpu_bo_create_req {
++	unsigned long long size;
++	unsigned int flags;
++	unsigned int reserved;
++};
++
++struct ruby_gpu_bo_create_rep {
++	unsigned int handle;
++	unsigned int status;
++	unsigned long long phys;
++};
++
++struct ruby_gpu_bo_create_from_surface_req {
++	unsigned int surface_id;
++	unsigned int flags;
++	unsigned long long size;        /* 0 = surface allocSize */
++};
++
++struct ruby_gpu_bo_create_from_surface_rep {
++	unsigned int handle;
++	unsigned int status;
++	unsigned long long size;
++};
++
++struct ruby_gpu_bo_release_req {
++	unsigned int handle;
++	unsigned int reserved;
++};
++
++struct ruby_gpu_bo_sync_req {
++	unsigned int handle;
++	unsigned int dir;
++	unsigned long long offset;
++	unsigned long long size;
++};
++
++struct ruby_gpu_vm_create_req {
++	unsigned long long va_start;
++	unsigned long long va_size;
++	unsigned int flags;
++	unsigned int reserved;
++};
++
++struct ruby_gpu_vm_create_rep {
++	unsigned int handle;
++	unsigned int status;
++};
++
++struct ruby_gpu_vm_destroy_req {
++	unsigned int handle;
++	unsigned int reserved;
++};
++
++struct ruby_gpu_vm_bind_req {
++	unsigned int vm;
++	unsigned int bo;
++	unsigned long long va;
++	unsigned long long bo_offset;
++	unsigned long long size;
++};
++
++struct ruby_gpu_vm_unbind_req {
++	unsigned int vm;
++	unsigned int reserved;
++	unsigned long long va;
++	unsigned long long size;
++};
++
++struct ruby_gpu_submit_req {
++	unsigned int vm;
++	unsigned int flags;
++	unsigned long long job_va;
++	unsigned int timeout_ms;
++	unsigned int reserved;
++};
++
++struct ruby_gpu_submit_rep {
++	unsigned int status;
++	unsigned int hits;
++	unsigned int spur;
++	unsigned int raw;
++	unsigned int jstat;
++	unsigned int js;
++	unsigned int girq;
++	unsigned int mirq;
++};
++
++#endif /* _RUBYGPU_USERAPI_H */
+\ No newline at end of file
+diff --git a/iokit/Kernel/arm/RubyGPUUserClient.cpp b/iokit/Kernel/arm/RubyGPUUserClient.cpp
+new file mode 100644
+index 0000000..131a321
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGPUUserClient.cpp
+@@ -0,0 +1,401 @@
++/*
++ * RubyGPUUserClient: P3.2 UAPI over the RubyGPU/Mali JS0 path.
++ * See docs/254. Single client, single active AS.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOService.h>
++#include <pexpert/pexpert.h>
++
++#include "RubyGPU.h"
++#include "RubyGPUUserClient.h"
++
++#define super IOUserClient
++OSDefineMetaClassAndStructors(RubyGPUUserClient, IOUserClient);
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/* rubygpudiag=1 UAPI tracing (default off), capped like the filter log. */
++static bool
++ruby_gpu_diag(void)
++{
++	static int state = -1;
++	static uint32_t lines;
++
++	if (state < 0) {
++		int on = 0;
++		PE_parse_boot_argn("rubygpudiag", &on, sizeof(on));
++		state = (on != 0) ? 1 : 0;
++	}
++	if (state == 0 || lines >= 400) {
++		return false;
++	}
++	lines++;
++	return true;
++}
++#endif
++
++static IOReturn
++ruby_gpu_status_to_io(int status)
++{
++	switch (status) {
++	case RUBYGPU_OK:
++		return kIOReturnSuccess;
++	case RUBYGPU_E_ARG:
++		return kIOReturnBadArgument;
++	case RUBYGPU_E_NORES:
++		return kIOReturnNoResources;
++	case RUBYGPU_E_NOPWR:
++		return kIOReturnNotReady;
++	case RUBYGPU_E_TIMEOUT:
++		return kIOReturnTimeout;
++	case RUBYGPU_E_NOENT:
++		return kIOReturnNotFound;
++	case RUBYGPU_E_BUSY:
++		return kIOReturnBusy;
++	default:
++		return kIOReturnError;
++	}
++}
++
++bool
++RubyGPUUserClient::initWithTask(task_t owningTask, void *securityToken,
++    UInt32 type, OSDictionary *properties)
++{
++	fClientID = 0;
++	return IOUserClient::initWithTask(owningTask, securityToken, type,
++	    properties);
++}
++
++static inline uint32_t
++ruby_gpu_uc_client(OSObject *target)
++{
++	RubyGPUUserClient *uc = (RubyGPUUserClient *)target;
++
++	return (uc != NULL) ? uc->clientID() : 0;
++}
++
++IOReturn
++RubyGPUUserClient::clientClose(void)
++{
++	if (fClientID != 0) {
++		ruby_gpu_reset_resources(fClientID);
++		ruby_gpu_client_close(fClientID);
++		fClientID = 0;
++	}
++	if (!isInactive()) {
++		terminate();
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyGPUUserClient::clientDied(void)
++{
++	return clientClose();
++}
++
++IOReturn
++RubyGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
++    IOMemoryDescriptor **memory)
++{
++	IOMemoryDescriptor *md;
++
++	if (memory == NULL) {
++		return kIOReturnBadArgument;
++	}
++	md = ruby_gpu_bo_descriptor(fClientID, type);
++	if (md == NULL) {
++		return kIOReturnBadArgument;
++	}
++	if (options != NULL) {
++		*options = 0;
++	}
++	*memory = md;      /* reference held by ruby_gpu_bo_descriptor() */
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RubyGPUUserClient::methodGetParam(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_get_param_req *req;
++	struct ruby_gpu_get_param_rep *rep;
++	uint64_t value = 0;
++	int status;
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_get_param_req *)args->structureInput;
++	rep = (struct ruby_gpu_get_param_rep *)args->structureOutput;
++	if (req == NULL || rep == NULL) {
++		return kIOReturnBadArgument;
++	}
++	status = ruby_gpu_param(req->param, &value);
++	rep->value = value;
++	return ruby_gpu_status_to_io(status);
++}
++
++IOReturn
++RubyGPUUserClient::methodBOCreate(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_bo_create_req *req;
++	struct ruby_gpu_bo_create_rep *rep;
++	uint32_t handle = 0;
++	uint64_t phys = 0;
++	int status;
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_bo_create_req *)args->structureInput;
++	rep = (struct ruby_gpu_bo_create_rep *)args->structureOutput;
++	if (req == NULL || rep == NULL) {
++		return kIOReturnBadArgument;
++	}
++	status = ruby_gpu_bo_create(ruby_gpu_uc_client(target), req->size,
++	    req->flags, &handle, &phys);
++	rep->handle = handle;
++	rep->status = (uint32_t)status;
++	rep->phys = phys;
++	return ruby_gpu_status_to_io(status);
++}
++
++IOReturn
++RubyGPUUserClient::methodBOCreateFromSurface(OSObject *target,
++    void *reference, IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_bo_create_from_surface_req *req;
++	struct ruby_gpu_bo_create_from_surface_rep *rep;
++	uint32_t handle = 0;
++	uint64_t size_out = 0;
++	int status;
++
++	(void)reference;
++	req = (const struct ruby_gpu_bo_create_from_surface_req *)
++	    args->structureInput;
++	rep = (struct ruby_gpu_bo_create_from_surface_rep *)
++	    args->structureOutput;
++	if (req == NULL || rep == NULL) {
++		return kIOReturnBadArgument;
++	}
++	status = ruby_gpu_bo_create_from_surface(ruby_gpu_uc_client(target),
++	    req->surface_id, req->flags, req->size, &handle, &size_out, NULL);
++	rep->handle = handle;
++	rep->status = (uint32_t)status;
++	rep->size = size_out;
++	return ruby_gpu_status_to_io(status);
++}
++
++IOReturn
++RubyGPUUserClient::methodBORelease(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_bo_release_req *req;
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_bo_release_req *)args->structureInput;
++	if (req == NULL) {
++		return kIOReturnBadArgument;
++	}
++	return ruby_gpu_status_to_io(ruby_gpu_bo_release(
++	    ruby_gpu_uc_client(target), req->handle));
++}
++
++IOReturn
++RubyGPUUserClient::methodBOSync(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_bo_sync_req *req;
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_bo_sync_req *)args->structureInput;
++	if (req == NULL) {
++		return kIOReturnBadArgument;
++	}
++	return ruby_gpu_status_to_io(ruby_gpu_bo_sync(
++	    ruby_gpu_uc_client(target), req->handle, req->offset, req->size,
++	    req->dir));
++}
++
++IOReturn
++RubyGPUUserClient::methodVMCreate(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_vm_create_req *req;
++	struct ruby_gpu_vm_create_rep *rep;
++	uint32_t handle = 0;
++	int status;
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_vm_create_req *)args->structureInput;
++	rep = (struct ruby_gpu_vm_create_rep *)args->structureOutput;
++	if (req == NULL || rep == NULL) {
++		return kIOReturnBadArgument;
++	}
++	status = ruby_gpu_vm_create(ruby_gpu_uc_client(target), req->va_start,
++	    req->va_size, &handle);
++	rep->handle = handle;
++	rep->status = (uint32_t)status;
++	return ruby_gpu_status_to_io(status);
++}
++
++IOReturn
++RubyGPUUserClient::methodVMDestroy(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_vm_destroy_req *req;
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_vm_destroy_req *)args->structureInput;
++	if (req == NULL) {
++		return kIOReturnBadArgument;
++	}
++	return ruby_gpu_status_to_io(ruby_gpu_vm_destroy(
++	    ruby_gpu_uc_client(target), req->handle));
++}
++
++IOReturn
++RubyGPUUserClient::methodVMBind(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_vm_bind_req *req;
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_vm_bind_req *)args->structureInput;
++	if (req == NULL) {
++		return kIOReturnBadArgument;
++	}
++	return ruby_gpu_status_to_io(ruby_gpu_vm_bind(
++	    ruby_gpu_uc_client(target), req->vm, req->bo, req->va,
++	    req->bo_offset, req->size));
++}
++
++IOReturn
++RubyGPUUserClient::methodVMUnbind(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_vm_unbind_req *req;
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_vm_unbind_req *)args->structureInput;
++	if (req == NULL) {
++		return kIOReturnBadArgument;
++	}
++	return ruby_gpu_status_to_io(ruby_gpu_vm_unbind(
++	    ruby_gpu_uc_client(target), req->vm, req->va, req->size));
++}
++
++IOReturn
++RubyGPUUserClient::methodSubmit(OSObject *target, void *reference,
++    IOExternalMethodArguments *args)
++{
++	const struct ruby_gpu_submit_req *req;
++	struct ruby_gpu_submit_rep *rep;
++	int status;
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	bool diag;
++#endif
++
++	(void)target;
++	(void)reference;
++	req = (const struct ruby_gpu_submit_req *)args->structureInput;
++	rep = (struct ruby_gpu_submit_rep *)args->structureOutput;
++	if (req == NULL || rep == NULL) {
++		return kIOReturnBadArgument;
++	}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	diag = ruby_gpu_diag();
++	if (diag) {
++		RubyGPUUserClient *uc = (RubyGPUUserClient *)target;
++		IOLog("RGDIAG submit vm=%u flags=0x%x job=0x%llx to=%u "
++		    "inactive=%d enter\n", req->vm, req->flags,
++		    req->job_va, req->timeout_ms,
++		    (uc != NULL && uc->isInactive()) ? 1 : 0);
++	}
++#endif
++	status = ruby_gpu_submit(ruby_gpu_uc_client(target), req->vm, req->job_va,
++	    req->flags, req->timeout_ms, rep);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (diag) {
++		IOLog("RGDIAG submit st=%d hits=%u spur=%u raw=0x%x "
++		    "jstat=0x%x js=0x%x girq=0x%x mirq=0x%x exit\n",
++		    status, rep->hits, rep->spur, rep->raw, rep->jstat,
++		    rep->js, rep->girq, rep->mirq);
++	}
++#endif
++	return ruby_gpu_status_to_io(status);
++}
++
++static const IOExternalMethodDispatch sMethods[kRubyGPUMethodCount] = {
++	/* GetParam */
++	{ &RubyGPUUserClient::methodGetParam, 0,
++	  sizeof(struct ruby_gpu_get_param_req), 0,
++	  sizeof(struct ruby_gpu_get_param_rep) },
++	/* BOCreate */
++	{ &RubyGPUUserClient::methodBOCreate, 0,
++	  sizeof(struct ruby_gpu_bo_create_req), 0,
++	  sizeof(struct ruby_gpu_bo_create_rep) },
++	/* BORelease */
++	{ &RubyGPUUserClient::methodBORelease, 0,
++	  sizeof(struct ruby_gpu_bo_release_req), 0, 0 },
++	/* BOSync */
++	{ &RubyGPUUserClient::methodBOSync, 0,
++	  sizeof(struct ruby_gpu_bo_sync_req), 0, 0 },
++	/* VMCreate */
++	{ &RubyGPUUserClient::methodVMCreate, 0,
++	  sizeof(struct ruby_gpu_vm_create_req), 0,
++	  sizeof(struct ruby_gpu_vm_create_rep) },
++	/* VMDestroy */
++	{ &RubyGPUUserClient::methodVMDestroy, 0,
++	  sizeof(struct ruby_gpu_vm_destroy_req), 0, 0 },
++	/* VMBind */
++	{ &RubyGPUUserClient::methodVMBind, 0,
++	  sizeof(struct ruby_gpu_vm_bind_req), 0, 0 },
++	/* VMUnbind */
++	{ &RubyGPUUserClient::methodVMUnbind, 0,
++	  sizeof(struct ruby_gpu_vm_unbind_req), 0, 0 },
++	/* Submit */
++	{ &RubyGPUUserClient::methodSubmit, 0,
++	  sizeof(struct ruby_gpu_submit_req), 0,
++	  sizeof(struct ruby_gpu_submit_rep) },
++	/* BOCreateFromSurface */
++	{ &RubyGPUUserClient::methodBOCreateFromSurface, 0,
++	  sizeof(struct ruby_gpu_bo_create_from_surface_req), 0,
++	  sizeof(struct ruby_gpu_bo_create_from_surface_rep) },
++};
++
++IOReturn
++RubyGPUUserClient::externalMethod(uint32_t selector,
++    IOExternalMethodArguments *args, IOExternalMethodDispatch *dispatch,
++    OSObject *target, void *reference)
++{
++	IOReturn ret;
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	bool diag = ruby_gpu_diag();
++	if (diag) {
++		IOLog("RGDIAG uc sel=%u inactive=%d enter\n",
++		    selector, isInactive() ? 1 : 0);
++	}
++#endif
++	if (selector < (uint32_t)kRubyGPUMethodCount) {
++		dispatch = const_cast<IOExternalMethodDispatch *>(
++		    &sMethods[selector]);
++		target = this;
++		reference = NULL;
++	}
++	ret = IOUserClient::externalMethod(selector, args, dispatch, target,
++	    reference);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (diag) {
++		IOLog("RGDIAG uc sel=%u ret=0x%x exit\n", selector, ret);
++	}
++#endif
++	return ret;
++}
+\ No newline at end of file
+diff --git a/iokit/Kernel/arm/RubyGPUUserClient.h b/iokit/Kernel/arm/RubyGPUUserClient.h
+new file mode 100644
+index 0000000..09ac772
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGPUUserClient.h
+@@ -0,0 +1,50 @@
++#ifndef _RUBYGPU_USERCLIENT_H
++#define _RUBYGPU_USERCLIENT_H
++
++#include <IOKit/IOUserClient.h>
++
++#include "RubyGPUUserAPI.h"
++
++class RubyGPUUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(RubyGPUUserClient);
++
++public:
++	bool initWithTask(task_t owningTask, void *securityToken, UInt32 type,
++	    OSDictionary *properties) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn clientDied(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++	IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options,
++	    IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
++
++	void setClientID(uint32_t id) { fClientID = id; }
++	uint32_t clientID(void) const { return fClientID; }
++
++	static IOReturn methodGetParam(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++	static IOReturn methodBOCreate(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++	static IOReturn methodBOCreateFromSurface(OSObject *target,
++	    void *reference, IOExternalMethodArguments *args);
++	static IOReturn methodBORelease(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++	static IOReturn methodBOSync(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++	static IOReturn methodVMCreate(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++	static IOReturn methodVMDestroy(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++	static IOReturn methodVMBind(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++	static IOReturn methodVMUnbind(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++	static IOReturn methodSubmit(OSObject *target, void *reference,
++	    IOExternalMethodArguments *args);
++
++private:
++	uint32_t fClientID;
++};
++
++#endif /* _RUBYGPU_USERCLIENT_H */
+\ No newline at end of file

@@ -1,0 +1,174 @@
+diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
+index b40eccd..d8139ae 100644
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -16,16 +16,161 @@
+ #include <sys/systm.h>
+ #include <sys/proc.h>
+ #include <sys/proc_internal.h>
++#include <sys/sysctl.h>
+ #include <kern/task.h>
+ #include <kern/thread.h>
++#include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ 
+ extern task_t proc_task(proc_t);
+ extern int hz;
+ extern void sweet_sample_start(void);
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ 
+ static char sweet_sample_names[128];
+ 
++/*
++ * SWEET B4a: read-only CPU clock probe. Maps APMIXED (ARMPLL CON1) and MCUCFG
++ * (CKDIV1) once and reads them; nothing here writes a clock or a rail.
++ */
++#define SWEET_APMIXED_BASE       0x1000c000UL
++#define SWEET_MCUCFG_BASE        0x0c530000UL
++#define SWEET_ARMPLL_LL_CON1     0x20c
++#define SWEET_ARMPLL_L_CON1      0x21c
++#define SWEET_CCIPLL_CON1        0x23c
++#define SWEET_CKDIV1_LL_CFG      0xa2a0
++#define SWEET_CKDIV1_L_CFG       0xa2a4
++#define SWEET_CKDIV1_CCI_CFG     0xa2e0
++
++static volatile uint32_t *sweet_apmixed;
++static volatile uint32_t *sweet_mcucfg;
++
++static void
++sweet_cpuclock_map(void)
++{
++	if (sweet_apmixed == NULL) {
++		sweet_apmixed = (volatile uint32_t *)ml_io_map(SWEET_APMIXED_BASE, 0x1000);
++	}
++	if (sweet_mcucfg == NULL) {
++		sweet_mcucfg = (volatile uint32_t *)ml_io_map(SWEET_MCUCFG_BASE, 0x10000);
++	}
++}
++
++static uint32_t
++sweet_pll_core_khz(uint32_t con1, uint32_t ckdiv1)
++{
++	uint32_t khz = (((con1 & 0x3fffff) * 26) >> 14) * 1000;
++	switch ((con1 >> 24) & 7) {
++	case 0:
++		break;
++	case 1:
++		khz /= 2;
++		break;
++	case 2:
++		khz /= 4;
++		break;
++	case 3:
++		khz /= 8;
++		break;
++	default:
++		khz /= 16;
++		break;
++	}
++	switch ((ckdiv1 >> 17) & 0x1f) {
++	case 8:
++		break;
++	case 9:
++		khz = khz * 3 / 4;
++		break;
++	case 10:
++		khz = khz * 2 / 4;
++		break;
++	case 11:
++		khz = khz * 1 / 4;
++		break;
++	case 16:
++		break;
++	case 17:
++		khz = khz * 4 / 5;
++		break;
++	case 18:
++		khz = khz * 3 / 5;
++		break;
++	case 19:
++		khz = khz * 2 / 5;
++		break;
++	case 20:
++		khz = khz * 1 / 5;
++		break;
++	case 24:
++		break;
++	case 25:
++		khz = khz * 5 / 6;
++		break;
++	case 26:
++		khz = khz * 4 / 6;
++		break;
++	case 27:
++		khz = khz * 3 / 6;
++		break;
++	case 28:
++		khz = khz * 2 / 6;
++		break;
++	case 29:
++		khz = khz * 1 / 6;
++		break;
++	default:
++		break;
++	}
++	return khz;
++}
++
++static void
++sweet_cpuclock_format(char *buf, size_t len)
++{
++	sweet_cpuclock_map();
++	if (sweet_apmixed == NULL || sweet_mcucfg == NULL) {
++		snprintf(buf, len, "SWEET CPUCLOCK map failed\n");
++		return;
++	}
++	uint32_t con_ll = sweet_apmixed[SWEET_ARMPLL_LL_CON1 / 4];
++	uint32_t con_l = sweet_apmixed[SWEET_ARMPLL_L_CON1 / 4];
++	uint32_t con_cci = sweet_apmixed[SWEET_CCIPLL_CON1 / 4];
++	uint32_t ck_ll = sweet_mcucfg[SWEET_CKDIV1_LL_CFG / 4];
++	uint32_t ck_l = sweet_mcucfg[SWEET_CKDIV1_L_CFG / 4];
++	uint32_t ck_cci = sweet_mcucfg[SWEET_CKDIV1_CCI_CFG / 4];
++
++	snprintf(buf, len,
++	    "SWEET CPUCLOCK LL vco=%u post=%u ck=%u core=%u kHz con1=%08x ckdiv=%08x\n"
++	    "SWEET CPUCLOCK L vco=%u post=%u ck=%u core=%u kHz con1=%08x ckdiv=%08x\n"
++	    "SWEET CPUCLOCK CCI vco=%u post=%u ck=%u core=%u kHz con1=%08x ckdiv=%08x\n",
++	    (((con_ll & 0x3fffff) * 26) >> 14) * 1000, (con_ll >> 24) & 7, (ck_ll >> 17) & 0x1f,
++	    sweet_pll_core_khz(con_ll, ck_ll), con_ll, ck_ll,
++	    (((con_l & 0x3fffff) * 26) >> 14) * 1000, (con_l >> 24) & 7, (ck_l >> 17) & 0x1f,
++	    sweet_pll_core_khz(con_l, ck_l), con_l, ck_l,
++	    (((con_cci & 0x3fffff) * 26) >> 14) * 1000, (con_cci >> 24) & 7, (ck_cci >> 17) & 0x1f,
++	    sweet_pll_core_khz(con_cci, ck_cci), con_cci, ck_cci);
++}
++
++static int
++sweet_cpuclock_sysctl SYSCTL_HANDLER_ARGS
++{
++	char buf[512];
++	sweet_cpuclock_format(buf, sizeof(buf));
++	return sysctl_handle_string(oidp, buf, sizeof(buf), req);
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, sweet_cpuclock, CTLTYPE_STRING | CTLFLAG_RD,
++    0, 0, sweet_cpuclock_sysctl, "A", "SWEET CPU clock (read-only)");
++
++static void
++sweet_cpuclock_print(void)
++{
++	char buf[512];
++	sweet_cpuclock_format(buf, sizeof(buf));
++	printf("%s", buf);
++}
++
+ static bool
+ sweet_sample_wanted(const char *name)
+ {
+@@ -64,6 +209,7 @@ static void
+ sweet_sample_thread(__unused void *arg, __unused wait_result_t wr)
+ {
+ 	static int chan;
++	sweet_cpuclock_print();
+ 	if (!PE_parse_boot_argn("sweetsample", sweet_sample_names, sizeof(sweet_sample_names))) {
+ 		strlcpy(sweet_sample_names, "SpringBoard,backboardd", sizeof(sweet_sample_names));
+ 	}
