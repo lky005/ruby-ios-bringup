@@ -81,6 +81,7 @@ release; the lab line runs stable at `live_buf=5 live_tex=31 imports=4`.
 | P3.1/P3.2 driver + userclient | PASS on device (UAPI round-trips, submit `kr=0`) |
 | P3.4 display | PASS: native 1080×2400 swap through the panel surface (SG BO allocation) |
 | P3.5 PanVK | PASS: GL test renders; ~26 fps batch-sync baseline |
+| P3.6 PanVK submit | PASS: batch-sync path retained (double-buffering reverted); ~26 fps baseline unchanged |
 | Metal shim (M0–M9b v12) | Research: plugin loads, red probe on screen, real composition WIP |
 | 0360 kernel | CI-verified only, never booted |
 

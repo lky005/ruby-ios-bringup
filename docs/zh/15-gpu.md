@@ -74,6 +74,7 @@ BO 记账有上限（`rubygpubomax`、`rubygpuvmpages`）并配合用户态释�
 | P3.1/P3.2 驱动 + userclient | 设备 PASS（UAPI 往返、submit `kr=0`） |
 | P3.4 显示 | PASS：经面板表面原生 1080×2400 交换（SG BO 分配） |
 | P3.5 PanVK | PASS：GL 测试渲染；~26 fps batch-sync 基线 |
+| P3.6 PanVK 提交 | PASS：保留 batch-sync 路径（双缓冲回退）；~26 fps 基线不变 |
 | Metal 垫片（M0–M9b v12） | 研究态：插件可加载、红探针上屏、真实合成 WIP |
 | 0360 内核 | 仅 CI 验证，从未上机 |
 
