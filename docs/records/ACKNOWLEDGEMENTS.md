@@ -19,6 +19,10 @@ copied into this repository; the pinned baseline is fetched at build time.
   implemented from the Xiaomi DTS and the vendor `kpd.c`; the roadmap's
   planned adaptation of its `redwood_mtkkeys.c` was not used, and no code is
   copied.
+- [vanyamlb/agate-ios-bringup](https://github.com/vanyamlb/agate-ios-bringup) —
+  a MediaTek bring-up whose USB/ECM notes and the staged
+  `0497-stage-ionet.sh` script informed the ruby USB line (0496–0500
+  lineage); reference only, no kernel code is copied.
 - [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build) —
   the MIT-licensed XNU build harness used by the workflow.
 - [Apple XNU](https://github.com/apple-oss-distributions/xnu) — the open-source

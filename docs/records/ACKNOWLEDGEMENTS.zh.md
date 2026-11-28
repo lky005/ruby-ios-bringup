@@ -16,6 +16,9 @@ commit 拉取基线。
   KPD/pwrap/connsys 与数据卷决策的**只读对比**；其内核驱动为 APSL-2.0。
   0150/0169 按键按 Xiaomi DTS 与 vendor `kpd.c` 实现；路线图中计划改编的
   `redwood_mtkkeys.c` **未采用**，未复制任何代码。
+- [vanyamlb/agate-ios-bringup](https://github.com/vanyamlb/agate-ios-bringup) —
+  一个 MediaTek bring-up：其 USB/ECM 笔记与 `0497-stage-ionet.sh` staging
+  脚本为 ruby USB 线（0496–0500 谱系）提供参考；仅作参考，未复制内核代码。
 - [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build) —
   workflow 使用的 MIT 许可 XNU 构建框架。
 - [Apple XNU](https://github.com/apple-oss-distributions/xnu) — 开源内核；
