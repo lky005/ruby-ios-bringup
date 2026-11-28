@@ -20,10 +20,10 @@ index 8d31799..7f6d8b4 100644
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
 diff --git a/iokit/Kernel/arm/SweetGPUProbe.cpp b/iokit/Kernel/arm/SweetGPUProbe.cpp
 new file mode 100644
-index 0000000..aa077e9
+index 0000000..c8996dc
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetGPUProbe.cpp
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,211 @@
 +/*
 + * SweetGPUProbe: one-shot read-only Mali/mfgcfg/SPM/INFRA/TOPCKGEN/PLL dump
 + * plus MT6359P BUCK/LDO readback over pwrap (P2a, CL-0352 rev).
@@ -51,11 +51,14 @@ index 0000000..aa077e9
 +#define SWEET_PWRAP_PA   0x10026000UL
 +#define SWEET_PWRAP_SIZE 0x1000
 +
-+#define PR_PWRAP_EN      0x090u
-+#define PR_PWRAP_INIT    0x094u
-+#define PR_PWRAP_CMD     0xc20u
-+#define PR_PWRAP_RDATA   0xc24u
-+#define PR_PWRAP_VLDCLR  0xc28u
++#define PR_PWRAP_INIT_DONE    0x000u
++#define PR_PWRAP_SWINF_ACC    0x880u
++#define PR_PWRAP_SWINF_WDATA  0x884u
++#define PR_PWRAP_SWINF_RDATA  0x894u
++#define PR_PWRAP_SWINF_VLDCLR 0x8a4u
++#define PR_PWRAP_SWINF_STA    0x8a8u
++#define PR_SWINF_FSM(v)       (((v) >> 1) & 7u)
++#define PR_SWINF_INIT_DONE    (1u << 15)
 +
 +static volatile uint32_t *sweet_gpu_regs;
 +static volatile uint32_t *sweet_mfg_regs;
@@ -77,49 +80,47 @@ index 0000000..aa077e9
 +static int
 +sweet_pwrap_wait(uint32_t fsm)
 +{
-+	uint32_t i, v;
++	uint32_t i, v = 0;
 +
 +	for (i = 0; i < 10000; i++) {
 +		v = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
-+		    PR_PWRAP_RDATA);
-+		if (((v >> 16) & 7u) == fsm) {
++		    PR_PWRAP_SWINF_STA);
++		if (PR_SWINF_FSM(v) == fsm) {
 +			return 0;
 +		}
 +	}
-+	IOLog("SWEET GPU: pwrap wait fsm=%u timeout\n", fsm);
++	IOLog("SWEET GPU: pwrap wait fsm=%u timeout sta=%08x\n", fsm, v);
 +	return 1;
 +}
 +
 +static int
 +sweet_pmic_read(uint16_t reg, const char *name)
 +{
-+	uint32_t rd;
-+	uint32_t en, init;
++	uint32_t rd, init, sta;
 +	uint16_t val;
 +
-+	en = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
-+	    PR_PWRAP_EN);
 +	init = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
-+	    PR_PWRAP_INIT);
-+	rd = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
-+	    PR_PWRAP_RDATA);
-+	if (!(en & 1u) || !((init & 1u) || (rd & (1u << 21)))) {
-+		IOLog("SWEET GPU: %s=pwrap not ready en=%08x init=%08x\n",
-+		    name, en, init);
++	    PR_PWRAP_INIT_DONE);
++	sta = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_SWINF_STA);
++	if (!(sta & PR_SWINF_INIT_DONE)) {
++		IOLog("SWEET GPU: %s=pwrap not ready init=%08x sta=%08x\n",
++		    name, init, sta);
 +		return 1;
 +	}
 +	if (sweet_pwrap_wait(0) != 0) {
 +		return 1;
 +	}
-+	*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs + PR_PWRAP_CMD) =
-+	    (uint32_t)(reg >> 1) << 16;
++	*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_SWINF_ACC) = reg;
 +	if (sweet_pwrap_wait(6) != 0) {
 +		return 1;
 +	}
-+	val = (uint16_t)(*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
-+	    PR_PWRAP_RDATA) & 0xffffu);
-+	*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs + PR_PWRAP_VLDCLR) =
-+	    1;
++	rd = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_SWINF_RDATA);
++	val = (uint16_t)(rd & 0xffffu);
++	*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_SWINF_VLDCLR) = 1;
 +	IOLog("SWEET GPU: %s=0x%04x\n", name, val);
 +	return 0;
 +}
@@ -223,8 +224,10 @@ index 0000000..aa077e9
 +		IOLog("SWEET GPU: pwrap map failed\n");
 +	} else {
 +		sweet_pwrap_regs = (volatile uint32_t *)va;
-+		sweet_show(sweet_pwrap_regs, "PWRAP_EN", PR_PWRAP_EN);
-+		sweet_show(sweet_pwrap_regs, "PWRAP_INIT", PR_PWRAP_INIT);
++		sweet_show(sweet_pwrap_regs, "PWRAP_INIT_DONE",
++		    PR_PWRAP_INIT_DONE);
++		sweet_show(sweet_pwrap_regs, "PWRAP_SWINF_STA",
++		    PR_PWRAP_SWINF_STA);
 +		(void)sweet_pmic_read(0x1788, "PMIC_BUCK_VPROC2_CON0");
 +		(void)sweet_pmic_read(0x17b2, "PMIC_BUCK_VPROC2_ELR0");
 +		(void)sweet_pmic_read(0x1f2e, "PMIC_LDO_VSRAM_MD_CON0");
