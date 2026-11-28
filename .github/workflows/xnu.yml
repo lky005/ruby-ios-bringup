@@ -28,7 +28,7 @@ on:
         default: ""
       patchset_sha256:
         description: expected patchset hash; must match the patch set actually built
-        default: "bce06bba35604be4cc87039feebf21b8b4bdaa13b5674dfe997e11b9074a5608"
+        default: "69555c80b06bc1d8d3a0c1f90162cc041605ef59f15124152617d7c7c9b8bbdb"
       kernel_config:
         description: RELEASE / DEVELOPMENT / DEBUG
         default: DEVELOPMENT
