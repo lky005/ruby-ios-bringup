@@ -1,0 +1,95 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 8d31799..7f6d8b4 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -56,6 +56,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ #include <libkern/c++/OSSymbol.h>
+ 
+ extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void sweet_gpu_probe_start(void);
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -519,6 +520,7 @@ AppleCLCD::start(IOService *provider)
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
++	sweet_gpu_probe_start();
+ 	sweet_backlight_start();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+diff --git a/iokit/Kernel/arm/SweetGPUProbe.cpp b/iokit/Kernel/arm/SweetGPUProbe.cpp
+new file mode 100644
+index 0000000..92d9f43
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetGPUProbe.cpp
+@@ -0,0 +1,56 @@
++/*
++ * SweetGPUProbe: one-shot read-only Mali register dump (CL-0352).
++ * Enabled only by bootarg rubygpuprobe=1; no writes to the GPU block.
++ */
++#include <IOKit/IOLib.h>
++#include <pexpert/pexpert.h>
++#include <machine/machine_routines.h>
++
++extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++
++#define SWEET_GPU_PA   0x13000000UL
++#define SWEET_GPU_SIZE 0x4000
++
++static volatile uint32_t *sweet_gpu_regs;
++static bool sweet_gpu_done;
++
++static void
++sweet_gpu_show(const char *name, uint32_t off)
++{
++	uint32_t val = *(volatile uint32_t *)((uintptr_t)sweet_gpu_regs + off);
++
++	IOLog("SWEET GPU: %s=0x%08x\n", name, val);
++}
++
++void
++sweet_gpu_probe_start(void)
++{
++	int on = 0;
++	vm_offset_t va;
++
++	if (sweet_gpu_done) {
++		return;
++	}
++	PE_parse_boot_argn("rubygpuprobe", &on, sizeof(on));
++	if (on != 1) {
++		return;
++	}
++	sweet_gpu_done = true;
++	va = ml_io_map(SWEET_GPU_PA, SWEET_GPU_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: map failed\n");
++		return;
++	}
++	sweet_gpu_regs = (volatile uint32_t *)va;
++	IOLog("SWEET GPU: mapped 0x%lx at 0x%llx read-only\n",
++	    SWEET_GPU_PA, (unsigned long long)va);
++	sweet_gpu_show("GPU_ID", 0x000);
++	sweet_gpu_show("L2_FEATURES", 0x004);
++	sweet_gpu_show("TILER_FEATURES", 0x00c);
++	sweet_gpu_show("MEM_FEATURES", 0x010);
++	sweet_gpu_show("GPU_IRQ_RAWSTAT", 0x020);
++	sweet_gpu_show("GPU_STATUS", 0x034);
++	sweet_gpu_show("SHADER_PRESENT_LO", 0x100);
++	sweet_gpu_show("SHADER_PRESENT_HI", 0x104);
++	IOLog("SWEET GPU: probe done\n");
++}
+\ No newline at end of file
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index b6687f0..94d8ba5 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -22,6 +22,7 @@ iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitc
+ iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
++iokit/Kernel/arm/SweetGPUProbe.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetNetwork.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
