@@ -20,13 +20,15 @@ index 8d31799..7f6d8b4 100644
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
 diff --git a/iokit/Kernel/arm/SweetGPUProbe.cpp b/iokit/Kernel/arm/SweetGPUProbe.cpp
 new file mode 100644
-index 0000000..75d63ef
+index 0000000..aa077e9
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetGPUProbe.cpp
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,208 @@
 +/*
-+ * SweetGPUProbe: one-shot read-only Mali/mfgcfg register dump (CL-0352/P1.5).
-+ * Enabled only by bootarg rubygpuprobe=1; no writes to any mapped block.
++ * SweetGPUProbe: one-shot read-only Mali/mfgcfg/SPM/INFRA/TOPCKGEN/PLL dump
++ * plus MT6359P BUCK/LDO readback over pwrap (P2a, CL-0352 rev).
++ * Enabled only by bootarg rubygpuprobe=1; no writes to any power/clock block.
++ * The pwrap command/clear registers are used only to issue PMIC reads.
 + */
 +#include <IOKit/IOLib.h>
 +#include <pexpert/pexpert.h>
@@ -34,29 +36,92 @@ index 0000000..75d63ef
 +
 +extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +
-+#define SWEET_GPU_PA   0x13000000UL
-+#define SWEET_GPU_SIZE 0x4000
-+#define SWEET_MFG_PA   0x13fbf000UL
-+#define SWEET_MFG_SIZE 0x1000
++#define SWEET_GPU_PA     0x13000000UL
++#define SWEET_GPU_SIZE   0x4000
++#define SWEET_MFG_PA     0x13fbf000UL
++#define SWEET_MFG_SIZE   0x1000
++#define SWEET_SPM_PA     0x10006000UL
++#define SWEET_SPM_SIZE   0x1000
++#define SWEET_TOP_PA     0x10000000UL
++#define SWEET_TOP_SIZE   0x1000
++#define SWEET_IFRAO_PA   0x10001000UL
++#define SWEET_IFRAO_SIZE 0x1000
++#define SWEET_MFGAO_PA   0x13fa0000UL
++#define SWEET_MFGAO_SIZE 0x1000
++#define SWEET_PWRAP_PA   0x10026000UL
++#define SWEET_PWRAP_SIZE 0x1000
++
++#define PR_PWRAP_EN      0x090u
++#define PR_PWRAP_INIT    0x094u
++#define PR_PWRAP_CMD     0xc20u
++#define PR_PWRAP_RDATA   0xc24u
++#define PR_PWRAP_VLDCLR  0xc28u
 +
 +static volatile uint32_t *sweet_gpu_regs;
 +static volatile uint32_t *sweet_mfg_regs;
++static volatile uint32_t *sweet_spm_regs;
++static volatile uint32_t *sweet_top_regs;
++static volatile uint32_t *sweet_ifrao_regs;
++static volatile uint32_t *sweet_mfgao_regs;
++static volatile uint32_t *sweet_pwrap_regs;
 +static bool sweet_gpu_done;
 +
 +static void
-+sweet_gpu_show(const char *name, uint32_t off)
++sweet_show(volatile uint32_t *base, const char *name, uint32_t off)
 +{
-+	uint32_t val = *(volatile uint32_t *)((uintptr_t)sweet_gpu_regs + off);
++	uint32_t val = *(volatile uint32_t *)((uintptr_t)base + off);
 +
 +	IOLog("SWEET GPU: %s=0x%08x\n", name, val);
 +}
 +
-+static void
-+sweet_mfg_show(const char *name, uint32_t off)
++static int
++sweet_pwrap_wait(uint32_t fsm)
 +{
-+	uint32_t val = *(volatile uint32_t *)((uintptr_t)sweet_mfg_regs + off);
++	uint32_t i, v;
 +
-+	IOLog("SWEET GPU: %s=0x%08x\n", name, val);
++	for (i = 0; i < 10000; i++) {
++		v = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++		    PR_PWRAP_RDATA);
++		if (((v >> 16) & 7u) == fsm) {
++			return 0;
++		}
++	}
++	IOLog("SWEET GPU: pwrap wait fsm=%u timeout\n", fsm);
++	return 1;
++}
++
++static int
++sweet_pmic_read(uint16_t reg, const char *name)
++{
++	uint32_t rd;
++	uint32_t en, init;
++	uint16_t val;
++
++	en = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_EN);
++	init = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_INIT);
++	rd = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_RDATA);
++	if (!(en & 1u) || !((init & 1u) || (rd & (1u << 21)))) {
++		IOLog("SWEET GPU: %s=pwrap not ready en=%08x init=%08x\n",
++		    name, en, init);
++		return 1;
++	}
++	if (sweet_pwrap_wait(0) != 0) {
++		return 1;
++	}
++	*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs + PR_PWRAP_CMD) =
++	    (uint32_t)(reg >> 1) << 16;
++	if (sweet_pwrap_wait(6) != 0) {
++		return 1;
++	}
++	val = (uint16_t)(*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_RDATA) & 0xffffu);
++	*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs + PR_PWRAP_VLDCLR) =
++	    1;
++	IOLog("SWEET GPU: %s=0x%04x\n", name, val);
++	return 0;
 +}
 +
 +void
@@ -64,7 +129,6 @@ index 0000000..75d63ef
 +{
 +	int on = 0;
 +	vm_offset_t va;
-+	vm_offset_t mva;
 +
 +	if (sweet_gpu_done) {
 +		return;
@@ -74,6 +138,7 @@ index 0000000..75d63ef
 +		return;
 +	}
 +	sweet_gpu_done = true;
++
 +	va = ml_io_map(SWEET_GPU_PA, SWEET_GPU_SIZE);
 +	if (va == 0) {
 +		IOLog("SWEET GPU: map failed\n");
@@ -82,41 +147,88 @@ index 0000000..75d63ef
 +	sweet_gpu_regs = (volatile uint32_t *)va;
 +	IOLog("SWEET GPU: mapped 0x%lx at 0x%llx read-only\n",
 +	    SWEET_GPU_PA, (unsigned long long)va);
-+	sweet_gpu_show("GPU_ID", 0x000);
-+	sweet_gpu_show("L2_FEATURES", 0x004);
-+	sweet_gpu_show("TILER_FEATURES", 0x00c);
-+	sweet_gpu_show("MEM_FEATURES", 0x010);
-+	sweet_gpu_show("AS_PRESENT", 0x018);
-+	sweet_gpu_show("JS_PRESENT", 0x01c);
-+	sweet_gpu_show("GPU_IRQ_RAWSTAT", 0x020);
-+	sweet_gpu_show("GPU_STATUS", 0x034);
-+	sweet_gpu_show("SHADER_PRESENT_LO", 0x100);
-+	sweet_gpu_show("SHADER_PRESENT_HI", 0x104);
-+	sweet_gpu_show("SHADER_READY_LO", 0x140);
-+	sweet_gpu_show("SHADER_READY_HI", 0x144);
-+	sweet_gpu_show("TILER_READY_LO", 0x150);
-+	sweet_gpu_show("TILER_READY_HI", 0x154);
-+	sweet_gpu_show("L2_READY_LO", 0x160);
-+	sweet_gpu_show("L2_READY_HI", 0x164);
++	sweet_show(sweet_gpu_regs, "GPU_ID", 0x000);
++	sweet_show(sweet_gpu_regs, "AS_PRESENT", 0x018);
++	sweet_show(sweet_gpu_regs, "JS_PRESENT", 0x01c);
++	sweet_show(sweet_gpu_regs, "GPU_STATUS", 0x034);
++	sweet_show(sweet_gpu_regs, "SHADER_PRESENT_LO", 0x100);
++	sweet_show(sweet_gpu_regs, "SHADER_PRESENT_HI", 0x104);
++	sweet_show(sweet_gpu_regs, "SHADER_READY_LO", 0x140);
++	sweet_show(sweet_gpu_regs, "SHADER_READY_HI", 0x144);
++	sweet_show(sweet_gpu_regs, "TILER_READY_LO", 0x150);
++	sweet_show(sweet_gpu_regs, "L2_READY_LO", 0x160);
 +
-+	mva = ml_io_map(SWEET_MFG_PA, SWEET_MFG_SIZE);
-+	if (mva == 0) {
++	va = ml_io_map(SWEET_MFG_PA, SWEET_MFG_SIZE);
++	if (va == 0) {
 +		IOLog("SWEET GPU: mfg map failed\n");
 +	} else {
-+		sweet_mfg_regs = (volatile uint32_t *)mva;
++		sweet_mfg_regs = (volatile uint32_t *)va;
 +		IOLog("SWEET GPU: mapped 0x%lx at 0x%llx read-only\n",
-+		    SWEET_MFG_PA, (unsigned long long)mva);
-+		sweet_mfg_show("MFG_QCHANNEL_00", 0x0b0);
-+		sweet_mfg_show("MFG_QCHANNEL_CON", 0x0b4);
-+		sweet_mfg_show("MFG_QCHANNEL_08", 0x0b8);
-+		sweet_mfg_show("MFG_REG_130", 0x130);
-+		sweet_mfg_show("MFG_DEBUG_SEL", 0x170);
-+		sweet_mfg_show("MFG_DEBUG_TOP", 0x178);
-+		sweet_mfg_show("MFG_I2M_PROT_00", 0xf60);
-+		sweet_mfg_show("MFG_I2M_PROT_01", 0xf64);
-+		sweet_mfg_show("MFG_I2M_PROT_02", 0xf68);
-+		sweet_mfg_show("MFG_CG_CPE_PCLK", 0xf80);
-+		sweet_mfg_show("MFG_CG_SENSOR_BCLK", 0xf98);
++		    SWEET_MFG_PA, (unsigned long long)va);
++		sweet_show(sweet_mfg_regs, "MFG_CG_STA", 0x0);
++		sweet_show(sweet_mfg_regs, "MFG_DCM_CON", 0x10);
++		sweet_show(sweet_mfg_regs, "MFG_ASYNC_CON", 0x20);
++		sweet_show(sweet_mfg_regs, "MFG_QCHANNEL_00", 0x0b0);
++		sweet_show(sweet_mfg_regs, "MFG_QCHANNEL_CON", 0x0b4);
++		sweet_show(sweet_mfg_regs, "MFG_DEBUG_SEL", 0x170);
++		sweet_show(sweet_mfg_regs, "MFG_DEBUG_TOP", 0x178);
++		sweet_show(sweet_mfg_regs, "MFG_I2M_PROT_00", 0xf60);
++		sweet_show(sweet_mfg_regs, "MFG_I2M_PROT_01", 0xf64);
++		sweet_show(sweet_mfg_regs, "MFG_I2M_PROT_02", 0xf68);
++	}
++
++	va = ml_io_map(SWEET_SPM_PA, SWEET_SPM_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: spm map failed\n");
++	} else {
++		sweet_spm_regs = (volatile uint32_t *)va;
++		IOLog("SWEET GPU: mapped 0x%lx at 0x%llx read-only\n",
++		    SWEET_SPM_PA, (unsigned long long)va);
++		sweet_show(sweet_spm_regs, "SPM_PWR_STATUS", 0x0ef0);
++		sweet_show(sweet_spm_regs, "SPM_PWR_STATUS_2ND", 0x0ef4);
++		sweet_show(sweet_spm_regs, "SPM_XPU_PWR_STATUS", 0x0ef8);
++		sweet_show(sweet_spm_regs, "SPM_XPU_PWR_STATUS_2", 0x0efc);
++	}
++
++	va = ml_io_map(SWEET_TOP_PA, SWEET_TOP_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: top map failed\n");
++	} else {
++		sweet_top_regs = (volatile uint32_t *)va;
++		sweet_show(sweet_top_regs, "TOP_CLK_CFG_20", 0x0120);
++	}
++
++	va = ml_io_map(SWEET_IFRAO_PA, SWEET_IFRAO_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: infra map failed\n");
++	} else {
++		sweet_ifrao_regs = (volatile uint32_t *)va;
++		sweet_show(sweet_ifrao_regs, "INFRA_TOPAXI_PROTECTEN", 0x0220);
++		sweet_show(sweet_ifrao_regs, "INFRA_PROTECTEN_STA0", 0x0224);
++		sweet_show(sweet_ifrao_regs, "INFRA_PROTECTEN_STA1", 0x0228);
++	}
++
++	va = ml_io_map(SWEET_MFGAO_PA, SWEET_MFGAO_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: mfg_ao map failed\n");
++	} else {
++		sweet_mfgao_regs = (volatile uint32_t *)va;
++		sweet_show(sweet_mfgao_regs, "MFGPLL1_CON0", 0x008);
++		sweet_show(sweet_mfgao_regs, "MFGPLL1_CON1", 0x00c);
++		sweet_show(sweet_mfgao_regs, "MFGPLL4_CON0", 0x038);
++	}
++
++	va = ml_io_map(SWEET_PWRAP_PA, SWEET_PWRAP_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: pwrap map failed\n");
++	} else {
++		sweet_pwrap_regs = (volatile uint32_t *)va;
++		sweet_show(sweet_pwrap_regs, "PWRAP_EN", PR_PWRAP_EN);
++		sweet_show(sweet_pwrap_regs, "PWRAP_INIT", PR_PWRAP_INIT);
++		(void)sweet_pmic_read(0x1788, "PMIC_BUCK_VPROC2_CON0");
++		(void)sweet_pmic_read(0x17b2, "PMIC_BUCK_VPROC2_ELR0");
++		(void)sweet_pmic_read(0x1f2e, "PMIC_LDO_VSRAM_MD_CON0");
++		(void)sweet_pmic_read(0x1b4a, "PMIC_LDO_VSRAM_MD_ELR");
 +	}
 +	IOLog("SWEET GPU: probe done\n");
 +}
