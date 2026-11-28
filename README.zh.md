@@ -34,7 +34,7 @@ SweetFB 默认 60 Hz + 驱动 commit 钩子，以及 CPU B4a AMP 面（两簇、
 
 | 子系统 | 状态 | 说明 |
 |---|---|---|
-| CPU 与定时器 | 已验证 | 6× Cortex-A55 单 SMP 簇，16 KiB 页，GICv3；内核另含 CPU B4a AMP 面（E/P 桶、Edge 默认放置），需 2 簇 ADT（不随仓库提供）才生效 |
+| CPU 与定时器 | 已验证 | 8 核 SoC（6× Cortex-A55 + 2× Cortex-A78）；XNU 跑在 6 个 A55 上（`cpus=6`），16 KiB 页、GICv3，SMP 轮曾用 8 核 ADT 初始化 8/8。出厂主线不使用 A78；B4a AMP 面（E/P 桶、Edge 默认放置）已合入，但需 2 簇 ADT（不随仓库提供）才生效，A78 维持 650 MHz（未 DVFS） |
 | 存储 | 已验证 | UFS LUN 2，HFS+ root（`iosroot`）读写；4 MiB `md0` 救援 ramdisk |
 | 显示 | 已验证 | 1080×2400 面板，经 IOSurface/IOMFB 驱动；原生背光滑条走 DSI DCS `0x51`（v1.2 已实测量手感；v1.3 曲线仅 console 验证）；0360 线 SweetFB 默认 60 Hz |
 | 触摸 | 已验证 | Goodix GT9916R 走 SPI3，原生 EINT14 中断 |
@@ -42,13 +42,15 @@ SweetFB 默认 60 Hz + 驱动 commit 钩子，以及 CPU B4a AMP 面（两簇、
 | 首启 | 已验证 | 锁屏到桌面；staged app 与小组件正常渲染 |
 | USB 设备模式 | 已验证 | EP0 命令通道、MS OS 1.0 WinUSB 绑定、CDC-ECM 网卡（macOS/Linux 原生免驱；Windows 需经 usbipd-win + WSL2）+ SSH；0349 轮 64 MB wget 14.1 MB/s、TXRESET 0 |
 | GPU | 实验性 | 实验线的 RubyGPU 驱动与 PanVK/Mesa 栈：P3.4 原生显示与 P3.5 GL 已上机验证；Metal-on-Vulkan 垫片仍为研究态（合成 WIP）。0360 内核仅 CI 验证、从未上机。见 [15-gpu](docs/zh/15-gpu.md) |
-| 电池与 Type-C | 只读 | MT6360 电压/状态遥测，1 s 轮询；拔电即清满电 latch；无充电控制 |
+| 电池与 Type-C | 只读 | MT6360 电压/状态遥测，1 s 轮询；拔电即清满电 latch；无充电控制、OTG 与 Type-C 角色切换 |
 | Wi-Fi、蓝牙、蜂窝 | 未实现 | connsys 仅 stub |
 | 音频、相机 | 未实现 | — |
 | 睡眠、RTC、USB host | 未实现 | — |
 
 状态基于单台设备实测，见 [GUARANTEE](docs/records/GUARANTEE.zh.md)。已知边界：
-背光 v1.3 手感与夜览恢复未获用户验收；电池触摸 A/B（`rubybattms=5000`）未做；
+背光 v1.3 手感与夜览恢复未获用户验收；PosterBoard/壁纸与部分 WidgetKit
+表面不完整；充电控制、OTG 与 Type-C 角色切换未实现；电池触摸 A/B
+（`rubybattms=5000`）未做；
 宿主侧 USB 数据仅在 `0x81` 通道实测；多端点并发与非默认端点 RX 未测；
 `scp` 拉取会撞 FIFOFULL 半取窗口，大文件请走 HTTP。GPU 结论均为实验线结论：
 不担保帧率、合成正确性或打包完整性；0360 内核无启动记录。
@@ -75,7 +77,7 @@ SweetFB 默认 60 Hz + 驱动 commit 钩子，以及 CPU B4a AMP 面（两簇、
 
 前置条件：
 
-- 宿主：macOS 13.5 或更新，Xcode 16.0（CI 使用 `macos-15`）；宿主侧检查需
+- 宿主：macOS 14.5 或更新，Xcode 16.0（CI 使用 `macos-15`）；宿主侧检查需
   Python 3.10 或更新。
 - 目标机：已解锁 bootloader 的 Redmi Note 12 Pro 5G（`ruby`），`boot_b` 为
   TWRP，并自备 iPhone X iOS 16.7.16 IPSW 生成的 root。

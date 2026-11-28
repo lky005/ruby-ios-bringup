@@ -40,7 +40,7 @@ MFG2-5 power path (`rubygpupwr=2`, off by default).
 
 | Subsystem | State | Notes |
 |---|---|---|
-| CPU and timers | Verified | 6× Cortex-A55 in one SMP cluster, 16 KiB pages, GICv3; the kernel also carries the CPU B4a AMP face (E/P buckets, Edge default placement), which needs a 2-cluster ADT - not shipped - to take effect |
+| CPU and timers | Verified | 8-core SoC (6× Cortex-A55 + 2× Cortex-A78); XNU runs on the six A55s (`cpus=6`) with 16 KiB pages and GICv3, and the SMP run initialized 8/8 with an 8-core ADT. The A78 pair is unused on the shipped line; the B4a AMP face (E/P buckets, Edge default placement) is merged but needs a 2-cluster ADT - not shipped - to take effect, and A78 stays at 650 MHz (no DVFS) |
 | Storage | Verified | UFS LUN 2, read/write HFS+ root (`iosroot`); 4 MiB `md0` rescue ramdisk |
 | Display | Verified | 1080×2400 panel through IOSurface/IOMFB; native backlight slider over DSI DCS `0x51` (v1.2 user-verified; v1.3 curve console-verified only); SweetFB defaults to 60 Hz on the 0360 line |
 | Touch | Verified | Goodix GT9916R over SPI3 with a native EINT14 interrupt |
@@ -48,14 +48,16 @@ MFG2-5 power path (`rubygpupwr=2`, off by default).
 | First boot | Verified | Lock screen to home screen; staged apps and widgets render |
 | USB device mode | Verified | EP0 command channel, MS OS 1.0 WinUSB binding, CDC-ECM NIC (macOS/Linux native; Windows via usbipd-win + WSL2) with SSH; 64 MB wget at 14.1 MB/s, TXRESET 0 on the 0349 run |
 | GPU | Experimental | RubyGPU driver and PanVK/Mesa stack on the lab line: P3.4 native display and P3.5 GL verified on the device; the Metal-on-Vulkan shim stays research (composition WIP). The 0360 kernel is CI-verified only, never booted. See [15-gpu](docs/en/15-gpu.md) |
-| Battery and Type-C | Read-only | MT6360 voltage and status telemetry at 1 s; unplug clears the full latch; no charging control |
+| Battery and Type-C | Read-only | MT6360 voltage and status telemetry at 1 s; unplug clears the full latch; no charger control, OTG or Type-C role switching |
 | Wi-Fi, Bluetooth, cellular | Not implemented | connsys stub only |
 | Audio, camera | Not implemented | — |
 | Sleep, RTC, USB host | Not implemented | — |
 
 Status is measured on a single unit; see
 [GUARANTEE](docs/records/GUARANTEE.md). Known limits: backlight v1.3 hand feel
-and Night Shift recovery were not user-accepted; the battery touch-lag A/B
+and Night Shift recovery were not user-accepted; PosterBoard/wallpaper and
+some WidgetKit surfaces are incomplete; charger control, OTG and Type-C role
+switching are not implemented; the battery touch-lag A/B
 (`rubybattms=5000`) was not run; host-side USB data is measured only on the
 `0x81` channel; concurrent multi-endpoint traffic and RX on non-default
 endpoints are not measured; `scp` pull can hit the FIFOFULL half-fetch window,
@@ -87,7 +89,7 @@ stock LK (boot_a)
 
 Prerequisites:
 
-- Host: macOS 13.5 or newer with Xcode 16.0 (the CI runner is `macos-15`);
+- Host: macOS 14.5 or newer with Xcode 16.0 (the CI runner is `macos-15`);
   Python 3.10 or newer for host-side checks.
 - Target: a bootloader-unlocked Redmi Note 12 Pro 5G (`ruby`) with TWRP on
   `boot_b`, and an iPhone X iOS 16.7.16 root built from your own IPSW.
