@@ -1,33 +1,38 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 8d31799..7f6d8b4 100644
+index 8d31799..59e0397 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -56,6 +56,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+@@ -56,6 +56,8 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
  #include <libkern/c++/OSSymbol.h>
  
  extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern void sweet_gpu_probe_start(void);
++extern void sweet_gpu_power_start(void);
  
  enum {
  	kSweetFBGetLayerDefaultSurface  = 3,
-@@ -519,6 +520,7 @@ AppleCLCD::start(IOService *provider)
+@@ -519,6 +521,8 @@ AppleCLCD::start(IOService *provider)
  	setProperty("external", false);
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  	registerService();
 +	sweet_gpu_probe_start();
++	sweet_gpu_power_start();
  	sweet_backlight_start();
  	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
 diff --git a/iokit/Kernel/arm/SweetGPUProbe.cpp b/iokit/Kernel/arm/SweetGPUProbe.cpp
 new file mode 100644
-index 0000000..c8996dc
+index 0000000..6e2b239
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetGPUProbe.cpp
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,413 @@
 +/*
 + * SweetGPUProbe: one-shot read-only Mali/mfgcfg/SPM/INFRA/TOPCKGEN/PLL dump
 + * plus MT6359P BUCK/LDO readback over pwrap (P2a, CL-0352 rev).
-+ * Enabled only by bootarg rubygpuprobe=1; no writes to any power/clock block.
++ * Enabled by bootarg rubygpuprobe=1 for the read-only probe, and by
++ * rubygpupwr=1 for the P2b minimal MFG2..5 power-on (second half of file).
++ * The probe path performs no writes; the power path writes only SPM PWR_CON
++ * for MFG2..5 and mfgcfg 0xB0/0x20/0xB4/0x170, no PMIC/PLL/mux writes.
 + * The pwrap command/clear registers are used only to issue PMIC reads.
 + */
 +#include <IOKit/IOLib.h>
@@ -234,6 +239,205 @@ index 0000000..c8996dc
 +		(void)sweet_pmic_read(0x1b4a, "PMIC_LDO_VSRAM_MD_ELR");
 +	}
 +	IOLog("SWEET GPU: probe done\n");
++}
++
++/*
++ * P2b - minimal MFG2..5 power-on, gated by rubygpupwr=1 (default off).
++ * Writes only SPM PWR_CON for MFG2..5 and mfgcfg 0xB0/0x20/0xB4/0x170.
++ * No PMIC writes (VPROC2/VSRAM_MD are already on at 0.75 V per docs/240),
++ * no PLL/mux writes. Single shot; any failure powers off what was
++ * enabled and restores the two mfgcfg registers.
++ */
++#define SWEET_PWR_CON(n)      (0x0e88u + 4u * (n))  /* n=0..3 -> MFG2..5 */
++#define SWEET_PWR_XPU_STA     0x0ef8u
++#define SWEET_PWR_XPU_STA2    0x0efcu
++#define SWEET_PWR_RST_B       (1u << 0)
++#define SWEET_PWR_ISO         (1u << 1)
++#define SWEET_PWR_ON          (1u << 2)
++#define SWEET_PWR_ON_2ND      (1u << 3)
++#define SWEET_PWR_CLK_DIS     (1u << 4)
++#define SWEET_PWR_SRAM_PDN    (1u << 8)
++#define SWEET_PWR_SRAM_ACK    (1u << 12)
++#define SWEET_PWR_MFG_BIT(n)  (1u << (n))           /* MFG0..5 -> bits 0..5 */
++
++static bool sweet_gpu_pwr_done;
++
++static uint32_t
++sweet_pwr_rd(volatile uint32_t *base, uint32_t off)
++{
++	return *(volatile uint32_t *)((uintptr_t)base + off);
++}
++
++static void
++sweet_pwr_wr(volatile uint32_t *base, uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)((uintptr_t)base + off) = val;
++}
++
++static bool
++sweet_pwr_wait(volatile uint32_t *base, uint32_t off, uint32_t mask,
++    uint32_t want, uint32_t iters)
++{
++	while (iters--) {
++		if ((sweet_pwr_rd(base, off) & mask) == want) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static volatile uint32_t *
++sweet_pwr_map(vm_offset_t pa, vm_size_t size)
++{
++	vm_offset_t va = ml_io_map(pa, size);
++
++	return va == 0 ? NULL : (volatile uint32_t *)va;
++}
++
++static int
++sweet_pwr_mfg_on(unsigned int n)
++{
++	uint32_t off = SWEET_PWR_CON(n);
++	uint32_t bit = SWEET_PWR_MFG_BIT(n + 2);
++	uint32_t v;
++
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_ON);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_ON_2ND);
++	if (!sweet_pwr_wait(sweet_spm_regs, SWEET_PWR_XPU_STA, bit, bit,
++	    100000) ||
++	    !sweet_pwr_wait(sweet_spm_regs, SWEET_PWR_XPU_STA2, bit, bit,
++	    100000)) {
++		IOLog("SWEET GPU: PWR MFG%u no ack\n", n + 2);
++		return 1;
++	}
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_CLK_DIS);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_ISO);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_RST_B);
++	v = sweet_pwr_rd(sweet_spm_regs, off);
++	if (v & SWEET_PWR_SRAM_PDN) {
++		sweet_pwr_wr(sweet_spm_regs, off, v & ~SWEET_PWR_SRAM_PDN);
++		if (!sweet_pwr_wait(sweet_spm_regs, off, SWEET_PWR_SRAM_ACK,
++		    0, 100000)) {
++			IOLog("SWEET GPU: PWR MFG%u sram ack\n", n + 2);
++			return 1;
++		}
++	}
++	IOLog("SWEET GPU: PWR MFG%u on con=0x%08x xpu=0x%08x\n", n + 2,
++	    sweet_pwr_rd(sweet_spm_regs, off),
++	    sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA));
++	return 0;
++}
++
++static void
++sweet_pwr_mfg_off(unsigned int n)
++{
++	uint32_t off = SWEET_PWR_CON(n);
++	uint32_t bit = SWEET_PWR_MFG_BIT(n + 2);
++
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_ISO);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_CLK_DIS);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_RST_B);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_ON);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_ON_2ND);
++	(void)sweet_pwr_wait(sweet_spm_regs, SWEET_PWR_XPU_STA, bit, 0,
++	    100000);
++}
++
++void
++sweet_gpu_power_start(void)
++{
++	uint32_t old_b0, old_20, xpu;
++	int on = 0;
++	int e;
++
++	if (sweet_gpu_pwr_done) {
++		return;
++	}
++	PE_parse_boot_argn("rubygpupwr", &on, sizeof(on));
++	if (on != 1) {
++		return;
++	}
++	sweet_gpu_pwr_done = true;
++
++	if (sweet_spm_regs == NULL) {
++		sweet_spm_regs = sweet_pwr_map(SWEET_SPM_PA, SWEET_SPM_SIZE);
++	}
++	if (sweet_spm_regs == NULL) {
++		IOLog("SWEET GPU: PWR spm map failed\n");
++		return;
++	}
++	xpu = sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA);
++	if ((xpu & 0x3u) != 0x3u) {
++		IOLog("SWEET GPU: PWR MFG0/1 not on, abort xpu=0x%08x\n",
++		    xpu);
++		return;
++	}
++	if (sweet_mfg_regs == NULL) {
++		sweet_mfg_regs = sweet_pwr_map(SWEET_MFG_PA, SWEET_MFG_SIZE);
++	}
++	if (sweet_mfg_regs == NULL) {
++		IOLog("SWEET GPU: PWR mfg map failed\n");
++		return;
++	}
++
++	old_b0 = sweet_pwr_rd(sweet_mfg_regs, 0x0b0);
++	old_20 = sweet_pwr_rd(sweet_mfg_regs, 0x020);
++	sweet_pwr_wr(sweet_mfg_regs, 0x0b0,
++	    old_b0 & ~((1u << 21) | (1u << 10)));
++	sweet_pwr_wr(sweet_mfg_regs, 0x020, old_20 | (0xfu << 22));
++
++	for (e = 0; e < 4; e++) {
++		if (sweet_pwr_mfg_on((unsigned int)e) != 0) {
++			break;
++		}
++	}
++	if (e < 4) {
++		int failed = e;
++
++		sweet_pwr_mfg_off((unsigned int)failed);
++		while (e > 0) {
++			e--;
++			sweet_pwr_mfg_off((unsigned int)e);
++		}
++		sweet_pwr_wr(sweet_mfg_regs, 0x0b0, old_b0);
++		sweet_pwr_wr(sweet_mfg_regs, 0x020, old_20);
++		IOLog("SWEET GPU: PWR failed at MFG%u, rolled back\n",
++		    failed + 2);
++		return;
++	}
++
++	sweet_pwr_wr(sweet_mfg_regs, 0x0b4, 1);
++	sweet_pwr_wr(sweet_mfg_regs, 0x170, 3);
++	if (!sweet_pwr_wait(sweet_mfg_regs, 0x178, (1u << 2), (1u << 2),
++	    100000)) {
++		IOLog("SWEET GPU: PWR bus idle timeout\n");
++	}
++
++	if (sweet_gpu_regs == NULL) {
++		sweet_gpu_regs = sweet_pwr_map(SWEET_GPU_PA, SWEET_GPU_SIZE);
++	}
++	if (sweet_gpu_regs != NULL) {
++		IOLog("SWEET GPU: PWR READY sh=0x%08x/0x%08x ti=0x%08x/0x%08x "
++		    "l2=0x%08x/0x%08x\n",
++		    sweet_pwr_rd(sweet_gpu_regs, 0x140),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x144),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x150),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x154),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x160),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x164));
++	}
++	xpu = sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA);
++	IOLog("SWEET GPU: PWR done xpu=0x%08x\n", xpu);
 +}
 \ No newline at end of file
 diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
