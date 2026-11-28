@@ -1,0 +1,77 @@
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+index 163fce1..c415982 100644
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -5003,6 +5003,35 @@ is_io_connect_method_var_output
+ 	return ret;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * RubyGPU selector-8 diagnostics (rubygpudiag=1, default off). Logs the
++ * filter decision and whether callExternalMethod was reached, capped to
++ * protect the console ring. Touches only globals used below; no provider
++ * lookups, which are unsafe during early boot.
++ */
++static int ruby_gpu_diag_state = -1;
++static uint32_t ruby_gpu_diag_lines;
++
++static bool
++ruby_gpu_diag_ok(uint32_t selector)
++{
++	if (ruby_gpu_diag_state < 0) {
++		int on = 0;
++		PE_parse_boot_argn("rubygpudiag", &on, sizeof(on));
++		ruby_gpu_diag_state = (on != 0) ? 1 : 0;
++	}
++	if (ruby_gpu_diag_state == 0 || ruby_gpu_diag_lines >= 400) {
++		return false;
++	}
++	if (selector != 8) {
++		return false;
++	}
++	ruby_gpu_diag_lines++;
++	return true;
++}
++#endif
++
+ /* Routine io_user_client_method */
+ kern_return_t
+ is_io_connect_method
+@@ -5085,11 +5114,36 @@ is_io_connect_method
+ 	IOStatisticsClientCall();
+ 	ret = kIOReturnSuccess;
+ 	io_filter_policy_t filterPolicy = client->filterForTask(current_task(), 0);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	bool ruby_gpu_trace = ruby_gpu_diag_ok(selector);
++	if (ruby_gpu_trace) {
++		IOLog("RGDIAG filter sel=%u pid=%d conn=%p policy=%p applier=%p\n",
++		    selector, task_pid(current_task()), (void *)connection,
++		    (void *)(unsigned long)filterPolicy,
++		    (gIOUCFilterCallbacks != NULL) ?
++		    (void *)gIOUCFilterCallbacks->io_filter_applier : NULL);
++	}
++#endif
+ 	if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
+ 		ret = gIOUCFilterCallbacks->io_filter_applier(client, filterPolicy, io_filter_type_external_method, selector);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (ruby_gpu_trace) {
++			IOLog("RGDIAG filter sel=%u applier_ret=0x%x\n", selector, ret);
++		}
++#endif
+ 	}
+ 	if (kIOReturnSuccess == ret) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (ruby_gpu_trace) {
++			IOLog("RGDIAG call sel=%u pass\n", selector);
++		}
++#endif
+ 		ret = client->callExternalMethod( selector, &args );
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		if (ruby_gpu_trace) {
++			IOLog("RGDIAG call sel=%u ret=0x%x\n", selector, ret);
++		}
++#endif
+ 	}
+ 
+ 	*scalar_outputCnt = args.scalarOutputCount;
