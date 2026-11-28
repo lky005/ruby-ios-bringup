@@ -20,13 +20,13 @@ index 8d31799..7f6d8b4 100644
  	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
 diff --git a/iokit/Kernel/arm/SweetGPUProbe.cpp b/iokit/Kernel/arm/SweetGPUProbe.cpp
 new file mode 100644
-index 0000000..92d9f43
+index 0000000..75d63ef
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetGPUProbe.cpp
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,96 @@
 +/*
-+ * SweetGPUProbe: one-shot read-only Mali register dump (CL-0352).
-+ * Enabled only by bootarg rubygpuprobe=1; no writes to the GPU block.
++ * SweetGPUProbe: one-shot read-only Mali/mfgcfg register dump (CL-0352/P1.5).
++ * Enabled only by bootarg rubygpuprobe=1; no writes to any mapped block.
 + */
 +#include <IOKit/IOLib.h>
 +#include <pexpert/pexpert.h>
@@ -36,8 +36,11 @@ index 0000000..92d9f43
 +
 +#define SWEET_GPU_PA   0x13000000UL
 +#define SWEET_GPU_SIZE 0x4000
++#define SWEET_MFG_PA   0x13fbf000UL
++#define SWEET_MFG_SIZE 0x1000
 +
 +static volatile uint32_t *sweet_gpu_regs;
++static volatile uint32_t *sweet_mfg_regs;
 +static bool sweet_gpu_done;
 +
 +static void
@@ -48,11 +51,20 @@ index 0000000..92d9f43
 +	IOLog("SWEET GPU: %s=0x%08x\n", name, val);
 +}
 +
++static void
++sweet_mfg_show(const char *name, uint32_t off)
++{
++	uint32_t val = *(volatile uint32_t *)((uintptr_t)sweet_mfg_regs + off);
++
++	IOLog("SWEET GPU: %s=0x%08x\n", name, val);
++}
++
 +void
 +sweet_gpu_probe_start(void)
 +{
 +	int on = 0;
 +	vm_offset_t va;
++	vm_offset_t mva;
 +
 +	if (sweet_gpu_done) {
 +		return;
@@ -74,10 +86,38 @@ index 0000000..92d9f43
 +	sweet_gpu_show("L2_FEATURES", 0x004);
 +	sweet_gpu_show("TILER_FEATURES", 0x00c);
 +	sweet_gpu_show("MEM_FEATURES", 0x010);
++	sweet_gpu_show("AS_PRESENT", 0x018);
++	sweet_gpu_show("JS_PRESENT", 0x01c);
 +	sweet_gpu_show("GPU_IRQ_RAWSTAT", 0x020);
 +	sweet_gpu_show("GPU_STATUS", 0x034);
 +	sweet_gpu_show("SHADER_PRESENT_LO", 0x100);
 +	sweet_gpu_show("SHADER_PRESENT_HI", 0x104);
++	sweet_gpu_show("SHADER_READY_LO", 0x140);
++	sweet_gpu_show("SHADER_READY_HI", 0x144);
++	sweet_gpu_show("TILER_READY_LO", 0x150);
++	sweet_gpu_show("TILER_READY_HI", 0x154);
++	sweet_gpu_show("L2_READY_LO", 0x160);
++	sweet_gpu_show("L2_READY_HI", 0x164);
++
++	mva = ml_io_map(SWEET_MFG_PA, SWEET_MFG_SIZE);
++	if (mva == 0) {
++		IOLog("SWEET GPU: mfg map failed\n");
++	} else {
++		sweet_mfg_regs = (volatile uint32_t *)mva;
++		IOLog("SWEET GPU: mapped 0x%lx at 0x%llx read-only\n",
++		    SWEET_MFG_PA, (unsigned long long)mva);
++		sweet_mfg_show("MFG_QCHANNEL_00", 0x0b0);
++		sweet_mfg_show("MFG_QCHANNEL_CON", 0x0b4);
++		sweet_mfg_show("MFG_QCHANNEL_08", 0x0b8);
++		sweet_mfg_show("MFG_REG_130", 0x130);
++		sweet_mfg_show("MFG_DEBUG_SEL", 0x170);
++		sweet_mfg_show("MFG_DEBUG_TOP", 0x178);
++		sweet_mfg_show("MFG_I2M_PROT_00", 0xf60);
++		sweet_mfg_show("MFG_I2M_PROT_01", 0xf64);
++		sweet_mfg_show("MFG_I2M_PROT_02", 0xf68);
++		sweet_mfg_show("MFG_CG_CPE_PCLK", 0xf80);
++		sweet_mfg_show("MFG_CG_SENSOR_BCLK", 0xf98);
++	}
 +	IOLog("SWEET GPU: probe done\n");
 +}
 \ No newline at end of file
