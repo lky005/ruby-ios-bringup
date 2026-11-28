@@ -24,6 +24,8 @@ project's delta.
 
 | Line | Patchset | Files | Config | Kernel reference |
 |---|---|---|---|---|
+| 0360 line (GPU driver face, `v0.11.0`) | `bd125daf...` | 327 | `config/0360.env` | full `3592b53f...`, exec `4fef9a18...` (record `46139168754`; gate `46140206357`) |
+| 0352 line (GPU probe, `v0.10.0`) | `40f7cefa...` | 318 | `config/0352.env` | full `82c129a7...`, exec `90326b5e...` (record `46137228510`; gate `46137921273`) |
 | main (2026-11-22 integration) | `bce06bba...` | 316 | `config/0351.env` | full `e077f36c...`, exec `9febbe97...` (CI `45001473122`; gate rerun `45003136758`) |
 | main (2026-11-21 integration) | `b277f658...` | 314 | `config/0349.env` | full `2eb84a6d...`, exec `1fa119b0...` (CI `44933912917`) |
 | main (2026-11-06 integration) | `10b1e2e8...` | 175 | `config/0179.env` | full `2b008e52...`, exec `a4fb021e...` (main CI `42227326083`; prep `42225956551`) |

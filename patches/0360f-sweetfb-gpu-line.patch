@@ -1,0 +1,39 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 59e0397..4a03d07 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -58,6 +58,7 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern void sweet_gpu_probe_start(void);
+ extern void sweet_gpu_power_start(void);
++extern void sweet_gpu_commit_start(void);
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -512,7 +513,8 @@ AppleCLCD::start(IOService *provider)
+ 		IOLog("SWEET FB: no vsync timer\n");
+ 		return false;
+ 	}
+-	uint32_t hz = 10;
++	/* 60 Hz by default; sweetfb_hz=10 restores the old throttled flush. */
++	uint32_t hz = 60;
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+@@ -523,6 +525,7 @@ AppleCLCD::start(IOService *provider)
+ 	registerService();
+ 	sweet_gpu_probe_start();
+ 	sweet_gpu_power_start();
++	sweet_gpu_commit_start();
+ 	sweet_backlight_start();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
+@@ -618,7 +621,7 @@ static uint64_t sweet_fb_swap_count;
+  * A swap only records the frame: copying 10 MB into the panel on every
+  * swap (backboardd presents at 60 Hz) took the whole CPU. The vsync timer
+  * shows the latest frame every fFlushTicks ticks (boot-arg sweetfb_hz,
+- * default 10 Hz).
++ * default 60 Hz; sweetfb_hz=10 restores the old throttle).
+  */
+ void
+ AppleCLCD::swap(const uint8_t *rec)

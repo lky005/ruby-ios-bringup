@@ -29,7 +29,8 @@ AVB footer 在 stock 偏移，避免 `hdr_loaded` 拒绝。
 |---|---|---|
 | Bootloader | 小米 LK | 无；只写 `boot_a` |
 | Payload | shim/loader | 早期 `src/bringup`；0084 用上游 loader |
-| 内核 | XNU 8796 | 补丁 0080/0085（真实触摸）、0156-0179（HAL/USB/电池/原生 IRQ）；0084 上一里程碑；0081–0083 历史 |
+| 内核 | XNU 8796 | 补丁 0080/0085（真实触摸）、0156-0179（HAL/USB/电池/原生 IRQ）、0350/0351（电池轮询、DSI 背光）、0352（GPU 探针）、0360a-f（RubyGPU 驱动、SweetSurface 属主、`IOAcceleratorES`）与 0361a-c（CPU B4a AMP 面）；0084 上一里程碑；0081–0083 历史 |
+| GPU | Mali-G68（MT6877 MFG） | 0352 只读探针与门控上电；0360 RubyGPU 驱动（设备/电源/MMU/BO/提交/上下文、INTID487、SG BO、userclient UAPI、逐 task 表面属主、SweetFB 默认 60 Hz）；用户态栈（Mesa PanVK、Metal 垫片）仅实验线，见 [15-gpu](15-gpu.md) |
 | Root | `iosroot` 上的 HFS+ | pulled v14 + seed；不在仓库 |
 | 用户态 | iOS 16.7.16 | ICL 4 字节 NOP |
 | 显示 | IOSurface/IOMFB | 0081 调试路径 |

@@ -11,6 +11,37 @@ after each verification pass.
   scans were read-only; `boot_a` was written for TWRP/reference/CI images; the
   root was restored to A/B+NOP only after a live-backup scan.
 
+## CI verification (2026-11-28, 0352/0360 lines)
+
+- Both lines were verified by record-then-gate runs on `macos-15`
+  (Xcode 16.0, clang 16.0.0.26.3):
+  - 0352: patchset `40f7cefafc3a67fabaab1c9814adef5b76f64acec8017466fa3ac21086e62de6`
+    (318 files); record `46137228510`, gate `46137921273`, exec-data
+    `90326b5e9742d52fd3450f6a8c03892c1f4553dd0f4c63fe95ce2fd2d41f3858`
+    (full `82c129a7...`, 18,663,912 B).
+  - 0360: patchset `bd125daff6521b92069340186c4837090be4154e0a363de4d7a40b36ebec560e`
+    (327 files); record `46139168754`, gate `46140206357`, exec-data
+    `4fef9a185faa1a0ae6821fce3888829ac10d2e25dd470492da1cc1e16dbc6ec8`
+    (full `3592b53f...`, 18,769,120 B).
+- The patchset hashes computed locally from the public upstream fallback and
+  reported by CI match on both lines.
+- Build-tree comparison: the CI `xnu-buildtree` artifact and the lab build
+  tree contain 4,198 source files with identical SHA-256 values; the only
+  extra file is `SweetGPUProbe.cpp`, which the registration patch does not
+  compile.
+- Boot-image kernels cannot be compared byte-for-byte: the payload packer
+  rebases the kernel segments into the image layout, so same-sized image
+  kernels differ by design. Equivalence is established at the source level
+  plus gated build reproducibility.
+- `scripts/verify-local.py --ci-config config/0352.env` and
+  `--ci-config config/0360.env` pass in clean worktrees (0 hard failures;
+  the two usual warnings: no denylist supplied, `BASELINE_CHANGES_SHA256`
+  unset).
+- String audit of the 0360 kernel: `RubyGPU` 101, `IOAcceleratorES` 32,
+  `RGDIAG` 26, `sweet_surface_owned_by`, the `rubygpu*` boot arguments and
+  `sweetfb_hz` are present.
+- Not booted: neither line was flashed; the device currently runs Android.
+
 ## Host-verified (2026-10-21, updated 2026-10-22)
 
 `python scripts/verify-local.py` with the optional external inputs. The check

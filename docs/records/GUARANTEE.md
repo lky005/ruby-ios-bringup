@@ -10,8 +10,14 @@ Night Shift recovery were not user-accepted. This is not an independently
 reproduced second-unit or clean-room guarantee. Detailed test guarantees are
 deferred.
 
-**Scope note (2026-11-22):** the current line uses the pins in
-`config/0351.env` (patchset `bce06bba...`, 316 files, exec-data
+**Scope note (2026-11-28):** the current line uses the pins in
+`config/0360.env` (patchset `bd125daf...`, 327 files, exec-data
+`4fef9a18...`); the 0352 line used `config/0352.env` (patchset
+`40f7cefa...`, 318 files, exec-data `90326b5e...`). Both GPU kernel faces
+are **CI-verified only** - they were never booted from this repository. GPU
+device evidence (P3.4 native display, P3.5 GL, Metal-shim research) comes
+from the lab line and carries no reproducibility guarantee. The 0351 line
+used `config/0351.env` (patchset `bce06bba...`, 316 files, exec-data
 `9febbe97...`). The 0349 line used `config/0349.env` (patchset
 `b277f658...`, exec-data `1fa119b0...`); the 0179 line used
 `config/0179.env` (patchset `10b1e2e8...`, exec-data `a4fb021e...`); the

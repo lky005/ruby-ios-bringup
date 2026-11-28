@@ -12,6 +12,10 @@
   note**, not the default path and not automated. See
   [`../en/appendix-dualboot.md`](../en/appendix-dualboot.md) (or the
   [Chinese version](../zh/appendix-dualboot.md)).
+- The GPU work (0352/0360 kernel face, Mesa/PanVK, Metal shim) is an
+  **experimental appendix**: the kernel face is CI-verified and never booted
+  from this repository; the userland stack is lab-only and planned for
+  separate repositories. See [`../en/15-gpu.md`](../en/15-gpu.md).
 
 ## Default path and data risk
 
@@ -33,6 +37,9 @@ evidence, not supported paths. See [`GUARANTEE.md`](GUARANTEE.md).
 
 - Apple firmware, IPSW/DMG, iOS root images, dyld shared caches, userland
   binaries.
+- GPU userland binaries (Mesa dylibs, ICD, Metal shim bundles): those belong
+  to separate experimental repositories; this repository carries only the
+  kernel delta.
 - Device dumps, serials, IMEI/MAC, Apple account data, diff data, full logs.
 - Photos and videos (the `media/` directory is reserved).
 - One-off agent scripts and device-specific automation.

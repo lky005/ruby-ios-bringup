@@ -8,12 +8,17 @@ B+NOP 首启 -> A'、CI kernel 启动、0085 真实触摸启动以及 0155/0179�
 v1.3 手感与夜览恢复未获用户验收。这不是已经独立复现的第二台/干净室
 保证；更详细的测试保证暂缓。
 
-**范围说明（2026-11-22）：** 当前线使用 `config/0351.env` 的 pin
-（patchset `bce06bba...`，316 文件；exec-data `9febbe97...`）。0349 线
-使用 `config/0349.env`（patchset `b277f658...`，exec-data `1fa119b0...`）；
-0179 线使用 `config/0179.env`（patchset `10b1e2e8...`，exec-data
-`a4fb021e...`）；0155 线使用 `config/0155.env`（patchset `da13b6df...`，
-exec-data `2e98fd85...`）；2026-11-01 探针线使用 `config/0144.env`
+**范围说明（2026-11-28）：** 当前线使用 `config/0360.env` 的 pin
+（patchset `bd125daf...`，327 文件；exec-data `4fef9a18...`）；0352 线
+使用 `config/0352.env`（patchset `40f7cefa...`，318 文件，exec-data
+`90326b5e...`）。两条 GPU 内核面均**仅经 CI 验证**，从未从本仓库上机。
+GPU 的设备证据（P3.4 原生显示、P3.5 GL、Metal 垫片研究）来自实验线，
+不携带复现保证。0351 线使用 `config/0351.env`（patchset `bce06bba...`，
+316 文件，exec-data `9febbe97...`）。0349 线使用 `config/0349.env`
+（patchset `b277f658...`，exec-data `1fa119b0...`）；0179 线使用
+`config/0179.env`（patchset `10b1e2e8...`，exec-data `a4fb021e...`）；
+0155 线使用 `config/0155.env`（patchset `da13b6df...`，exec-data
+`2e98fd85...`）；2026-11-01 探针线使用 `config/0144.env`
 （patchset `9f7b41cf...`，exec-data `62a17d48...`）；0085/0084 成功包为
 历史。更早的 USB 线使用 `config/0140.env` 与 `config/0131b.env`，见
 `docs/zh/11-ci-baseline.md`。

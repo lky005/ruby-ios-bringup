@@ -2,7 +2,7 @@
 
 [English](README.md) · **中文**
 
-[![xnu-0351](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
+[![xnu-0360](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/xnu.yml)
 [![host-checks](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml/badge.svg?branch=main)](https://github.com/lky005/ruby-ios-bringup/actions/workflows/host-checks.yml)
 
 一项研究性 bring-up：把 Apple 开源的 XNU 8796 内核与 iPhone X（iOS 16.7.16）
@@ -16,36 +16,42 @@
 
 ## 状态
 
-当前线：0351（`v0.9.0`）。保留 0349 的 USB/ECM 线，新增原生显示背光
-（MT6877 DSI VM_CMD 直写 DCS `0x51`，γ2.6 LUT + 可抢占平滑）与 1 s
-只读电池轮询。背光默认关闭，需 `rubybacklight=1 rubyblhw=1`；0351 启动行
-已带上两者。v1.3 曲线仅在 console 验证；手感与夜览未获用户验收。
+当前线：0360（`v0.11.0`）。保留 0352 探针线，并回收 GPU 实验线的 RubyGPU 内核
+驱动：RubyGPU 服务（设备/电源/MMU/BO/提交/上下文）、userclient UAPI
+（Panfrost kmod 面语义子集）、INTID487 IRQ、SG BO 分配、逐 task 表面属主、
+用于 Metal 插件加载的空 `IOAcceleratorES` 服务、selector-8 诊断（默认关）、
+SweetFB 默认 60 Hz + 驱动 commit 钩子，以及 CPU B4a AMP 面（两簇、Edge 默认
+放置、只读时钟探针）。AMP 面需 2 簇 ADT 才生效；仓库不提供 ADT，A78 簇维持
+650 MHz（未 DVFS）。0360 内核仅经 CI 验证，**未上机**。0352 线（`v0.10.0`）
+新增只读 GPU 探针与门控 MFG2-5 上电路径（`rubygpupwr=2`，默认关）。
 
 | 项 | 值 |
 |---|---|
-| 补丁集 | `bce06bba` —— 316 文件，CI 门禁 |
-| 内核 | exec-data `9febbe97`（CI `45001473122`；门禁二跑 `45003136758`）；完整哈希见 VERIFICATION |
-| 设备镜像 | `f0f7d454`（`x16-blv13.img`），440 B 启动行 |
-| 标签 | `v0.9.0` / `p4-bl-batt-final` |
+| 补丁集 | `bd125daf` —— 327 文件，CI 门禁（0352 线：`40f7cefa`，318） |
+| 内核 | exec-data `4fef9a18`（record `46139168754`；门禁 `46140206357`）；0352 `90326b5e`（`46137921273`）；完整哈希见 VERIFICATION |
+| 设备镜像 | 不适用 —— 0360 内核未上机；实验线镜像 `7aa6e679` 不随仓库发布 |
+| 标签 | `v0.11.0`（0360）/ `v0.10.0`（0352） |
 
 | 子系统 | 状态 | 说明 |
 |---|---|---|
-| CPU 与定时器 | 已验证 | 6× Cortex-A55，16 KiB 页，GICv3 |
+| CPU 与定时器 | 已验证 | 6× Cortex-A55 单 SMP 簇，16 KiB 页，GICv3；内核另含 CPU B4a AMP 面（E/P 桶、Edge 默认放置），需 2 簇 ADT（不随仓库提供）才生效 |
 | 存储 | 已验证 | UFS LUN 2，HFS+ root（`iosroot`）读写；4 MiB `md0` 救援 ramdisk |
-| 显示 | 已验证 | 1080×2400 面板，经 IOSurface/IOMFB 驱动；原生背光滑条走 DSI DCS `0x51`（v1.2 已实测量手感；v1.3 曲线仅 console 验证） |
+| 显示 | 已验证 | 1080×2400 面板，经 IOSurface/IOMFB 驱动；原生背光滑条走 DSI DCS `0x51`（v1.2 已实测量手感；v1.3 曲线仅 console 验证）；0360 线 SweetFB 默认 60 Hz |
 | 触摸 | 已验证 | Goodix GT9916R 走 SPI3，原生 EINT14 中断 |
 | 实体按键 | 已验证 | 音量与电源键，经 KPD/TOPSTATUS 与 HID |
 | 首启 | 已验证 | 锁屏到桌面；staged app 与小组件正常渲染 |
 | USB 设备模式 | 已验证 | EP0 命令通道、MS OS 1.0 WinUSB 绑定、CDC-ECM 网卡（macOS/Linux 原生免驱；Windows 需经 usbipd-win + WSL2）+ SSH；0349 轮 64 MB wget 14.1 MB/s、TXRESET 0 |
+| GPU | 实验性 | 实验线的 RubyGPU 驱动与 PanVK/Mesa 栈：P3.4 原生显示与 P3.5 GL 已上机验证；Metal-on-Vulkan 垫片仍为研究态（合成 WIP）。0360 内核仅 CI 验证、从未上机。见 [15-gpu](docs/zh/15-gpu.md) |
 | 电池与 Type-C | 只读 | MT6360 电压/状态遥测，1 s 轮询；拔电即清满电 latch；无充电控制 |
 | Wi-Fi、蓝牙、蜂窝 | 未实现 | connsys 仅 stub |
-| 音频、相机、GPU | 未实现 | — |
+| 音频、相机 | 未实现 | — |
 | 睡眠、RTC、USB host | 未实现 | — |
 
 状态基于单台设备实测，见 [GUARANTEE](docs/records/GUARANTEE.zh.md)。已知边界：
 背光 v1.3 手感与夜览恢复未获用户验收；电池触摸 A/B（`rubybattms=5000`）未做；
 宿主侧 USB 数据仅在 `0x81` 通道实测；多端点并发与非默认端点 RX 未测；
-`scp` 拉取会撞 FIFOFULL 半取窗口，大文件请走 HTTP。
+`scp` 拉取会撞 FIFOFULL 半取窗口，大文件请走 HTTP。GPU 结论均为实验线结论：
+不担保帧率、合成正确性或打包完整性；0360 内核无启动记录。
 
 ## 系统架构
 
@@ -59,8 +65,9 @@
 1. Boot 镜像 —— `src/bringup/` 把内核、ADT 与 shim 打进原厂 LK 期望的
    128 MiB 几何；`boot_b`（TWRP）是恢复路径。
 2. 内核增量 —— `patches/` 在 `xnu-8796.141.3` 上应用 MT6877 移植：中断路由、
-   UFS 块 I/O、Goodix SPI3/EINT 触摸、MTU3 USB 设备栈与板级 HAL（按键、
-   电池、pwrap）。集合内容固定，受哈希门禁。
+   UFS 块 I/O、Goodix SPI3/EINT 触摸、MTU3 USB 设备栈、板级 HAL（按键、
+   电池、pwrap），以及 0352+ 线的 RubyGPU 驱动面与 CPU B4a AMP 面。集合
+   内容固定，受哈希门禁。
 3. 首启 —— `tools/image/` 在 dyld 层修补 LaunchServices 死锁（4 字节 ICL
    NOP），并在刷机前校验 root 与 boot 镜像完整性。
 
@@ -79,10 +86,10 @@ sh ci/prepare-baseline.sh <dest>
 ALLOW_PUBLIC_UPSTREAM=1 sh ci/prepare-baseline.sh <dest>
 
 # 2. 宿主侧检查（只读，不接触设备）
-python3 scripts/verify-local.py --ci-config config/0351.env
+python3 scripts/verify-local.py --ci-config config/0360.env
 
 # 3. 复现内核
-#    xnu-0351 workflow 从固定基线构建，校验 patchset 与 exec-data 哈希；
+#    xnu-0360 workflow 从固定基线构建，校验 patchset 与 exec-data 哈希；
 #    任一项目补丁被跳过即失败。
 ```
 
@@ -100,10 +107,11 @@ boot 镜像本身不在仓库内；`tools/image/` 提供离线校验与补丁工
 | 架构（01–07） | SoC、引导链、显示、用户态、输入、硬件笔记 |
 | 构建与 CI（08–11） | 恢复、复现、脚本、基线配方 |
 | USB（12–14） | 宿主通道、EP2 黄金路径、按端点队列 |
+| GPU（15） | 内核驱动面、Mesa/PanVK 线、Metal 垫片研究、门禁 |
 | 记录 | [STATUS](docs/records/STATUS.md) · [VERIFICATION](docs/records/VERIFICATION.md) · [GUARANTEE](docs/records/GUARANTEE.md) |
 
 ```text
-patches/   XNU 增量：UFS、触摸、按键、电池、USB/ECM
+patches/   XNU 增量：UFS、触摸、按键、电池、USB/ECM、GPU 驱动面
 src/       boot 镜像打包、ARM64 shim、UFS 探针
 tools/     宿主 USB 工具、镜像校验、SWEETLOG 解码、TWRP diff
 ci/        固定基线配方、patchset pin、内核哈希门禁

@@ -3,11 +3,37 @@
 **English** · [中文](../zh/appendix-bootargs.md)
 
 > Status tags follow the [repository README](../../README.md). Defaults below
-> were read from the 0334/0351 sources (`ruby_usb_probe()` and friends); the
-> current 0351 boot line is 440 B, the limit is 607 B. The presets in the
-> "Historical presets" section are 0332i/0334-era and are kept for the record.
+> were read from the 0334/0351/0352/0360 sources (`ruby_usb_probe()` and
+> friends); the current 0360 boot line is 561 B, the limit is 607 B. The
+> presets in the "Historical presets" section are 0332i/0334-era and are kept
+> for the record.
 
-## Current 0351 boot line (440 B, copy-paste)
+## Current 0360 boot line (561 B, copy-paste)
+
+```text
+debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0 ufsroot=iosroot ufsrw=1 rootrw=1 sweethw=0 ufslun=2 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1 wdt_test=no_user_checkin sweetfb_noconsole=1 sweetfb_hz=60 ufslogsecs=1 rubyprobe=1 rubypwrap=1 rubkeys=1 rubybatt=1 rubyeint=1 rubymt6360=1 rubyeintirq=1 rubykpdirq=1 rubyeintb1=1 ruby_rxskip=1 rubyreboot=1 rubybacklight=1 rubyblhw=1 rubybattms=1000 rubygpupwr=2 rubygpucommit=3 rubygpuuc=1 rubygpumulti=1 rubygpubomax=512 rubygpuvmpages=1024
+```
+
+The string is `config/0360-boot.cmdline`; the GPU gates remain safe without
+it (see the table below). The 0352 line is `config/0352-boot.cmdline` (same
+USB/display/backlight core, `sweetfb_hz=30`, no GPU arguments).
+
+## GPU arguments (0352/0360)
+
+| Argument | Default | Line | Effect |
+|---|---|---|---|
+| `rubygpuprobe` | off | 0352 | One-shot read-only dump of the Mali / mfgcfg / SPM / bus-protect / PLL / MT6359P windows |
+| `rubygpupwr` | off | 0352 | `1` = minimal MFG2-5 power-on, `2` = full JM-style wake; single shot |
+| `rubygpucommit` | off | 0352 | First-pixel submit loop variant `1/2/3` (requires a successful `rubygpupwr=2` pass); single shot |
+| `rubygpuuc` | off | 0360 | Publishes the RubyGPU userclient |
+| `rubygpumulti` | off | 0360 | Multi-submit mode in the first-pixel loop |
+| `rubygpubomax` | 512 | 0360 | BO count bound for the userclient |
+| `rubygpuvmpages` | 1024 | 0360 | VM pool page budget (16 KiB pages) |
+| `rubymetalu` | off | 0360 | Allows `MetalPluginName`/`MetalPluginClassName` on `IOAcceleratorES` (plugin loading) |
+| `rubygpudiag` | off | 0360 | Selector-8 diagnostics and driver dumps (console-ring capped) |
+| `sweetfb_hz` | 60 (0360) / 10 (0351) | 0360 | Flush throttle; `10` restores the old throttle, `>=60` means every tick |
+
+## 0351 boot line (440 B, kept for the record)
 
 ```text
 debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0 ufsroot=iosroot ufsrw=1 rootrw=1 sweethw=0 ufslun=2 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1 wdt_test=no_user_checkin sweetfb_noconsole=1 sweetfb_hz=30 ufslogsecs=1 rubyprobe=1 rubypwrap=1 rubkeys=1 rubybatt=1 rubyeint=1 rubymt6360=1 rubyeintirq=1 rubykpdirq=1 rubyeintb1=1 ruby_rxskip=1 rubyreboot=1 rubybacklight=1 rubyblhw=1 rubybattms=1000
