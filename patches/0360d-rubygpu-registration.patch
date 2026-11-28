@@ -1,0 +1,15 @@
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 94d8ba5..8041eed 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -22,7 +22,9 @@ iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitc
+ iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp
+ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+-iokit/Kernel/arm/SweetGPUProbe.cpp                               optional iokitcpp
++iokit/Kernel/arm/RubyGPU.cpp                                     optional iokitcpp
++iokit/Kernel/arm/RubyGPUIRQ.cpp                                  optional iokitcpp
++iokit/Kernel/arm/RubyGPUUserClient.cpp                           optional iokitcpp
+ iokit/Kernel/arm/SweetNetwork.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp

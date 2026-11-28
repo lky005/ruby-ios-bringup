@@ -1,0 +1,3095 @@
+diff --git a/iokit/Kernel/arm/RubyGPU.cpp b/iokit/Kernel/arm/RubyGPU.cpp
+new file mode 100644
+index 0000000..4250399
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGPU.cpp
+@@ -0,0 +1,2718 @@
++/*
++ * SweetGPUProbe: one-shot read-only Mali/mfgcfg/SPM/INFRA/TOPCKGEN/PLL dump
++ * plus MT6359P BUCK/LDO readback over pwrap (P2a, CL-0352 rev).
++ * Enabled by bootarg rubygpuprobe=1 for the read-only probe, and by
++ * rubygpupwr=1 (v1 minimal) or rubygpupwr=2 (v2 full JM wake) for the
++ * power path below.
++ * The probe path performs no writes; the power path writes only SPM PWR_CON
++ * for MFG2..5 and mfgcfg 0xB0/0x20/0xB4/0x170, no PMIC/PLL/mux writes.
++ * The pwrap command/clear registers are used only to issue PMIC reads.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <kern/kern_types.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSString.h>
++#include <libkern/c++/OSSymbol.h>
++#include <pexpert/pexpert.h>
++#include <machine/machine_routines.h>
++#include <kern/clock.h>
++#include <kern/task.h>
++#include <mach/mach_time.h>
++#include "RubyGPU.h"
++#include "RubyGPUIRQ.h"
++#include "RubyGPUInternal.h"
++#include "RubyGPUUserClient.h"
++#include "SweetSurface.h"
++
++extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern "C" void flush_dcache(vm_offset_t, unsigned int, boolean_t);
++
++#define SWEET_GPU_PA     0x13000000UL
++#define SWEET_GPU_SIZE   0x4000
++#define SWEET_MFG_PA     0x13fbf000UL
++#define SWEET_MFG_SIZE   0x1000
++#define SWEET_SPM_PA     0x10006000UL
++#define SWEET_SPM_SIZE   0x1000
++#define SWEET_TOP_PA     0x10000000UL
++#define SWEET_TOP_SIZE   0x1000
++#define SWEET_IFRAO_PA   0x10001000UL
++#define SWEET_IFRAO_SIZE 0x1000
++#define SWEET_MFGAO_PA   0x13fa0000UL
++#define SWEET_MFGAO_SIZE 0x1000
++#define SWEET_PWRAP_PA   0x10026000UL
++#define SWEET_PWRAP_SIZE 0x1000
++
++#define PR_PWRAP_INIT_DONE    0x000u
++#define PR_PWRAP_SWINF_ACC    0x880u
++#define PR_PWRAP_SWINF_WDATA  0x884u
++#define PR_PWRAP_SWINF_RDATA  0x894u
++#define PR_PWRAP_SWINF_VLDCLR 0x8a4u
++#define PR_PWRAP_SWINF_STA    0x8a8u
++#define PR_SWINF_FSM(v)       (((v) >> 1) & 7u)
++#define PR_SWINF_INIT_DONE    (1u << 15)
++
++volatile uint32_t *sweet_gpu_regs;
++static volatile uint32_t *sweet_mfg_regs;
++static volatile uint32_t *sweet_spm_regs;
++static volatile uint32_t *sweet_top_regs;
++static volatile uint32_t *sweet_ifrao_regs;
++static volatile uint32_t *sweet_mfgao_regs;
++static volatile uint32_t *sweet_pwrap_regs;
++static bool sweet_gpu_done;
++
++static void
++sweet_show(volatile uint32_t *base, const char *name, uint32_t off)
++{
++	uint32_t val = *(volatile uint32_t *)((uintptr_t)base + off);
++
++	IOLog("SWEET GPU: %s=0x%08x\n", name, val);
++}
++
++static int
++sweet_pwrap_wait(uint32_t fsm)
++{
++	uint32_t i, v = 0;
++
++	for (i = 0; i < 10000; i++) {
++		v = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++		    PR_PWRAP_SWINF_STA);
++		if (PR_SWINF_FSM(v) == fsm) {
++			return 0;
++		}
++	}
++	IOLog("SWEET GPU: pwrap wait fsm=%u timeout sta=%08x\n", fsm, v);
++	return 1;
++}
++
++static int
++sweet_pmic_read(uint16_t reg, const char *name)
++{
++	uint32_t rd, init, sta;
++	uint16_t val;
++
++	init = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_INIT_DONE);
++	sta = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_SWINF_STA);
++	if (!(sta & PR_SWINF_INIT_DONE)) {
++		IOLog("SWEET GPU: %s=pwrap not ready init=%08x sta=%08x\n",
++		    name, init, sta);
++		return 1;
++	}
++	if (sweet_pwrap_wait(0) != 0) {
++		return 1;
++	}
++	*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_SWINF_ACC) = reg;
++	if (sweet_pwrap_wait(6) != 0) {
++		return 1;
++	}
++	rd = *(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_SWINF_RDATA);
++	val = (uint16_t)(rd & 0xffffu);
++	*(volatile uint32_t *)((uintptr_t)sweet_pwrap_regs +
++	    PR_PWRAP_SWINF_VLDCLR) = 1;
++	IOLog("SWEET GPU: %s=0x%04x\n", name, val);
++	return 0;
++}
++
++void
++sweet_gpu_probe_start(void)
++{
++	int on = 0;
++	vm_offset_t va;
++
++	if (sweet_gpu_done) {
++		return;
++	}
++	PE_parse_boot_argn("rubygpuprobe", &on, sizeof(on));
++	if (on != 1) {
++		return;
++	}
++	sweet_gpu_done = true;
++
++	va = ml_io_map(SWEET_GPU_PA, SWEET_GPU_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: map failed\n");
++		return;
++	}
++	sweet_gpu_regs = (volatile uint32_t *)va;
++	IOLog("SWEET GPU: mapped 0x%lx at 0x%llx read-only\n",
++	    SWEET_GPU_PA, (unsigned long long)va);
++	sweet_show(sweet_gpu_regs, "GPU_ID", 0x000);
++	sweet_show(sweet_gpu_regs, "AS_PRESENT", 0x018);
++	sweet_show(sweet_gpu_regs, "JS_PRESENT", 0x01c);
++	sweet_show(sweet_gpu_regs, "GPU_STATUS", 0x034);
++	sweet_show(sweet_gpu_regs, "SHADER_PRESENT_LO", 0x100);
++	sweet_show(sweet_gpu_regs, "SHADER_PRESENT_HI", 0x104);
++	sweet_show(sweet_gpu_regs, "SHADER_READY_LO", 0x140);
++	sweet_show(sweet_gpu_regs, "SHADER_READY_HI", 0x144);
++	sweet_show(sweet_gpu_regs, "TILER_READY_LO", 0x150);
++	sweet_show(sweet_gpu_regs, "L2_READY_LO", 0x160);
++
++	va = ml_io_map(SWEET_MFG_PA, SWEET_MFG_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: mfg map failed\n");
++	} else {
++		sweet_mfg_regs = (volatile uint32_t *)va;
++		IOLog("SWEET GPU: mapped 0x%lx at 0x%llx read-only\n",
++		    SWEET_MFG_PA, (unsigned long long)va);
++		sweet_show(sweet_mfg_regs, "MFG_CG_STA", 0x0);
++		sweet_show(sweet_mfg_regs, "MFG_DCM_CON", 0x10);
++		sweet_show(sweet_mfg_regs, "MFG_ASYNC_CON", 0x20);
++		sweet_show(sweet_mfg_regs, "MFG_QCHANNEL_00", 0x0b0);
++		sweet_show(sweet_mfg_regs, "MFG_QCHANNEL_CON", 0x0b4);
++		sweet_show(sweet_mfg_regs, "MFG_DEBUG_SEL", 0x170);
++		sweet_show(sweet_mfg_regs, "MFG_DEBUG_TOP", 0x178);
++		sweet_show(sweet_mfg_regs, "MFG_I2M_PROT_00", 0xf60);
++		sweet_show(sweet_mfg_regs, "MFG_I2M_PROT_01", 0xf64);
++		sweet_show(sweet_mfg_regs, "MFG_I2M_PROT_02", 0xf68);
++	}
++
++	va = ml_io_map(SWEET_SPM_PA, SWEET_SPM_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: spm map failed\n");
++	} else {
++		sweet_spm_regs = (volatile uint32_t *)va;
++		IOLog("SWEET GPU: mapped 0x%lx at 0x%llx read-only\n",
++		    SWEET_SPM_PA, (unsigned long long)va);
++		sweet_show(sweet_spm_regs, "SPM_PWR_STATUS", 0x0ef0);
++		sweet_show(sweet_spm_regs, "SPM_PWR_STATUS_2ND", 0x0ef4);
++		sweet_show(sweet_spm_regs, "SPM_XPU_PWR_STATUS", 0x0ef8);
++		sweet_show(sweet_spm_regs, "SPM_XPU_PWR_STATUS_2", 0x0efc);
++	}
++
++	va = ml_io_map(SWEET_TOP_PA, SWEET_TOP_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: top map failed\n");
++	} else {
++		sweet_top_regs = (volatile uint32_t *)va;
++		sweet_show(sweet_top_regs, "TOP_CLK_CFG_20", 0x0120);
++	}
++
++	va = ml_io_map(SWEET_IFRAO_PA, SWEET_IFRAO_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: infra map failed\n");
++	} else {
++		sweet_ifrao_regs = (volatile uint32_t *)va;
++		sweet_show(sweet_ifrao_regs, "INFRA_TOPAXI_PROTECTEN", 0x0220);
++		sweet_show(sweet_ifrao_regs, "INFRA_PROTECTEN_STA0", 0x0224);
++		sweet_show(sweet_ifrao_regs, "INFRA_PROTECTEN_STA1", 0x0228);
++	}
++
++	va = ml_io_map(SWEET_MFGAO_PA, SWEET_MFGAO_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: mfg_ao map failed\n");
++	} else {
++		sweet_mfgao_regs = (volatile uint32_t *)va;
++		sweet_show(sweet_mfgao_regs, "MFGPLL1_CON0", 0x008);
++		sweet_show(sweet_mfgao_regs, "MFGPLL1_CON1", 0x00c);
++		sweet_show(sweet_mfgao_regs, "MFGPLL4_CON0", 0x038);
++	}
++
++	va = ml_io_map(SWEET_PWRAP_PA, SWEET_PWRAP_SIZE);
++	if (va == 0) {
++		IOLog("SWEET GPU: pwrap map failed\n");
++	} else {
++		sweet_pwrap_regs = (volatile uint32_t *)va;
++		sweet_show(sweet_pwrap_regs, "PWRAP_INIT_DONE",
++		    PR_PWRAP_INIT_DONE);
++		sweet_show(sweet_pwrap_regs, "PWRAP_SWINF_STA",
++		    PR_PWRAP_SWINF_STA);
++		(void)sweet_pmic_read(0x1788, "PMIC_BUCK_VPROC2_CON0");
++		(void)sweet_pmic_read(0x17b2, "PMIC_BUCK_VPROC2_ELR0");
++		(void)sweet_pmic_read(0x1f2e, "PMIC_LDO_VSRAM_MD_CON0");
++		(void)sweet_pmic_read(0x1b4a, "PMIC_LDO_VSRAM_MD_ELR");
++	}
++	IOLog("SWEET GPU: probe done\n");
++}
++
++/*
++ * P2b - minimal MFG2..5 power-on, gated by rubygpupwr=1 (default off).
++ * Writes only SPM PWR_CON for MFG2..5 and mfgcfg 0xB0/0x20/0xB4/0x170.
++ * No PMIC writes (VPROC2/VSRAM_MD are already on at 0.75 V per docs/240),
++ * no PLL/mux writes. Single shot; any failure powers off what was
++ * enabled and restores the two mfgcfg registers.
++ */
++#define SWEET_PWR_CON(n)      (0x0e88u + 4u * (n))  /* n=0..3 -> MFG2..5 */
++#define SWEET_PWR_XPU_STA     0x0ef8u
++#define SWEET_PWR_XPU_STA2    0x0efcu
++#define SWEET_PWR_RST_B       (1u << 0)
++#define SWEET_PWR_ISO         (1u << 1)
++#define SWEET_PWR_ON          (1u << 2)
++#define SWEET_PWR_ON_2ND      (1u << 3)
++#define SWEET_PWR_CLK_DIS     (1u << 4)
++#define SWEET_PWR_SRAM_PDN    (1u << 8)
++#define SWEET_PWR_SRAM_ACK    (1u << 12)
++#define SWEET_PWR_MFG_BIT(n)  (1u << (n))           /* MFG0..5 -> bits 0..5 */
++
++static bool sweet_gpu_pwr_done;
++static bool sweet_pwr2_ready;
++
++uint32_t
++sweet_pwr_rd(volatile uint32_t *base, uint32_t off)
++{
++	return *(volatile uint32_t *)((uintptr_t)base + off);
++}
++
++void
++sweet_pwr_wr(volatile uint32_t *base, uint32_t off, uint32_t val)
++{
++	*(volatile uint32_t *)((uintptr_t)base + off) = val;
++}
++
++static bool
++sweet_pwr_wait(volatile uint32_t *base, uint32_t off, uint32_t mask,
++    uint32_t want, uint32_t iters)
++{
++	while (iters--) {
++		if ((sweet_pwr_rd(base, off) & mask) == want) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static volatile uint32_t *
++sweet_pwr_map(vm_offset_t pa, vm_size_t size)
++{
++	vm_offset_t va = ml_io_map(pa, size);
++
++	return va == 0 ? NULL : (volatile uint32_t *)va;
++}
++
++static int
++sweet_pwr_mfg_on(unsigned int n)
++{
++	uint32_t off = SWEET_PWR_CON(n);
++	uint32_t bit = SWEET_PWR_MFG_BIT(n + 2);
++	uint32_t v;
++
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_ON);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_ON_2ND);
++	if (!sweet_pwr_wait(sweet_spm_regs, SWEET_PWR_XPU_STA, bit, bit,
++	    100000) ||
++	    !sweet_pwr_wait(sweet_spm_regs, SWEET_PWR_XPU_STA2, bit, bit,
++	    100000)) {
++		IOLog("SWEET GPU: PWR MFG%u no ack\n", n + 2);
++		return 1;
++	}
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_CLK_DIS);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_ISO);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_RST_B);
++	v = sweet_pwr_rd(sweet_spm_regs, off);
++	if (v & SWEET_PWR_SRAM_PDN) {
++		sweet_pwr_wr(sweet_spm_regs, off, v & ~SWEET_PWR_SRAM_PDN);
++		if (!sweet_pwr_wait(sweet_spm_regs, off, SWEET_PWR_SRAM_ACK,
++		    0, 100000)) {
++			IOLog("SWEET GPU: PWR MFG%u sram ack\n", n + 2);
++			return 1;
++		}
++	}
++	IOLog("SWEET GPU: PWR MFG%u on con=0x%08x xpu=0x%08x\n", n + 2,
++	    sweet_pwr_rd(sweet_spm_regs, off),
++	    sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA));
++	return 0;
++}
++
++static void
++sweet_pwr_mfg_off(unsigned int n)
++{
++	uint32_t off = SWEET_PWR_CON(n);
++	uint32_t bit = SWEET_PWR_MFG_BIT(n + 2);
++
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_ISO);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) | SWEET_PWR_CLK_DIS);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_RST_B);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_ON);
++	sweet_pwr_wr(sweet_spm_regs, off,
++	    sweet_pwr_rd(sweet_spm_regs, off) & ~SWEET_PWR_ON_2ND);
++	(void)sweet_pwr_wait(sweet_spm_regs, SWEET_PWR_XPU_STA, bit, 0,
++	    100000);
++}
++
++static void
++sweet_pwr_v1_run(void)
++{
++	uint32_t old_b0, old_20, xpu;
++	int e;
++
++	if (sweet_spm_regs == NULL) {
++		sweet_spm_regs = sweet_pwr_map(SWEET_SPM_PA, SWEET_SPM_SIZE);
++	}
++	if (sweet_spm_regs == NULL) {
++		IOLog("SWEET GPU: PWR spm map failed\n");
++		return;
++	}
++	xpu = sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA);
++	if ((xpu & 0x3u) != 0x3u) {
++		IOLog("SWEET GPU: PWR MFG0/1 not on, abort xpu=0x%08x\n",
++		    xpu);
++		return;
++	}
++	if (sweet_mfg_regs == NULL) {
++		sweet_mfg_regs = sweet_pwr_map(SWEET_MFG_PA, SWEET_MFG_SIZE);
++	}
++	if (sweet_mfg_regs == NULL) {
++		IOLog("SWEET GPU: PWR mfg map failed\n");
++		return;
++	}
++
++	old_b0 = sweet_pwr_rd(sweet_mfg_regs, 0x0b0);
++	old_20 = sweet_pwr_rd(sweet_mfg_regs, 0x020);
++	sweet_pwr_wr(sweet_mfg_regs, 0x0b0,
++	    old_b0 & ~((1u << 21) | (1u << 10)));
++	sweet_pwr_wr(sweet_mfg_regs, 0x020, old_20 | (0xfu << 22));
++
++	for (e = 0; e < 4; e++) {
++		if (sweet_pwr_mfg_on((unsigned int)e) != 0) {
++			break;
++		}
++	}
++	if (e < 4) {
++		int failed = e;
++
++		sweet_pwr_mfg_off((unsigned int)failed);
++		while (e > 0) {
++			e--;
++			sweet_pwr_mfg_off((unsigned int)e);
++		}
++		sweet_pwr_wr(sweet_mfg_regs, 0x0b0, old_b0);
++		sweet_pwr_wr(sweet_mfg_regs, 0x020, old_20);
++		IOLog("SWEET GPU: PWR failed at MFG%u, rolled back\n",
++		    failed + 2);
++		return;
++	}
++
++	sweet_pwr_wr(sweet_mfg_regs, 0x0b4, 1);
++	sweet_pwr_wr(sweet_mfg_regs, 0x170, 3);
++	if (!sweet_pwr_wait(sweet_mfg_regs, 0x178, (1u << 2), (1u << 2),
++	    100000)) {
++		IOLog("SWEET GPU: PWR bus idle timeout\n");
++	}
++
++	if (sweet_gpu_regs == NULL) {
++		sweet_gpu_regs = sweet_pwr_map(SWEET_GPU_PA, SWEET_GPU_SIZE);
++	}
++	if (sweet_gpu_regs != NULL) {
++		IOLog("SWEET GPU: PWR READY sh=0x%08x/0x%08x ti=0x%08x/0x%08x "
++		    "l2=0x%08x/0x%08x\n",
++		    sweet_pwr_rd(sweet_gpu_regs, 0x140),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x144),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x150),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x154),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x160),
++		    sweet_pwr_rd(sweet_gpu_regs, 0x164));
++	}
++	xpu = sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA);
++	IOLog("SWEET GPU: PWR done xpu=0x%08x\n", xpu);
++}
++
++/*
++ * P2b-v2: full JM-style wake, gated by rubygpupwr=2 (default off, single
++ * shot). Order follows kbase: platform power -> PLL/CG -> SOFT_RESET ->
++ * TILER PWRON -> L2 PWRON -> SHADER PWRON, waiting PWRTRANS==0 and
++ * READY==PRESENT. No PMIC writes, TOPCKGEN is read-only, no HARD_RESET,
++ * no 26 MHz parking WA. Any failure powers off and restores mfgcfg.
++ */
++#define SWEET_PWR2_TOP_MUX          0x120u
++#define SWEET_PWR2_PLL1_CON0        0x008u
++#define SWEET_PWR2_PLL1_CON3        0x014u
++#define SWEET_PWR2_GPU_IRQ_RAWSTAT  0x020u
++#define SWEET_PWR2_GPU_IRQ_CLEAR    0x024u
++#define SWEET_PWR2_GPU_COMMAND      0x030u
++#define SWEET_PWR2_SHADER_PRESENT   0x100u
++#define SWEET_PWR2_TILER_PRESENT    0x110u
++#define SWEET_PWR2_L2_PRESENT       0x120u
++#define SWEET_PWR2_SHADER_READY     0x140u
++#define SWEET_PWR2_TILER_READY      0x150u
++#define SWEET_PWR2_L2_READY         0x160u
++#define SWEET_PWR2_SHADER_PWRON     0x180u
++#define SWEET_PWR2_TILER_PWRON      0x190u
++#define SWEET_PWR2_L2_PWRON         0x1a0u
++#define SWEET_PWR2_SHADER_PWROFF    0x1c0u
++#define SWEET_PWR2_TILER_PWROFF     0x1d0u
++#define SWEET_PWR2_L2_PWROFF        0x1e0u
++#define SWEET_PWR2_SHADER_PWRTRANS  0x200u
++#define SWEET_PWR2_TILER_PWRTRANS   0x210u
++#define SWEET_PWR2_L2_PWRTRANS      0x220u
++#define SWEET_PWR2_RESET_DONE       (1u << 8)
++#define SWEET_PWR2_SOFT_RESET       0x01u
++#define SWEET_PWR2_RESET_MS         500u
++#define SWEET_PWR2_PM_MS            5000u
++#define SWEET_PWR2_CG_MS            10u
++#define SWEET_PWR2_ROLLBACK_MS      1000u
++
++static uint64_t
++sweet_pwr2_rd64(volatile uint32_t *base, uint32_t off)
++{
++	return (uint64_t)sweet_pwr_rd(base, off) |
++	    ((uint64_t)sweet_pwr_rd(base, off + 4) << 32);
++}
++
++static void
++sweet_pwr2_wr64(volatile uint32_t *base, uint32_t off, uint64_t mask)
++{
++	if ((mask & 0xffffffffULL) != 0) {
++		sweet_pwr_wr(base, off, (uint32_t)mask);
++	}
++	if ((mask >> 32) != 0) {
++		sweet_pwr_wr(base, off + 4, (uint32_t)(mask >> 32));
++	}
++}
++
++static bool
++sweet_pwr2_wait_bits(volatile uint32_t *base, uint32_t off, uint32_t mask,
++    uint32_t want, uint32_t ms)
++{
++	uint64_t deadline;
++
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	for (;;) {
++		if ((sweet_pwr_rd(base, off) & mask) == want) {
++			return true;
++		}
++		if (mach_absolute_time() >= deadline) {
++			return false;
++		}
++		IOSleep(1);
++	}
++}
++
++static bool
++sweet_pwr2_wait_core(volatile uint32_t *gpu, uint32_t trans_off,
++    uint32_t ready_off, uint64_t mask, uint32_t ms)
++{
++	uint64_t deadline;
++
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	for (;;) {
++		uint64_t trans = sweet_pwr2_rd64(gpu, trans_off);
++		uint64_t ready = sweet_pwr2_rd64(gpu, ready_off);
++
++		if ((trans & mask) == 0 && (ready & mask) == mask) {
++			return true;
++		}
++		if (mach_absolute_time() >= deadline) {
++			return false;
++		}
++		IOSleep(1);
++	}
++}
++
++static bool
++sweet_pwr2_wait_tiler_l2(volatile uint32_t *gpu, uint64_t tiler_mask,
++    uint64_t l2_mask, uint32_t ms)
++{
++	uint64_t deadline;
++
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	for (;;) {
++		uint64_t tt = sweet_pwr2_rd64(gpu, SWEET_PWR2_TILER_PWRTRANS);
++		uint64_t tr = sweet_pwr2_rd64(gpu, SWEET_PWR2_TILER_READY);
++		uint64_t lt = sweet_pwr2_rd64(gpu, SWEET_PWR2_L2_PWRTRANS);
++		uint64_t lr = sweet_pwr2_rd64(gpu, SWEET_PWR2_L2_READY);
++
++		if ((tt & tiler_mask) == 0 && (tr & tiler_mask) == tiler_mask &&
++		    (lt & l2_mask) == 0 && (lr & l2_mask) == l2_mask) {
++			return true;
++		}
++		if (mach_absolute_time() >= deadline) {
++			return false;
++		}
++		IOSleep(1);
++	}
++}
++
++static void
++sweet_pwr2_wait_off(volatile uint32_t *gpu, uint32_t trans_off,
++    uint64_t mask, uint32_t ms)
++{
++	uint64_t deadline;
++
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	while ((sweet_pwr2_rd64(gpu, trans_off) & mask) != 0) {
++		if (mach_absolute_time() >= deadline) {
++			return;
++		}
++		IOSleep(1);
++	}
++}
++
++static bool
++sweet_pwr2_map(void)
++{
++	if (sweet_spm_regs == NULL) {
++		sweet_spm_regs = sweet_pwr_map(SWEET_SPM_PA, SWEET_SPM_SIZE);
++	}
++	if (sweet_mfg_regs == NULL) {
++		sweet_mfg_regs = sweet_pwr_map(SWEET_MFG_PA, SWEET_MFG_SIZE);
++	}
++	if (sweet_gpu_regs == NULL) {
++		sweet_gpu_regs = sweet_pwr_map(SWEET_GPU_PA, SWEET_GPU_SIZE);
++	}
++	if (sweet_top_regs == NULL) {
++		sweet_top_regs = sweet_pwr_map(SWEET_TOP_PA, SWEET_TOP_SIZE);
++	}
++	if (sweet_mfgao_regs == NULL) {
++		sweet_mfgao_regs = sweet_pwr_map(SWEET_MFGAO_PA,
++		    SWEET_MFGAO_SIZE);
++	}
++	return sweet_spm_regs != NULL && sweet_mfg_regs != NULL &&
++	    sweet_gpu_regs != NULL && sweet_top_regs != NULL &&
++	    sweet_mfgao_regs != NULL;
++}
++
++static void
++sweet_pwr2_run(void)
++{
++	const char *stage = "pre";
++	uint64_t shader_present = 0, tiler_present = 0, l2_present = 0;
++	uint32_t pll3, cg_sta, top_mux, xpu;
++	uint32_t old_10 = 0, old_20 = 0, old_b0 = 0;
++	int mtcmos = 0;
++	bool cg_written = false, cg_opened = false;
++	bool tiler_on = false, l2_on = false, shader_on = false;
++	int e;
++
++	if (!sweet_pwr2_map()) {
++		IOLog("SWEET GPU: PWR2 map failed\n");
++		return;
++	}
++	xpu = sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA);
++	if ((xpu & 0x3u) != 0x3u) {
++		IOLog("SWEET GPU: PWR2 MFG0/1 not on, abort xpu=0x%08x\n",
++		    xpu);
++		return;
++	}
++	pll3 = sweet_pwr_rd(sweet_mfgao_regs, SWEET_PWR2_PLL1_CON3);
++	cg_sta = sweet_pwr_rd(sweet_mfg_regs, 0x0);
++	top_mux = sweet_pwr_rd(sweet_top_regs, SWEET_PWR2_TOP_MUX);
++	IOLog("SWEET GPU: PWR2 pre cg=0x%08x pll0=0x%08x pll3=0x%08x "
++	    "top=0x%08x\n", cg_sta,
++	    sweet_pwr_rd(sweet_mfgao_regs, SWEET_PWR2_PLL1_CON0),
++	    pll3, top_mux);
++
++	stage = "mtcmos";
++	for (e = 0; e < 4; e++) {
++		if (sweet_pwr_mfg_on((unsigned int)e) != 0) {
++			goto fail;
++		}
++		mtcmos++;
++	}
++
++	stage = "pll";
++	if ((pll3 & 0x1u) == 0 || (pll3 & 0x2u) != 0) {
++		sweet_pwr_wr(sweet_mfgao_regs, SWEET_PWR2_PLL1_CON3,
++		    (pll3 | 0x1u) & ~0x2u);
++		IOSleep(1);
++		pll3 = sweet_pwr_rd(sweet_mfgao_regs, SWEET_PWR2_PLL1_CON3);
++	}
++	if (((pll3 & 0x1u) == 0) || ((pll3 & 0x2u) != 0)) {
++		goto fail;
++	}
++	if ((sweet_pwr_rd(sweet_mfgao_regs, SWEET_PWR2_PLL1_CON0) &
++	    0x1u) == 0) {
++		goto fail;
++	}
++
++	stage = "cg";
++	/* setclr gate: enable is a write to CLR (+0x8), STA bit0=0 means on */
++	sweet_pwr_wr(sweet_mfg_regs, 0x8, 0x1u);
++	if (!sweet_pwr2_wait_bits(sweet_mfg_regs, 0x0, 0x1u, 0,
++	    SWEET_PWR2_CG_MS)) {
++		goto fail;
++	}
++	cg_opened = (cg_sta & 0x1u) != 0;
++	old_20 = sweet_pwr_rd(sweet_mfg_regs, 0x20);
++	old_b0 = sweet_pwr_rd(sweet_mfg_regs, 0xb0);
++	old_10 = sweet_pwr_rd(sweet_mfg_regs, 0x10);
++	sweet_pwr_wr(sweet_mfg_regs, 0x20, old_20 | (0xfu << 22));
++	sweet_pwr_wr(sweet_mfg_regs, 0xb0,
++	    old_b0 & ~((1u << 8) | (1u << 20) | (1u << 21) | (1u << 10)));
++	sweet_pwr_wr(sweet_mfg_regs, 0x10,
++	    (old_10 | (1u << 15) | 0x3fu) & ~(1u << 6));
++	cg_written = true;
++	IOLog("SWEET GPU: PWR2 cg set=0x%08x async=0x%08x global=0x%08x "
++	    "dcm=0x%08x\n", sweet_pwr_rd(sweet_mfg_regs, 0x0),
++	    sweet_pwr_rd(sweet_mfg_regs, 0x20),
++	    sweet_pwr_rd(sweet_mfg_regs, 0xb0),
++	    sweet_pwr_rd(sweet_mfg_regs, 0x10));
++
++	stage = "mux";
++	if ((sweet_pwr_rd(sweet_top_regs, SWEET_PWR2_TOP_MUX) &
++	    (1u << 18)) == 0) {
++		goto fail;
++	}
++
++	stage = "present";
++	shader_present = sweet_pwr2_rd64(sweet_gpu_regs,
++	    SWEET_PWR2_SHADER_PRESENT);
++	tiler_present = sweet_pwr2_rd64(sweet_gpu_regs,
++	    SWEET_PWR2_TILER_PRESENT);
++	l2_present = sweet_pwr2_rd64(sweet_gpu_regs, SWEET_PWR2_L2_PRESENT);
++	IOLog("SWEET GPU: PWR2 present sh=0x%llx ti=0x%llx l2=0x%llx\n",
++	    (unsigned long long)shader_present,
++	    (unsigned long long)tiler_present,
++	    (unsigned long long)l2_present);
++	if (shader_present == 0 || tiler_present == 0 || l2_present == 0) {
++		goto fail;
++	}
++
++	stage = "reset";
++	sweet_pwr_wr(sweet_gpu_regs, SWEET_PWR2_GPU_COMMAND,
++	    SWEET_PWR2_SOFT_RESET);
++	if (!sweet_pwr2_wait_bits(sweet_gpu_regs,
++	    SWEET_PWR2_GPU_IRQ_RAWSTAT, SWEET_PWR2_RESET_DONE,
++	    SWEET_PWR2_RESET_DONE, SWEET_PWR2_RESET_MS)) {
++		goto fail;
++	}
++	sweet_pwr_wr(sweet_gpu_regs, SWEET_PWR2_GPU_IRQ_CLEAR,
++	    SWEET_PWR2_RESET_DONE);
++
++	stage = "tiler";
++	sweet_pwr2_wr64(sweet_gpu_regs, SWEET_PWR2_TILER_PWRON,
++	    tiler_present);
++	tiler_on = true;
++	if (l2_present != 1) {
++		sweet_pwr2_wr64(sweet_gpu_regs, SWEET_PWR2_L2_PWRON,
++		    l2_present & ~1ULL);
++		l2_on = true;
++	}
++	if (!sweet_pwr2_wait_tiler_l2(sweet_gpu_regs, tiler_present,
++	    l2_present, SWEET_PWR2_PM_MS)) {
++		goto fail;
++	}
++
++	stage = "shader";
++	sweet_pwr2_wr64(sweet_gpu_regs, SWEET_PWR2_SHADER_PWRON,
++	    shader_present);
++	shader_on = true;
++	if (!sweet_pwr2_wait_core(sweet_gpu_regs,
++	    SWEET_PWR2_SHADER_PWRTRANS, SWEET_PWR2_SHADER_READY,
++	    shader_present, SWEET_PWR2_PM_MS)) {
++		goto fail;
++	}
++
++	xpu = sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA);
++	IOLog("SWEET GPU: PWR2 done ready sh=0x%llx ti=0x%llx l2=0x%llx "
++	    "xpu=0x%08x\n",
++	    (unsigned long long)sweet_pwr2_rd64(sweet_gpu_regs,
++	    SWEET_PWR2_SHADER_READY),
++	    (unsigned long long)sweet_pwr2_rd64(sweet_gpu_regs,
++	    SWEET_PWR2_TILER_READY),
++	    (unsigned long long)sweet_pwr2_rd64(sweet_gpu_regs,
++	    SWEET_PWR2_L2_READY), xpu);
++	sweet_pwr2_ready = true;
++	return;
++
++fail:
++	xpu = sweet_pwr_rd(sweet_spm_regs, SWEET_PWR_XPU_STA);
++	IOLog("SWEET GPU: PWR2 FAIL stage=%s cg=0x%08x xpu=0x%08x\n", stage,
++	    sweet_pwr_rd(sweet_mfg_regs, 0x0), xpu);
++	if (shader_on) {
++		sweet_pwr2_wr64(sweet_gpu_regs, SWEET_PWR2_SHADER_PWROFF,
++		    shader_present);
++	}
++	if (l2_on) {
++		sweet_pwr2_wr64(sweet_gpu_regs, SWEET_PWR2_L2_PWROFF,
++		    l2_present & ~1ULL);
++	}
++	if (tiler_on) {
++		sweet_pwr2_wr64(sweet_gpu_regs, SWEET_PWR2_TILER_PWROFF,
++		    tiler_present);
++	}
++	if (shader_on) {
++		sweet_pwr2_wait_off(sweet_gpu_regs,
++		    SWEET_PWR2_SHADER_PWRTRANS, shader_present,
++		    SWEET_PWR2_ROLLBACK_MS);
++	}
++	if (tiler_on) {
++		sweet_pwr2_wait_off(sweet_gpu_regs,
++		    SWEET_PWR2_TILER_PWRTRANS, tiler_present,
++		    SWEET_PWR2_ROLLBACK_MS);
++	}
++	if (l2_on) {
++		sweet_pwr2_wait_off(sweet_gpu_regs,
++		    SWEET_PWR2_L2_PWRTRANS, l2_present & ~1ULL,
++		    SWEET_PWR2_ROLLBACK_MS);
++	}
++	if (cg_written) {
++		sweet_pwr_wr(sweet_mfg_regs, 0x20, old_20);
++		sweet_pwr_wr(sweet_mfg_regs, 0xb0, old_b0);
++		sweet_pwr_wr(sweet_mfg_regs, 0x10, old_10);
++	}
++	if (cg_opened) {
++		/* restore the closed state we opened (setclr: SET = disable) */
++		sweet_pwr_wr(sweet_mfg_regs, 0x4, 0x1u);
++	}
++	while (mtcmos > 0) {
++		mtcmos--;
++		sweet_pwr_mfg_off((unsigned int)mtcmos);
++	}
++	IOLog("SWEET GPU: PWR2 rolled back\n");
++}
++
++void
++sweet_gpu_power_start(void)
++{
++	int on = 0;
++
++	if (sweet_gpu_pwr_done) {
++		return;
++	}
++	PE_parse_boot_argn("rubygpupwr", &on, sizeof(on));
++	if (on != 1 && on != 2) {
++		return;
++	}
++	sweet_gpu_pwr_done = true;
++	if (on == 1) {
++		sweet_pwr_v1_run();
++	} else {
++		sweet_pwr2_run();
++	}
++	ruby_gpu_service_publish();
++}
++
++/*
++ * P2c: first-pixel loop, gated by rubygpucommit=1/2/3 (default off, single
++ * shot, requires a successful rubygpupwr=2 pass). Variant 1 uses the kbase
++ * standard JS_CONFIG; variant 2 adds START_MMU | JOB_CHAIN_FLAG. 1/2 are
++ * C1 (GPU-side JOB_IRQ_RAWSTAT poll); 3 is C2: the line is delivered as
++ * GIC SPI455 / INTID487 level through RubyGIC and the workloop action of
++ * RubyGPUIRQ clears it and wakes the waiter.
++ */
++
++static bool sweet_gpu_commit_done;
++static IOBufferMemoryDescriptor *sweet_p2c_md;
++
++static void
++sweet_p2c_tables(uint8_t *mem, uint64_t phys)
++{
++	uint64_t *l0 = (uint64_t *)(void *)mem;
++	uint64_t *l1 = (uint64_t *)(void *)(mem + 0x1000);
++	uint64_t *l2 = (uint64_t *)(void *)(mem + 0x2000);
++	uint64_t *l3 = (uint64_t *)(void *)(mem + 0x3000);
++	uint64_t pte = (1ULL << 10) | 3ULL;
++	uint64_t ate = (5ULL << 2) | (1ULL << 6) | (2ULL << 8) |
++	    (1ULL << 10) | 3ULL;
++
++	l0[0] = (phys + 0x1000) | pte;
++	l1[0] = (phys + 0x2000) | pte;
++	l2[0x80] = (phys + 0x3000) | pte;
++	l3[0] = (phys + 0x4000) | ate;
++}
++
++static void
++sweet_p2c_job(uint8_t *mem)
++{
++	uint32_t *job = (uint32_t *)(void *)(mem + SWEET_P2C_DATA_OFF);
++	uint64_t target = SWEET_P2C_VA + SWEET_P2C_TARGET_OFF;
++
++	job[4] = 2u << 1;                       /* Write value */
++	job[8] = (uint32_t)target;              /* payload: address lo */
++	job[9] = (uint32_t)(target >> 32);
++	job[10] = 6u;                           /* Immediate 32 */
++	job[12] = 0xff00ff00u;                  /* payload: value lo */
++	job[13] = 0;
++}
++
++static RubyGPUIRQ *sweet_c2_irq;
++
++RubyGPUIRQ *
++sweet_c2_irq_create(void)
++{
++	IOService *platform;
++	RubyGPUIRQ *irq;
++
++	if (sweet_c2_irq != NULL) {
++		return sweet_c2_irq;
++	}
++	platform = (IOService *)IOService::getPlatform();
++	irq = new RubyGPUIRQ;
++	if (platform == NULL || irq == NULL || !irq->init()) {
++		IOLog("SWEET GPU: C2 irq service failed\n");
++		OSSafeReleaseNULL(irq);
++		return NULL;
++	}
++	if (!irq->attach(platform)) {
++		IOLog("SWEET GPU: C2 irq service failed\n");
++		irq->release();
++		return NULL;
++	}
++	if (!irq->start(platform)) {
++		IOLog("SWEET GPU: C2 irq service failed\n");
++		irq->detach(platform);
++		irq->release();
++		return NULL;
++	}
++	irq->registerService();
++	sweet_c2_irq = irq;
++	return irq;
++}
++
++static void
++sweet_gpu_commit_run(int variant, RubyGPUIRQ *irq)
++{
++	const char *path = (irq != NULL) ? "c2" : "c1";
++	const char *stage = "pre";
++	volatile uint32_t *gpu = sweet_gpu_regs;
++	uint64_t phys = 0;
++	IOByteCount seglen = 0;
++	void *mem;
++	uint8_t *base;
++	uint64_t pgd, deadline;
++	uint32_t cfg, raw = 0, js = 0, asf = 0, girq = 0, mirq = 0;
++	uint32_t irq_status = 0, irq_hits = 0, irq_spurious = 0;
++	uint32_t jstat = 0, jmask = 0;
++	uint32_t val = 0;
++	vm_offset_t map;
++	bool done = false;
++
++	if (!sweet_pwr2_ready) {
++		IOLog("SWEET GPU: P2C skip pwr2 not ready\n");
++		return;
++	}
++	if (sweet_p2c_md == NULL) {
++		sweet_p2c_md = IOBufferMemoryDescriptor::withOptions(
++		    kIODirectionInOut | kIOMemoryPhysicallyContiguous,
++		    SWEET_P2C_MEM_SIZE, SWEET_P2C_PAGE_SIZE);
++	}
++	if (sweet_p2c_md == NULL ||
++	    sweet_p2c_md->prepare(kIODirectionInOut) != kIOReturnSuccess) {
++		IOLog("SWEET GPU: P2C alloc failed\n");
++		return;
++	}
++	mem = sweet_p2c_md->getBytesNoCopy();
++	phys = sweet_p2c_md->getPhysicalSegment(0, &seglen, 0);
++	if (mem == NULL || phys == 0 || seglen < SWEET_P2C_MEM_SIZE ||
++	    (phys & 0xfffull) != 0 ||
++	    phys + SWEET_P2C_MEM_SIZE >= (1ULL << 40)) {
++		IOLog("SWEET GPU: P2C map failed phys=0x%llx seg=0x%llx\n",
++		    (unsigned long long)phys, (unsigned long long)seglen);
++		return;
++	}
++	base = (uint8_t *)mem;
++	bzero(base, SWEET_P2C_MEM_SIZE);
++	sweet_p2c_tables(base, (uint64_t)phys);
++	sweet_p2c_job(base);
++	pgd = (uint64_t)phys & 0xfffffffffff0ULL;
++
++	/*
++	 * Mali MASK bits are enable bits: 1 unmasks, 0 masks (kbase writes
++	 * JOB_IRQ_MASK=0xFFFFFFFF to unmask). C1 polls RAWSTAT with
++	 * everything masked; C2 unmasks only the JOB done/fail bits.
++	 */
++	sweet_pwr_wr(gpu, SWEET_P2C_GPUIRQ_CLEAR, 0xffffffffu);
++	sweet_pwr_wr(gpu, SWEET_P2C_JOBIRQ_BASE + SWEET_P2C_JOBIRQ_CLEAR,
++	    0xffffffffu);
++	sweet_pwr_wr(gpu, SWEET_P2C_MMUIRQ_BASE + SWEET_P2C_MMUIRQ_CLEAR,
++	    0xffffffffu);
++
++	sweet_pwr_wr(gpu, SWEET_P2C_GPUIRQ_MASK, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_MMUIRQ_BASE + SWEET_P2C_MMUIRQ_MASK, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_JOBIRQ_BASE + SWEET_P2C_JOBIRQ_MASK,
++	    (irq != NULL) ? SWEET_P2C_JOB_DONE_MASK : 0);
++	if (irq != NULL) {
++		irq->fDone = false;
++	}
++
++	flush_dcache((vm_offset_t)mem, SWEET_P2C_MEM_SIZE, FALSE);
++
++	stage = "as";
++	if (!sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0,
++	    10)) {
++		goto fail;
++	}
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x30, 0x42000006u);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x34, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x00, (uint32_t)pgd);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x04, (uint32_t)(pgd >> 32));
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x08, 0x888d8f88u);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x0c, 0x4c8du);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x18, 1);   /* UPDATE */
++	if (!sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0,
++	    10)) {
++		goto fail;
++	}
++
++	stage = "submit";
++	cfg = (variant == 2) ? SWEET_P2C_CFG_ALT : SWEET_P2C_CFG_STD;
++	flush_dcache((vm_offset_t)mem, SWEET_P2C_MEM_SIZE, FALSE);
++	sweet_pwr_wr(gpu, SWEET_P2C_JS_BASE + 0x40, (uint32_t)SWEET_P2C_VA);
++	sweet_pwr_wr(gpu, SWEET_P2C_JS_BASE + 0x44,
++	    (uint32_t)(SWEET_P2C_VA >> 32));
++	sweet_pwr_wr(gpu, SWEET_P2C_JS_BASE + 0x58, cfg);
++	sweet_pwr_wr(gpu, SWEET_P2C_JS_BASE + 0x60, 1);   /* START */
++	IOLog("SWEET GPU: P2C submit path=%s variant=%d cfg=0x%08x va=0x%llx\n",
++	    path, variant, cfg, (unsigned long long)SWEET_P2C_VA);
++
++	stage = "job";
++	if (irq != NULL) {
++		irq->setSlot(0);
++		if (irq->setEnabled(1) != 0) {
++			goto fail;
++		}
++		done = irq->waitDone(SWEET_P2C_C2_WAIT_MS) == 0;
++		irq->setEnabled(0);
++		irq_status = irq->fStatus;
++		irq_hits = irq->fHits;
++		irq_spurious = irq->fSpurious;
++		raw = irq->fRaw;
++		js = irq->fJs;
++		asf = irq->fAsf;
++		girq = irq->fGirq;
++		mirq = irq->fMirq;
++		if (!done) {
++			raw = sweet_pwr_rd(gpu, SWEET_P2C_JOBIRQ_BASE +
++			    SWEET_P2C_JOBIRQ_RAWSTAT);
++			js = sweet_pwr_rd(gpu, SWEET_P2C_JS_BASE + 0x24);
++			asf = sweet_pwr_rd(gpu, SWEET_P2C_AS_BASE + 0x1c);
++			girq = sweet_pwr_rd(gpu, SWEET_P2C_GPUIRQ_RAWSTAT);
++			mirq = sweet_pwr_rd(gpu, SWEET_P2C_MMUIRQ_BASE +
++			    SWEET_P2C_MMUIRQ_RAWSTAT);
++		}
++	} else {
++		clock_interval_to_deadline(1000, NSEC_PER_MSEC, &deadline);
++		for (;;) {
++			raw = sweet_pwr_rd(gpu, SWEET_P2C_JOBIRQ_BASE +
++			    SWEET_P2C_JOBIRQ_RAWSTAT);
++			if (raw & SWEET_P2C_JOB_DONE_MASK) {
++				done = true;
++				break;
++			}
++			if (mach_absolute_time() >= deadline) {
++				break;
++			}
++			IOSleep(1);
++		}
++		js = sweet_pwr_rd(gpu, SWEET_P2C_JS_BASE + 0x24);
++		asf = sweet_pwr_rd(gpu, SWEET_P2C_AS_BASE + 0x1c);
++		girq = sweet_pwr_rd(gpu, SWEET_P2C_GPUIRQ_RAWSTAT);
++		mirq = sweet_pwr_rd(gpu, SWEET_P2C_MMUIRQ_BASE +
++		    SWEET_P2C_MMUIRQ_RAWSTAT);
++		sweet_pwr_wr(gpu, SWEET_P2C_JOBIRQ_BASE + SWEET_P2C_JOBIRQ_CLEAR,
++		    SWEET_P2C_JOB_DONE_MASK);
++	}
++
++	jstat = sweet_pwr_rd(gpu, SWEET_P2C_JOBIRQ_BASE +
++	    SWEET_P2C_JOBIRQ_STATUS);
++	jmask = sweet_pwr_rd(gpu, SWEET_P2C_JOBIRQ_BASE +
++	    SWEET_P2C_JOBIRQ_MASK);
++
++	map = ml_io_map((vm_offset_t)((uint64_t)phys + SWEET_P2C_DATA_OFF),
++	    SWEET_P2C_PAGE_SIZE);
++	if (map != 0) {
++		val = *(volatile uint32_t *)(map + SWEET_P2C_TARGET_OFF);
++	}
++
++	if (done && (raw & SWEET_P2C_JOB_DONE_MASK) == (1u << 0) && js == 0 &&
++	    val == 0xff00ff00u) {
++		IOLog("SWEET GPU: P2C done path=%s variant=%d value=0x%08x "
++		    "irq=0x%08x raw=0x%08x js=0x%08x as=0x%08x girq=0x%08x "
++		    "mirq=0x%08x stat=0x%08x mask=0x%08x hits=%u spur=%u\n",
++		    path, variant, val, irq_status, raw, js, asf, girq, mirq,
++		    jstat, jmask, irq_hits, irq_spurious);
++		return;
++	}
++
++	stage = "verify";
++fail:
++	if (irq != NULL) {
++		irq->setEnabled(0);
++	}
++	IOLog("SWEET GPU: P2C FAIL path=%s variant=%d stage=%s "
++	    "irq=0x%08x raw=0x%08x js=0x%08x as=0x%08x girq=0x%08x "
++	    "mirq=0x%08x stat=0x%08x mask=0x%08x value=0x%08x "
++	    "hits=%u spur=%u\n", path, variant, stage, irq_status, raw, js,
++	    asf, girq, mirq, jstat, jmask, val, irq_hits, irq_spurious);
++	sweet_pwr_wr(gpu, SWEET_P2C_JS_BASE + 0x60, 3);   /* HARD_STOP */
++	IOSleep(10);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x00, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x04, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x30, 1);   /* UNMAPPED */
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x34, 0);
++	if (sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0,
++	    10)) {
++		sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x18, 1);
++	}
++	sweet_pwr_wr(gpu, SWEET_P2C_JOBIRQ_BASE + SWEET_P2C_JOBIRQ_CLEAR,
++	    0xffffffffu);
++	sweet_pwr_wr(gpu, SWEET_P2C_GPUIRQ_CLEAR, 0xffffffffu);
++	sweet_pwr_wr(gpu, SWEET_P2C_MMUIRQ_BASE + SWEET_P2C_MMUIRQ_CLEAR,
++	    0xffffffffu);
++	IOLog("SWEET GPU: P2C rolled back\n");
++}
++
++void
++sweet_gpu_commit_start(void)
++{
++	int on = 0;
++	RubyGPUIRQ *irq = NULL;
++
++	if (sweet_gpu_commit_done) {
++		return;
++	}
++	PE_parse_boot_argn("rubygpucommit", &on, sizeof(on));
++	if (on != 1 && on != 2 && on != 3) {
++		return;
++	}
++	sweet_gpu_commit_done = true;
++	if (on == 3) {
++		if (!sweet_pwr2_ready) {
++			IOLog("SWEET GPU: P2C skip pwr2 not ready\n");
++			return;
++		}
++		irq = sweet_c2_irq_create();
++		if (irq == NULL) {
++			IOLog("SWEET GPU: C2 irq unavailable, fallback C1 poll\n");
++		}
++		sweet_gpu_commit_run(1, irq);
++		return;
++	}
++	sweet_gpu_commit_run(on, NULL);
++}
++
++/* ==================== P3.2 user client device layer ==================== */
++
++#define RUBYGPU_UC_MAX_BO        32      /* legacy boot-arg floor */
++#define RUBYGPU_UC_MAX_BO_INIT   64
++#define RUBYGPU_UC_MAX_BO_CAP    4096
++#define RUBYGPU_UC_MAX_VM        8
++#define RUBYGPU_UC_VM_CHUNK_PAGES 64
++#define RUBYGPU_UC_VM_FIRST_PAGES 16
++#define RUBYGPU_UC_MAX_VM_CHUNKS 32
++#define RUBYGPU_UC_VM_PAGES_DEFAULT 1024
++#define RUBYGPU_UC_VM_PAGES_MIN  16
++#define RUBYGPU_UC_MAX_CLIENTS   8
++#define RUBYGPU_UC_BO_MAX        (64ULL << 20)
++#define RUBYGPU_UC_BO_TOTAL_MB_DEFAULT 1024
++#define RUBYGPU_UC_VA_MIN        0x10000000ULL
++#define RUBYGPU_UC_VA_LIMIT      (1ULL << 36)
++#define RUBYGPU_UC_BO_RETRIES    8
++
++#define RUBYGPU_PTE_TABLE        ((1ULL << 10) | 3ULL)
++#define RUBYGPU_ATE_PAGE         ((5ULL << 2) | (1ULL << 6) | (2ULL << 8) | \
++                                  (1ULL << 10) | 3ULL)
++#define RUBYGPU_PA_MASK          0xFFFFFFF000ULL
++
++struct ruby_gpu_bo_slot {
++	IOMemoryDescriptor     *md;
++	SweetSurface             *surface;       /* set for imported surfaces */
++	uint64_t                 size;
++	uint32_t                 flags;
++	uint32_t                 owner;
++	bool                     used;
++	bool                     prepared;
++};
++
++struct ruby_gpu_vm_chunk {
++	IOBufferMemoryDescriptor *md;
++	uint64_t                 phys;
++	uint8_t                 *va;
++	uint32_t                 page_base;
++	uint32_t                 pages;
++	uint32_t                 cap_pages;
++};
++
++struct ruby_gpu_vm_slot {
++	bool                     used;
++	uint32_t                 owner;
++	struct ruby_gpu_vm_chunk chunks[RUBYGPU_UC_MAX_VM_CHUNKS];
++	uint32_t                 nchunks;
++	uint32_t                 pool_pages;
++	uint64_t                 root_phys;
++	uint64_t                 va_start;
++	uint64_t                 va_size;
++};
++
++static ruby_gpu_bo_slot **s_uc_bo;
++static uint32_t s_uc_bo_cap;
++static uint32_t s_uc_bo_count;
++static uint64_t s_uc_bo_bytes;
++static ruby_gpu_vm_slot s_uc_vm[RUBYGPU_UC_MAX_VM];
++static IOLock *s_uc_lock;
++static RubyGPU *s_uc_service;
++static uint32_t s_uc_clients;
++static uint32_t s_uc_client_seq;
++static uint64_t s_uc_active_pgd;
++static int s_uc_cfg_multi = -1;
++static uint32_t s_uc_cfg_bo_max;
++static uint32_t s_uc_cfg_vm_pages;
++static uint64_t s_uc_cfg_bo_total;
++static int s_uc_cfg_vm_legacy;
++
++static IOLock *
++ruby_gpu_uc_lock(void)
++{
++	if (s_uc_lock == NULL) {
++		s_uc_lock = IOLockAlloc();
++	}
++	return s_uc_lock;
++}
++
++static bool
++ruby_gpu_drv_diag(void)
++{
++	static int state = -1;
++	static uint32_t lines;
++
++	if (state < 0) {
++		int on = 0;
++		PE_parse_boot_argn("rubygpudiag", &on, sizeof(on));
++		state = (on != 0) ? 1 : 0;
++	}
++	if (state == 0 || lines >= 200) {
++		return false;
++	}
++	lines++;
++	return true;
++}
++
++/* Caller holds s_uc_lock.  Defaults: 512 BO, 1024 PTE pages, multi-client on. */
++static void
++ruby_gpu_uc_config(void)
++{
++	int multi = 1;
++	int bo_max = 512;
++	int vm_pages = RUBYGPU_UC_VM_PAGES_DEFAULT;
++	int bo_total_mb = RUBYGPU_UC_BO_TOTAL_MB_DEFAULT;
++	int vm_legacy = 0;
++
++	if (s_uc_cfg_multi >= 0) {
++		return;
++	}
++	PE_parse_boot_argn("rubygpumulti", &multi, sizeof(multi));
++	PE_parse_boot_argn("rubygpubomax", &bo_max, sizeof(bo_max));
++	PE_parse_boot_argn("rubygpuvmpages", &vm_pages, sizeof(vm_pages));
++	PE_parse_boot_argn("rubygpubototalmb", &bo_total_mb, sizeof(bo_total_mb));
++	PE_parse_boot_argn("rubygpuvmlegacy", &vm_legacy, sizeof(vm_legacy));
++	if (bo_max < RUBYGPU_UC_MAX_BO) {
++		bo_max = RUBYGPU_UC_MAX_BO;
++	}
++	if (bo_max > RUBYGPU_UC_MAX_BO_CAP) {
++		bo_max = RUBYGPU_UC_MAX_BO_CAP;
++	}
++	if (vm_pages < RUBYGPU_UC_VM_PAGES_MIN) {
++		vm_pages = RUBYGPU_UC_VM_PAGES_MIN;
++	}
++	if (vm_pages > RUBYGPU_UC_MAX_VM_CHUNKS * RUBYGPU_UC_VM_CHUNK_PAGES) {
++		vm_pages = RUBYGPU_UC_MAX_VM_CHUNKS * RUBYGPU_UC_VM_CHUNK_PAGES;
++	}
++	if (bo_total_mb < 64) {
++		bo_total_mb = 64;
++	}
++	if (bo_total_mb > 4096) {
++		bo_total_mb = 4096;
++	}
++	s_uc_cfg_multi = (multi != 0) ? 1 : 0;
++	s_uc_cfg_vm_legacy = (vm_legacy != 0) ? 1 : 0;
++	s_uc_cfg_bo_max = (uint32_t)bo_max;
++	s_uc_cfg_vm_pages = (uint32_t)vm_pages;
++	s_uc_cfg_bo_total = (uint64_t)bo_total_mb << 20;
++}
++
++bool
++ruby_gpu_powered(void)
++{
++	return sweet_pwr2_ready;
++}
++
++int
++ruby_gpu_param(uint32_t param, uint64_t *value)
++{
++	switch (param) {
++	case kRubyGPUParamVAStart:
++		*value = RUBYGPU_UC_VA_MIN;
++		return RUBYGPU_OK;
++	case kRubyGPUParamVARange:
++		*value = RUBYGPU_UC_VA_LIMIT - RUBYGPU_UC_VA_MIN;
++		return RUBYGPU_OK;
++	case kRubyGPUParamPowered:
++		*value = sweet_pwr2_ready ? 1 : 0;
++		return RUBYGPU_OK;
++	case kRubyGPUParamIRQIntID:
++		*value = SWEET_P2C_C2_JOB_INTID;
++		return RUBYGPU_OK;
++	case kRubyGPUParamVersion:
++		*value = RUBYGPU_UC_VERSION;
++		return RUBYGPU_OK;
++	default:
++		return RUBYGPU_E_ARG;
++	}
++}
++
++static IOBufferMemoryDescriptor *
++ruby_gpu_uc_alloc_contig(uint64_t size, bool low4g, uint64_t *phys)
++{
++	int i;
++
++	for (i = 0; i < RUBYGPU_UC_BO_RETRIES; i++) {
++		IOBufferMemoryDescriptor *md;
++		IOByteCount seg = 0;
++		uint64_t pa;
++
++		md = IOBufferMemoryDescriptor::withOptions(
++		    kIODirectionInOut | kIOMemoryPhysicallyContiguous,
++		    (vm_size_t)size, PAGE_SIZE);
++		if (md == NULL) {
++			return NULL;
++		}
++		if (md->prepare(kIODirectionInOut) != kIOReturnSuccess) {
++			md->release();
++			return NULL;
++		}
++		pa = (uint64_t)md->getPhysicalSegment(0, &seg, 0);
++		if (pa != 0 && (uint64_t)seg >= size &&
++		    pa + size <= (1ULL << 40) &&
++		    (!low4g || pa + size <= (1ULL << 32))) {
++			*phys = pa;
++			return md;
++		}
++		md->complete(kIODirectionInOut);
++		md->release();
++	}
++	return NULL;
++}
++
++/*
++ * BO memory: ordinary wired pages (no kIOMemoryPhysicallyContiguous).  The
++ * GPU maps them page by page in ruby_gpu_vm_bind(); the low-4G flag is still
++ * honoured by rejecting any page above 4 GiB.
++ */
++static IOBufferMemoryDescriptor *
++ruby_gpu_uc_alloc_pages(uint64_t size, bool low4g, uint64_t *phys)
++{
++	IOBufferMemoryDescriptor *md;
++	uint64_t off, first = 0, first_seg = 0;
++
++	md = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut,
++	    (vm_size_t)size, PAGE_SIZE);
++	if (md == NULL) {
++		return NULL;
++	}
++	if (md->prepare(kIODirectionInOut) != kIOReturnSuccess) {
++		md->release();
++		return NULL;
++	}
++	for (off = 0; off < size; off += 0x1000ULL) {
++		IOByteCount seg = 0;
++		uint64_t pa = (uint64_t)md->getPhysicalSegment(
++		    (IOByteCount)off, &seg, 0);
++
++		if (pa == 0 || seg < 0x1000ULL || (pa & 0xfffULL) != 0 ||
++		    pa + 0x1000ULL > (1ULL << 40) ||
++		    (low4g && pa + 0x1000ULL > (1ULL << 32))) {
++			md->complete(kIODirectionInOut);
++			md->release();
++			return NULL;
++		}
++		if (off == 0) {
++			first = pa;
++			first_seg = (uint64_t)seg;
++		}
++	}
++	if (first_seg < size) {
++		IOLog("RGDIAG sg bo size=%llu first=0x%llx seg0=0x%llx\n",
++		    (unsigned long long)size, (unsigned long long)first,
++		    (unsigned long long)first_seg);
++	}
++	if (phys != NULL) {
++		*phys = first;
++	}
++	return md;
++}
++
++static ruby_gpu_bo_slot *
++ruby_gpu_uc_bo_at(uint32_t slot)
++{
++	if (s_uc_bo == NULL || slot >= s_uc_bo_cap) {
++		return NULL;
++	}
++	return s_uc_bo[slot];
++}
++
++static ruby_gpu_bo_slot *
++ruby_gpu_uc_bo_lookup(uint32_t handle, uint32_t *slot_out)
++{
++	uint32_t slot = handle - 1;
++	ruby_gpu_bo_slot *bo;
++
++	if (handle == 0) {
++		return NULL;
++	}
++	bo = ruby_gpu_uc_bo_at(slot);
++	if (bo == NULL || !bo->used) {
++		return NULL;
++	}
++	if (slot_out != NULL) {
++		*slot_out = slot;
++	}
++	return bo;
++}
++
++/* Caller holds s_uc_lock.  Returns the new capacity or 0 on failure. */
++static uint32_t
++ruby_gpu_uc_bo_table_grow(void)
++{
++	uint32_t cap = (s_uc_bo_cap == 0) ? RUBYGPU_UC_MAX_BO_INIT : s_uc_bo_cap * 2;
++	ruby_gpu_bo_slot **tbl;
++
++	if (cap > s_uc_cfg_bo_max) {
++		cap = s_uc_cfg_bo_max;
++	}
++	if (cap <= s_uc_bo_cap) {
++		return 0;
++	}
++	tbl = (ruby_gpu_bo_slot **)IOMallocData(cap * sizeof(*tbl));
++	if (tbl == NULL) {
++		IOLog("RGDIAG bo table grow cap=%u failed\n", cap);
++		return 0;
++	}
++	bzero(tbl, cap * sizeof(*tbl));
++	if (s_uc_bo != NULL) {
++		memcpy(tbl, s_uc_bo, s_uc_bo_cap * sizeof(*tbl));
++		IOFreeData(s_uc_bo, s_uc_bo_cap * sizeof(*s_uc_bo));
++	}
++	s_uc_bo = tbl;
++	s_uc_bo_cap = cap;
++	IOLog("RGDIAG bo table cap=%u\n", cap);
++	return cap;
++}
++
++int
++ruby_gpu_bo_create(uint32_t client, uint64_t size, uint32_t flags,
++    uint32_t *handle, uint64_t *phys)
++{
++	IOBufferMemoryDescriptor *md;
++	ruby_gpu_bo_slot *bo;
++	uint64_t pa = 0;
++	uint32_t i, slot = 0;
++	bool have_slot = false;
++
++	if (size == 0 || size > RUBYGPU_UC_BO_MAX || (size & 0xfffull) != 0 ||
++	    handle == NULL) {
++		return RUBYGPU_E_ARG;
++	}
++	IOLockLock(ruby_gpu_uc_lock());
++	ruby_gpu_uc_config();
++	if (s_uc_bo_cap == 0 && ruby_gpu_uc_bo_table_grow() == 0) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_NORES;
++	}
++	for (i = 0; i < s_uc_bo_cap; i++) {
++		if (s_uc_bo[i] == NULL) {
++			slot = i;
++			have_slot = true;
++			break;
++		}
++	}
++	if (!have_slot && s_uc_bo_cap < s_uc_cfg_bo_max &&
++	    ruby_gpu_uc_bo_table_grow() != 0) {
++		for (i = 0; i < s_uc_bo_cap; i++) {
++			if (s_uc_bo[i] == NULL) {
++				slot = i;
++				have_slot = true;
++				break;
++			}
++		}
++	}
++	if (!have_slot) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		IOLog("RGDIAG bo exhausted cap=%u used=%u\n", s_uc_bo_cap,
++		    s_uc_bo_count);
++		return RUBYGPU_E_NORES;
++	}
++	if (s_uc_bo_bytes + size > s_uc_cfg_bo_total) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		IOLog("RGDIAG bo quota size=%llu used=%llu max=%llu\n",
++		    (unsigned long long)size, (unsigned long long)s_uc_bo_bytes,
++		    (unsigned long long)s_uc_cfg_bo_total);
++		return RUBYGPU_E_NORES;
++	}
++	md = ruby_gpu_uc_alloc_pages(size, (flags & kRubyGPUBOFlagLow4G) != 0, &pa);
++	if (md == NULL) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_NORES;
++	}
++	bo = (ruby_gpu_bo_slot *)IOMallocData(sizeof(*bo));
++	if (bo == NULL) {
++		md->complete(kIODirectionInOut);
++		md->release();
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_NORES;
++	}
++	bzero(bo, sizeof(*bo));
++	bo->md = md;
++	bo->size = size;
++	bo->flags = flags;
++	bo->owner = client;
++	bo->used = true;
++	bo->prepared = true;
++	s_uc_bo[slot] = bo;
++	s_uc_bo_count++;
++	s_uc_bo_bytes += size;
++	*handle = slot + 1;
++	if (phys != NULL) {
++		*phys = pa;
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return RUBYGPU_OK;
++}
++
++int
++ruby_gpu_bo_create_from_surface(uint32_t client, uint32_t surface_id,
++    uint32_t flags, uint64_t size, uint32_t *handle, uint64_t *out_size,
++    uint64_t *phys)
++{
++	SweetSurface *surface;
++	ruby_gpu_bo_slot *bo;
++	uint64_t pa = 0, alloc_size;
++	uint32_t i, slot = 0;
++	bool have_slot = false;
++
++	(void)flags;
++	if (handle == NULL || surface_id == 0) {
++		return RUBYGPU_E_ARG;
++	}
++	surface = sweet_surface_copy(surface_id);
++	if (surface == NULL || surface->memory == NULL) {
++		if (surface != NULL) {
++			surface->release();
++		}
++		return RUBYGPU_E_NOENT;
++	}
++	/* Only the task that created the surface may expose it to the GPU; a
++	 * surface id alone must not let another process map its memory. */
++	if (!sweet_surface_owned_by(surface, current_task())) {
++		surface->release();
++		IOLog("RGDIAG bo import surface=%u denied (owner mismatch)\n",
++		    surface_id);
++		return RUBYGPU_E_PERM;
++	}
++	alloc_size = surface->allocSize;
++	if (size == 0) {
++		size = alloc_size;
++	}
++	if (size == 0 || size > RUBYGPU_UC_BO_MAX || (size & 0xfffull) != 0 ||
++	    size > alloc_size) {
++		surface->release();
++		return RUBYGPU_E_ARG;
++	}
++	IOLockLock(ruby_gpu_uc_lock());
++	ruby_gpu_uc_config();
++	if (s_uc_bo_cap == 0 && ruby_gpu_uc_bo_table_grow() == 0) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		surface->release();
++		return RUBYGPU_E_NORES;
++	}
++	for (i = 0; i < s_uc_bo_cap; i++) {
++		if (s_uc_bo[i] == NULL) {
++			slot = i;
++			have_slot = true;
++			break;
++		}
++	}
++	if (!have_slot && s_uc_bo_cap < s_uc_cfg_bo_max &&
++	    ruby_gpu_uc_bo_table_grow() != 0) {
++		for (i = 0; i < s_uc_bo_cap; i++) {
++			if (s_uc_bo[i] == NULL) {
++				slot = i;
++				have_slot = true;
++				break;
++			}
++		}
++	}
++	if (!have_slot || s_uc_bo_bytes + size > s_uc_cfg_bo_total) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		surface->release();
++		return RUBYGPU_E_NORES;
++	}
++	bo = (ruby_gpu_bo_slot *)IOMallocData(sizeof(*bo));
++	if (bo == NULL) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		surface->release();
++		return RUBYGPU_E_NORES;
++	}
++	surface->memory->retain();
++	bzero(bo, sizeof(*bo));
++	bo->md = surface->memory;
++	bo->surface = surface;
++	bo->size = size;
++	bo->owner = client;
++	bo->used = true;
++	bo->prepared = false;
++	s_uc_bo[slot] = bo;
++	s_uc_bo_count++;
++	s_uc_bo_bytes += size;
++	*handle = slot + 1;
++	if (out_size != NULL) {
++		*out_size = size;
++	}
++	IOLog("RGDIAG bo import surface=%u handle=%u size=%llu\n", surface_id,
++	    slot + 1, (unsigned long long)size);
++	if (phys != NULL) {
++		IOByteCount seg = 0;
++		uint64_t p = (uint64_t)bo->md->getPhysicalSegment(0, &seg, 0);
++
++		if (p != 0) {
++			pa = p;
++		}
++		*phys = pa;
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return RUBYGPU_OK;
++}
++
++int
++ruby_gpu_bo_release(uint32_t client, uint32_t handle)
++{
++	ruby_gpu_bo_slot *bo;
++	uint32_t slot = 0;
++	int ret = RUBYGPU_OK;
++
++	IOLockLock(ruby_gpu_uc_lock());
++	bo = ruby_gpu_uc_bo_lookup(handle, &slot);
++	if (bo == NULL || bo->owner != client) {
++		ret = RUBYGPU_E_NOENT;
++	} else {
++		if (bo->prepared) {
++			bo->md->complete(kIODirectionInOut);
++		}
++		bo->md->release();
++		if (bo->surface != NULL) {
++			bo->surface->release();
++		}
++		s_uc_bo_bytes -= bo->size;
++		s_uc_bo_count--;
++		IOFreeData(bo, sizeof(*bo));
++		s_uc_bo[slot] = NULL;
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return ret;
++}
++
++IOMemoryDescriptor *
++ruby_gpu_bo_descriptor(uint32_t client, uint32_t handle)
++{
++	IOMemoryDescriptor *md = NULL;
++	ruby_gpu_bo_slot *bo;
++
++	IOLockLock(ruby_gpu_uc_lock());
++	bo = ruby_gpu_uc_bo_lookup(handle, NULL);
++	if (bo != NULL && bo->owner == client) {
++		md = bo->md;
++		md->retain();
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return md;
++}
++
++static uint8_t *
++ruby_gpu_uc_bo_kva(ruby_gpu_bo_slot *bo)
++{
++	IOBufferMemoryDescriptor *buffer;
++
++	if (bo == NULL || bo->md == NULL) {
++		return NULL;
++	}
++	if (bo->surface != NULL) {
++		return (uint8_t *)bo->surface->kernelAddress();
++	}
++	buffer = OSDynamicCast(IOBufferMemoryDescriptor, bo->md);
++	return (buffer != NULL) ? (uint8_t *)buffer->getBytesNoCopy() : NULL;
++}
++
++int
++ruby_gpu_bo_sync(uint32_t client, uint32_t handle, uint64_t offset,
++    uint64_t size, uint32_t dir)
++{
++	ruby_gpu_bo_slot *bo;
++	uint8_t *base;
++
++	if (dir > kRubyGPUSyncInOut) {
++		return RUBYGPU_E_ARG;
++	}
++	IOLockLock(ruby_gpu_uc_lock());
++	bo = ruby_gpu_uc_bo_lookup(handle, NULL);
++	if (bo == NULL || bo->owner != client || size == 0 ||
++	    offset > bo->size || offset + size > bo->size) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_ARG;
++	}
++	base = ruby_gpu_uc_bo_kva(bo);
++	if (base == NULL) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_IO;
++	}
++	(void)bo->md->performOperation(kIOMemoryIncoherentIOFlush,
++	    (IOByteCount)offset, (IOByteCount)size);
++	flush_dcache((vm_offset_t)(base + offset), (unsigned int)size, FALSE);
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return RUBYGPU_OK;
++}
++
++static ruby_gpu_vm_slot *
++ruby_gpu_uc_vm_lookup(uint32_t handle)
++{
++	uint32_t slot = handle - 1;
++
++	if (handle == 0 || slot >= RUBYGPU_UC_MAX_VM || !s_uc_vm[slot].used) {
++		return NULL;
++	}
++	return &s_uc_vm[slot];
++}
++
++static uint8_t *
++ruby_gpu_uc_vm_page_va(ruby_gpu_vm_slot *vm, uint32_t idx)
++{
++	uint32_t i;
++
++	for (i = 0; i < vm->nchunks; i++) {
++		struct ruby_gpu_vm_chunk *c = &vm->chunks[i];
++
++		if (idx >= c->page_base && idx < c->page_base + c->pages) {
++			return c->va + (uint64_t)(idx - c->page_base) * 0x1000ULL;
++		}
++	}
++	return NULL;
++}
++
++static uint64_t
++ruby_gpu_uc_vm_page_phys(ruby_gpu_vm_slot *vm, uint32_t idx)
++{
++	uint32_t i;
++
++	for (i = 0; i < vm->nchunks; i++) {
++		struct ruby_gpu_vm_chunk *c = &vm->chunks[i];
++
++		if (idx >= c->page_base && idx < c->page_base + c->pages) {
++			return c->phys + (uint64_t)(idx - c->page_base) * 0x1000ULL;
++		}
++	}
++	return 0;
++}
++
++static uint8_t *
++ruby_gpu_uc_vm_phys_va(ruby_gpu_vm_slot *vm, uint64_t phys)
++{
++	uint32_t i;
++
++	for (i = 0; i < vm->nchunks; i++) {
++		struct ruby_gpu_vm_chunk *c = &vm->chunks[i];
++
++		if (phys >= c->phys &&
++		    phys < c->phys + (uint64_t)c->pages * 0x1000ULL) {
++			return c->va + (phys - c->phys);
++		}
++	}
++	return NULL;
++}
++
++static void
++ruby_gpu_uc_vm_free_chunks(ruby_gpu_vm_slot *vm)
++{
++	uint32_t i;
++
++	for (i = 0; i < vm->nchunks; i++) {
++		if (vm->chunks[i].md != NULL) {
++			vm->chunks[i].md->complete(kIODirectionInOut);
++			vm->chunks[i].md->release();
++		}
++	}
++	vm->nchunks = 0;
++}
++
++static void
++ruby_gpu_uc_vm_flush(ruby_gpu_vm_slot *vm)
++{
++	uint32_t i;
++
++	for (i = 0; i < vm->nchunks; i++) {
++		struct ruby_gpu_vm_chunk *c = &vm->chunks[i];
++
++		if (c->pages != 0) {
++			flush_dcache((vm_offset_t)c->va,
++			    (unsigned int)(c->pages * 0x1000ULL), FALSE);
++		}
++	}
++}
++
++/* Caller holds s_uc_lock. */
++static bool
++ruby_gpu_uc_vm_add_chunk(ruby_gpu_vm_slot *vm, uint32_t cap_pages)
++{
++	IOBufferMemoryDescriptor *md;
++	struct ruby_gpu_vm_chunk *c;
++	uint64_t phys = 0;
++	uint32_t idx = vm->nchunks;
++
++	if (idx >= RUBYGPU_UC_MAX_VM_CHUNKS || cap_pages == 0) {
++		return false;
++	}
++	md = ruby_gpu_uc_alloc_contig((uint64_t)cap_pages * 0x1000ULL, false,
++	    &phys);
++	if (md == NULL) {
++		IOLog("RGDIAG vm chunk alloc %u pages failed\n", cap_pages);
++		return false;
++	}
++	c = &vm->chunks[idx];
++	c->md = md;
++	c->phys = phys;
++	c->va = (uint8_t *)md->getBytesNoCopy();
++	if (c->va == NULL) {
++		md->complete(kIODirectionInOut);
++		md->release();
++		bzero(c, sizeof(*c));
++		return false;
++	}
++	c->page_base = vm->pool_pages;
++	c->pages = 0;
++	c->cap_pages = cap_pages;
++	vm->nchunks = idx + 1;
++	return true;
++}
++
++/* Caller holds s_uc_lock.  Returns 0xffffffff on exhaustion. */
++static uint32_t
++ruby_gpu_uc_vm_alloc_page(ruby_gpu_vm_slot *vm)
++{
++	struct ruby_gpu_vm_chunk *c;
++	uint32_t idx = vm->pool_pages;
++	uint32_t cap;
++	uint32_t limit = s_uc_cfg_vm_legacy ? RUBYGPU_UC_VM_CHUNK_PAGES :
++	    s_uc_cfg_vm_pages;
++
++	if (idx >= limit) {
++		IOLog("RGDIAG vm pool exhausted (%u pages, next %u)\n",
++		    limit, idx);
++		return 0xffffffffu;
++	}
++	if (vm->nchunks == 0) {
++		cap = s_uc_cfg_vm_pages - idx;
++		if (cap > RUBYGPU_UC_VM_FIRST_PAGES) {
++			cap = RUBYGPU_UC_VM_FIRST_PAGES;
++		}
++		if (!ruby_gpu_uc_vm_add_chunk(vm, cap)) {
++			return 0xffffffffu;
++		}
++	} else {
++		c = &vm->chunks[vm->nchunks - 1];
++		if (c->pages == c->cap_pages) {
++			cap = s_uc_cfg_vm_pages - idx;
++			if (cap > RUBYGPU_UC_VM_CHUNK_PAGES) {
++				cap = RUBYGPU_UC_VM_CHUNK_PAGES;
++			}
++			if (!ruby_gpu_uc_vm_add_chunk(vm, cap)) {
++				return 0xffffffffu;
++			}
++		}
++	}
++	c = &vm->chunks[vm->nchunks - 1];
++	bzero(c->va + (uint64_t)c->pages * 0x1000ULL, 0x1000);
++	c->pages++;
++	vm->pool_pages++;
++	return idx;
++}
++
++static uint64_t *
++ruby_gpu_uc_vm_l3(ruby_gpu_vm_slot *vm, uint64_t va, bool create)
++{
++	uint64_t *tbl = (uint64_t *)(void *)ruby_gpu_uc_vm_page_va(vm, 0);
++	int level;
++
++	if (tbl == NULL) {
++		return NULL;
++	}
++	for (level = 0; level < 3; level++) {
++		uint32_t idx = (uint32_t)((va >> (39 - 9 * level)) & 0x1ff);
++		uint64_t entry = tbl[idx];
++
++		if ((entry & 1ULL) == 0) {
++			uint32_t child;
++			uint64_t child_phys;
++			uint8_t *child_va;
++
++			if (!create) {
++				return NULL;
++			}
++			child = ruby_gpu_uc_vm_alloc_page(vm);
++			if (child == 0xffffffffu) {
++				return NULL;
++			}
++			child_phys = ruby_gpu_uc_vm_page_phys(vm, child);
++			child_va = ruby_gpu_uc_vm_page_va(vm, child);
++			if (child_phys == 0 || child_va == NULL) {
++				return NULL;
++			}
++			tbl[idx] = child_phys | RUBYGPU_PTE_TABLE;
++			tbl = (uint64_t *)(void *)child_va;
++		} else {
++			uint64_t child_phys = entry & RUBYGPU_PA_MASK;
++			uint8_t *child_va = ruby_gpu_uc_vm_phys_va(vm, child_phys);
++
++			if (child_va == NULL) {
++				return NULL;
++			}
++			tbl = (uint64_t *)(void *)child_va;
++		}
++	}
++	return tbl;
++}
++
++static int
++ruby_gpu_uc_as_flush(void)
++{
++	volatile uint32_t *gpu = sweet_gpu_regs;
++
++	if (gpu == NULL) {
++		return RUBYGPU_E_IO;
++	}
++	if (!sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0, 10)) {
++		return RUBYGPU_E_IO;
++	}
++	/* Whole-space 2^44 flush, then FLUSH_MEM which releases the lock. */
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x10, 43);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x14, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x18, 2);   /* LOCK */
++	if (!sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0, 10)) {
++		return RUBYGPU_E_IO;
++	}
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x18, 5);   /* FLUSH_MEM */
++	if (!sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0, 10)) {
++		return RUBYGPU_E_IO;
++	}
++	return RUBYGPU_OK;
++}
++
++static int
++ruby_gpu_uc_as_program(uint64_t pgd, bool flush_mmu)
++{
++	volatile uint32_t *gpu = sweet_gpu_regs;
++	uint64_t prev = s_uc_active_pgd;
++
++	if (gpu == NULL) {
++		return RUBYGPU_E_IO;
++	}
++	/*
++	 * Always re-issue AS_COMMAND_UPDATE, even for the active root: the
++	 * MMU caches translations, and PanVK binds BOs lazily between submits.
++	 * Without the broadcast, a VA first walked as unmapped keeps faulting
++	 * after it is bound (P0.2 issued UPDATE on every bind).
++	 */
++	if (!sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0, 10)) {
++		return RUBYGPU_E_IO;
++	}
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x30, 0x42000006u);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x34, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x00, (uint32_t)pgd);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x04, (uint32_t)(pgd >> 32));
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x08, 0x888d8f88u);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x0c, 0x4c8du);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x18, 1);
++	if (!sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0, 10)) {
++		return RUBYGPU_E_IO;
++	}
++	/*
++	 * A new TRANSTAB alone leaves stale translations from the previous
++	 * VM in the MMU caches (DATA_INVALID faults on the second client).
++	 */
++	if (flush_mmu) {
++		int ret = ruby_gpu_uc_as_flush();
++
++		if (ret != RUBYGPU_OK) {
++			return ret;
++		}
++	}
++	if (ruby_gpu_drv_diag()) {
++		IOLog("RGDIAG as pgd=0x%llx prev=0x%llx flush=%d\n",
++		    (unsigned long long)pgd, (unsigned long long)prev,
++		    flush_mmu ? 1 : 0);
++	}
++	s_uc_active_pgd = pgd;
++	return RUBYGPU_OK;
++}
++
++static void
++ruby_gpu_uc_as_unmap(void)
++{
++	volatile uint32_t *gpu = sweet_gpu_regs;
++
++	if (gpu == NULL) {
++		return;
++	}
++	(void)sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0, 10);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x00, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x04, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x30, 1);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x34, 0);
++	(void)sweet_pwr2_wait_bits(gpu, SWEET_P2C_AS_BASE + 0x28, 0x1u, 0, 10);
++	sweet_pwr_wr(gpu, SWEET_P2C_AS_BASE + 0x18, 1);
++	s_uc_active_pgd = 0;
++}
++
++int
++ruby_gpu_vm_create(uint32_t client, uint64_t va_start, uint64_t va_size,
++    uint32_t *handle)
++{
++	ruby_gpu_vm_slot *vm;
++	int i, slot = -1;
++
++	if (handle == NULL || va_size == 0 || (va_start & 0xfffull) != 0 ||
++	    (va_size & 0xfffull) != 0 || va_start < RUBYGPU_UC_VA_MIN ||
++	    va_start + va_size > RUBYGPU_UC_VA_LIMIT) {
++		return RUBYGPU_E_ARG;
++	}
++	if (!sweet_pwr2_ready) {
++		return RUBYGPU_E_NOPWR;
++	}
++	IOLockLock(ruby_gpu_uc_lock());
++	ruby_gpu_uc_config();
++	for (i = 0; i < RUBYGPU_UC_MAX_VM; i++) {
++		if (!s_uc_vm[i].used) {
++			slot = i;
++			break;
++		}
++	}
++	if (slot < 0) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_NORES;
++	}
++	vm = &s_uc_vm[slot];
++	bzero(vm, sizeof(*vm));
++	if (!ruby_gpu_uc_vm_add_chunk(vm, s_uc_cfg_vm_legacy ?
++	    RUBYGPU_UC_VM_CHUNK_PAGES : RUBYGPU_UC_VM_FIRST_PAGES) ||
++	    ruby_gpu_uc_vm_alloc_page(vm) == 0xffffffffu) {
++		ruby_gpu_uc_vm_free_chunks(vm);
++		bzero(vm, sizeof(*vm));
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_NORES;
++	}
++	vm->root_phys = ruby_gpu_uc_vm_page_phys(vm, 0);
++	vm->owner = client;
++	vm->va_start = va_start;
++	vm->va_size = va_size;
++	vm->used = true;
++	*handle = (uint32_t)(slot + 1);
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return RUBYGPU_OK;
++}
++
++int
++ruby_gpu_vm_destroy(uint32_t client, uint32_t handle)
++{
++	ruby_gpu_vm_slot *vm;
++
++	IOLockLock(ruby_gpu_uc_lock());
++	vm = ruby_gpu_uc_vm_lookup(handle);
++	if (vm == NULL || vm->owner != client) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_NOENT;
++	}
++	if (s_uc_active_pgd == vm->root_phys) {
++		ruby_gpu_uc_as_unmap();
++	}
++	ruby_gpu_uc_vm_free_chunks(vm);
++	bzero(vm, sizeof(*vm));
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return RUBYGPU_OK;
++}
++
++int
++ruby_gpu_vm_bind(uint32_t client, uint32_t vmh, uint32_t boh, uint64_t va,
++    uint64_t bo_offset, uint64_t size)
++{
++	ruby_gpu_vm_slot *vm;
++	ruby_gpu_bo_slot *bo;
++	uint64_t i;
++	int ret;
++
++	if (size == 0 || (va & 0xfffull) != 0 || (bo_offset & 0xfffull) != 0 ||
++	    (size & 0xfffull) != 0) {
++		return RUBYGPU_E_ARG;
++	}
++	IOLockLock(ruby_gpu_uc_lock());
++	vm = ruby_gpu_uc_vm_lookup(vmh);
++	bo = ruby_gpu_uc_bo_lookup(boh, NULL);
++	if (vm == NULL || bo == NULL || vm->owner != client ||
++	    bo->owner != client || bo_offset + size > bo->size ||
++	    va < vm->va_start || va + size > vm->va_start + vm->va_size) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_ARG;
++	}
++	for (i = 0; i < size; i += 0x1000ULL) {
++		IOByteCount seg = 0;
++		uint64_t pa = (uint64_t)bo->md->getPhysicalSegment(
++		    (IOByteCount)(bo_offset + i), &seg, 0);
++		uint64_t *l3;
++		uint32_t idx;
++
++		if (pa == 0 || seg < 0x1000ULL || (pa & 0xfffULL) != 0 ||
++		    pa + 0x1000ULL > (1ULL << 40)) {
++			ret = RUBYGPU_E_IO;
++			goto fail;
++		}
++		l3 = ruby_gpu_uc_vm_l3(vm, va + i, true);
++		if (l3 == NULL) {
++			ret = RUBYGPU_E_NORES;
++			goto fail;
++		}
++		idx = (uint32_t)(((va + i) >> 12) & 0x1ff);
++		l3[idx] = pa | RUBYGPU_ATE_PAGE;
++	}
++	if (ruby_gpu_drv_diag()) {
++		IOLog("RGDIAG bind vm=%u va=0x%llx size=0x%llx pages=%u "
++		    "chunks=%u legacy=%d\n", vmh, (unsigned long long)va,
++		    (unsigned long long)size, vm->pool_pages, vm->nchunks,
++		    s_uc_cfg_vm_legacy);
++	}
++	ruby_gpu_uc_vm_flush(vm);
++	ret = ruby_gpu_uc_as_program(vm->root_phys, false);
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return ret;
++
++fail:
++	for (uint64_t j = 0; j < i; j += 0x1000ULL) {
++		uint64_t *l3 = ruby_gpu_uc_vm_l3(vm, va + j, false);
++		uint32_t idx = (uint32_t)(((va + j) >> 12) & 0x1ff);
++
++		if (l3 != NULL) {
++			l3[idx] = 0;
++		}
++	}
++	ruby_gpu_uc_vm_flush(vm);
++	(void)ruby_gpu_uc_as_program(vm->root_phys, false);
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return ret;
++}
++
++int
++ruby_gpu_vm_unbind(uint32_t client, uint32_t vmh, uint64_t va, uint64_t size)
++{
++	ruby_gpu_vm_slot *vm;
++	uint64_t i;
++	int ret;
++
++	if (size == 0 || (va & 0xfffull) != 0 || (size & 0xfffull) != 0) {
++		return RUBYGPU_E_ARG;
++	}
++	IOLockLock(ruby_gpu_uc_lock());
++	vm = ruby_gpu_uc_vm_lookup(vmh);
++	if (vm == NULL || vm->owner != client) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_NOENT;
++	}
++	for (i = 0; i < size; i += 0x1000ULL) {
++		uint64_t *l3 = ruby_gpu_uc_vm_l3(vm, va + i, false);
++		uint32_t idx = (uint32_t)(((va + i) >> 12) & 0x1ff);
++
++		if (l3 != NULL) {
++			l3[idx] = 0;
++		}
++	}
++	ruby_gpu_uc_vm_flush(vm);
++	if (s_uc_active_pgd == vm->root_phys) {
++		ret = ruby_gpu_uc_as_flush();
++	} else {
++		ret = RUBYGPU_OK;
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return ret;
++}
++
++static int
++ruby_gpu_bo_find_offset(ruby_gpu_bo_slot *bo, uint64_t pa, uint64_t *bo_off,
++    uint64_t *seg_base)
++{
++	uint64_t off = 0;
++
++	if (bo == NULL || bo->md == NULL) {
++		return 0;
++	}
++	while (off < bo->size) {
++		IOByteCount seg = 0;
++		uint64_t p = (uint64_t)bo->md->getPhysicalSegment(
++		    (IOByteCount)off, &seg, 0);
++
++		if (p == 0 || seg == 0) {
++			return 0;
++		}
++		if (off + seg > bo->size) {
++			seg = (IOByteCount)(bo->size - off);
++		}
++		if (pa >= p && pa < p + seg) {
++			if (bo_off != NULL) {
++				*bo_off = off + (pa - p);
++			}
++			if (seg_base != NULL) {
++				*seg_base = p;
++			}
++			return 1;
++		}
++		off += seg;
++	}
++	return 0;
++}
++
++static void
++ruby_gpu_uc_vm_walk_dump(ruby_gpu_vm_slot *vm, uint64_t va)
++{
++	uint64_t *tbl = (uint64_t *)(void *)ruby_gpu_uc_vm_page_va(vm, 0);
++	uint64_t e0 = 0, e1 = 0, e2 = 0, e3 = 0;
++	int level;
++
++	if (tbl == NULL) {
++		return;
++	}
++	for (level = 0; level < 3; level++) {
++		uint32_t idx = (uint32_t)((va >> (39 - 9 * level)) & 0x1ff);
++		uint64_t e = tbl[idx];
++		uint8_t *child;
++
++		if (level == 0) {
++			e0 = e;
++		} else if (level == 1) {
++			e1 = e;
++		} else {
++			e2 = e;
++		}
++		if ((e & 1ULL) == 0) {
++			break;
++		}
++		child = ruby_gpu_uc_vm_phys_va(vm, e & RUBYGPU_PA_MASK);
++		if (child == NULL) {
++			break;
++		}
++		tbl = (uint64_t *)(void *)child;
++	}
++	if (level >= 3) {
++		e3 = tbl[(uint32_t)((va >> 12) & 0x1ff)];
++	}
++	IOLog("RGDIAG walk va=0x%llx e0=0x%llx e1=0x%llx e2=0x%llx "
++	    "e3=0x%llx levels=%d\n", (unsigned long long)va,
++	    (unsigned long long)e0, (unsigned long long)e1,
++	    (unsigned long long)e2, (unsigned long long)e3, level);
++}
++
++static void
++ruby_gpu_uc_dump_failed_submit(ruby_gpu_vm_slot *vm, uint64_t job_va)
++{
++	uint64_t *l3;
++	uint64_t pte = 0, pa = 0, bp = 0, off = 0;
++	uint32_t idx = (uint32_t)((job_va >> 12) & 0x1ff);
++	ruby_gpu_bo_slot *bo = NULL;
++	uint32_t i;
++
++	if (vm == NULL || sweet_gpu_regs == NULL) {
++		return;
++	}
++	l3 = ruby_gpu_uc_vm_l3(vm, job_va, false);
++	if (l3 != NULL) {
++		pte = l3[idx];
++		pa = pte & RUBYGPU_PA_MASK;
++		for (i = 0; i < s_uc_bo_cap; i++) {
++			ruby_gpu_bo_slot *cand = ruby_gpu_uc_bo_at(i);
++			uint64_t bo_off;
++
++			if (cand == NULL || !cand->used || cand->md == NULL) {
++				continue;
++			}
++			if (ruby_gpu_bo_find_offset(cand, pa, &bo_off, &bp)) {
++				bo = cand;
++				off = bo_off + (job_va & 0xfff);
++				break;
++			}
++		}
++	}
++	IOLog("RGDIAG chain pte=0x%llx pa=0x%llx bo_phys=0x%llx size=0x%llx\n",
++	    pte, pa, bp, (bo != NULL) ? bo->size : 0);
++	IOLog("RGDIAG jsfeat js0=0x%x js1=0x%x js2=0x%x\n",
++	    sweet_pwr_rd(sweet_gpu_regs, 0x0c0),
++	    sweet_pwr_rd(sweet_gpu_regs, 0x0c4),
++	    sweet_pwr_rd(sweet_gpu_regs, 0x0c8));
++	{
++		uint32_t asf = sweet_pwr_rd(sweet_gpu_regs,
++		    SWEET_P2C_AS_BASE + 0x1c);
++		uint64_t fa = ((uint64_t)sweet_pwr_rd(sweet_gpu_regs,
++		    SWEET_P2C_AS_BASE + 0x24) << 32) |
++		    sweet_pwr_rd(sweet_gpu_regs, SWEET_P2C_AS_BASE + 0x20);
++
++		IOLog("RGDIAG mmu asf=0x%x fa=0x%llx girq=0x%x mirq=0x%x\n", asf,
++		    (unsigned long long)fa,
++		    sweet_pwr_rd(sweet_gpu_regs, SWEET_P2C_GPUIRQ_RAWSTAT),
++		    sweet_pwr_rd(sweet_gpu_regs, SWEET_P2C_MMUIRQ_BASE +
++		    SWEET_P2C_MMUIRQ_RAWSTAT));
++		if (fa != 0 && fa < RUBYGPU_UC_VA_LIMIT) {
++			ruby_gpu_uc_vm_walk_dump(vm, fa);
++		}
++	}
++	if (bo != NULL) {
++		uint8_t *base = ruby_gpu_uc_bo_kva(bo);
++
++		if (base != NULL && off + 64 <= bo->size) {
++			const uint32_t *w = (const uint32_t *)(void *)(base + off);
++
++			IOLog("RGDIAG chain w0: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
++			IOLog("RGDIAG chain w1: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			    w[8], w[9], w[10], w[11], w[12], w[13], w[14], w[15]);
++		}
++	}
++}
++
++static int
++ruby_gpu_uc_chain_type(ruby_gpu_vm_slot *vm, uint64_t job_va, uint32_t *type)
++{
++	uint64_t *l3;
++	uint64_t pa;
++	uint32_t idx = (uint32_t)((job_va >> 12) & 0x1ff);
++	uint32_t i;
++
++	if (vm == NULL || type == NULL) {
++		return RUBYGPU_E_ARG;
++	}
++	l3 = ruby_gpu_uc_vm_l3(vm, job_va, false);
++	if (l3 == NULL) {
++		return RUBYGPU_E_ARG;
++	}
++	pa = l3[idx] & RUBYGPU_PA_MASK;
++	for (i = 0; i < s_uc_bo_cap; i++) {
++		ruby_gpu_bo_slot *bo = ruby_gpu_uc_bo_at(i);
++		uint64_t bo_off, off;
++		uint8_t *base;
++
++		if (bo == NULL || !bo->used || bo->md == NULL) {
++			continue;
++		}
++		if (!ruby_gpu_bo_find_offset(bo, pa, &bo_off, NULL)) {
++			continue;
++		}
++		off = bo_off + (job_va & 0xfff);
++		base = ruby_gpu_uc_bo_kva(bo);
++		if (base == NULL || off + 20 > bo->size) {
++			return RUBYGPU_E_IO;
++		}
++		/* genxml Job Header: word 4 bit 0 Is64b, type at 4:1..7. */
++		*type = (*(uint32_t *)(void *)(base + off + 16) >> 1) & 0x7f;
++		return RUBYGPU_OK;
++	}
++	return RUBYGPU_E_IO;
++}
++
++static uint32_t
++ruby_gpu_uc_slot_for_type(uint32_t type)
++{
++	switch (type) {
++	case 4:  /* compute */
++	case 5:  /* vertex */
++	case 6:  /* geometry */
++	case 7:  /* tiler */
++	case 10: /* indexed vertex (v9) */
++	case 11: /* malloc vertex (v9) */
++	case 12: /* fullscreen (v9) */
++		return 1;
++	default: /* fragment, write value, cache flush, null */
++		return 0;
++	}
++}
++
++static int
++ruby_gpu_uc_submit_cfg(void)
++{
++	static int alt = -1;
++
++	if (alt < 0) {
++		int on = 0;
++		PE_parse_boot_argn("rubygpujc", &on, sizeof(on));
++		alt = (on != 0) ? 1 : 0;
++	}
++	return alt;
++}
++
++int
++ruby_gpu_submit(uint32_t client, uint32_t vmh, uint64_t job_va,
++    uint32_t flags, uint32_t timeout_ms, struct ruby_gpu_submit_rep *rep)
++{
++	ruby_gpu_vm_slot *vm;
++	RubyGPUIRQ *irq;
++	volatile uint32_t *gpu = sweet_gpu_regs;
++	uint32_t status, raw, js, asf, girq, mirq, jstat;
++	uint32_t slot = 0, js_base, chain_type = 0xffffffffu;
++	bool done;
++
++	(void)flags;
++	if (rep == NULL) {
++		return RUBYGPU_E_ARG;
++	}
++	bzero(rep, sizeof(*rep));
++	if (!sweet_pwr2_ready) {
++		return RUBYGPU_E_NOPWR;
++	}
++	if (timeout_ms == 0 || timeout_ms > 10000) {
++		timeout_ms = RUBYGPU_JOB_TIMEOUT_MS;
++	}
++	IOLockLock(ruby_gpu_uc_lock());
++	vm = ruby_gpu_uc_vm_lookup(vmh);
++	if (vm == NULL || vm->owner != client || gpu == NULL ||
++	    (job_va & 0x3fULL) != 0 || job_va < vm->va_start ||
++	    job_va >= vm->va_start + vm->va_size) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_ARG;
++	}
++	{
++		uint64_t *l3 = ruby_gpu_uc_vm_l3(vm, job_va, false);
++		uint32_t idx = (uint32_t)((job_va >> 12) & 0x1ff);
++
++		if (l3 == NULL || (l3[idx] & 1ULL) == 0) {
++			IOLockUnlock(ruby_gpu_uc_lock());
++			return RUBYGPU_E_ARG;
++		}
++	}
++	if (s_uc_active_pgd != vm->root_phys) {
++		int as_ret = ruby_gpu_uc_as_program(vm->root_phys, true);
++
++		if (as_ret != RUBYGPU_OK) {
++			IOLockUnlock(ruby_gpu_uc_lock());
++			return as_ret;
++		}
++	}
++	if (ruby_gpu_uc_chain_type(vm, job_va, &chain_type) == RUBYGPU_OK) {
++		slot = ruby_gpu_uc_slot_for_type(chain_type);
++	}
++	js_base = SWEET_P2C_JS_SLOT(slot);
++	IOLog("RGDIAG jsroute type=%u slot=%u job=0x%llx\n",
++	    chain_type, slot, job_va);
++	irq = sweet_c2_irq_create();
++	if (irq == NULL) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_IO;
++	}
++	irq->setSlot(slot);
++
++	sweet_pwr_wr(gpu, SWEET_P2C_GPUIRQ_CLEAR, 0xffffffffu);
++	sweet_pwr_wr(gpu, SWEET_P2C_JOBIRQ_BASE + SWEET_P2C_JOBIRQ_CLEAR,
++	    0xffffffffu);
++	sweet_pwr_wr(gpu, SWEET_P2C_MMUIRQ_BASE + SWEET_P2C_MMUIRQ_CLEAR,
++	    0xffffffffu);
++	sweet_pwr_wr(gpu, SWEET_P2C_GPUIRQ_MASK, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_MMUIRQ_BASE + SWEET_P2C_MMUIRQ_MASK, 0);
++	sweet_pwr_wr(gpu, SWEET_P2C_JOBIRQ_BASE + SWEET_P2C_JOBIRQ_MASK,
++	    SWEET_P2C_JOB_SLOT_MASK(slot));
++	irq->fDone = false;
++
++	sweet_pwr_wr(gpu, js_base + 0x50,
++	    sweet_pwr_rd(gpu, SWEET_PWR2_SHADER_PRESENT));
++	sweet_pwr_wr(gpu, js_base + 0x54,
++	    sweet_pwr_rd(gpu, SWEET_PWR2_SHADER_PRESENT + 4));
++	sweet_pwr_wr(gpu, js_base + 0x40, (uint32_t)job_va);
++	sweet_pwr_wr(gpu, js_base + 0x44, (uint32_t)(job_va >> 32));
++	sweet_pwr_wr(gpu, js_base + 0x58,
++	    ruby_gpu_uc_submit_cfg() ? SWEET_P2C_CFG_ALT : SWEET_P2C_CFG_STD);
++	sweet_pwr_wr(gpu, js_base + 0x60, 1);
++	if (irq->setEnabled(1) != 0) {
++		IOLockUnlock(ruby_gpu_uc_lock());
++		return RUBYGPU_E_IO;
++	}
++	done = irq->waitDone(timeout_ms) == 0;
++	irq->setEnabled(0);
++	status = irq->fStatus;
++	raw = irq->fRaw;
++	js = irq->fJs;
++	asf = irq->fAsf;
++	girq = irq->fGirq;
++	mirq = irq->fMirq;
++	if (!done) {
++		raw = sweet_pwr_rd(gpu, SWEET_P2C_JOBIRQ_BASE +
++		    SWEET_P2C_JOBIRQ_RAWSTAT);
++		js = sweet_pwr_rd(gpu, js_base + 0x24);
++		asf = sweet_pwr_rd(gpu, SWEET_P2C_AS_BASE + 0x1c);
++		girq = sweet_pwr_rd(gpu, SWEET_P2C_GPUIRQ_RAWSTAT);
++		mirq = sweet_pwr_rd(gpu, SWEET_P2C_MMUIRQ_BASE +
++		    SWEET_P2C_MMUIRQ_RAWSTAT);
++	}
++	if (!done || (raw & SWEET_P2C_JOB_DONE_BIT(slot)) == 0 ||
++	    (raw & SWEET_P2C_JOB_FAIL_BIT(slot)) != 0) {
++		ruby_gpu_uc_dump_failed_submit(vm, job_va);
++	}
++	jstat = sweet_pwr_rd(gpu, SWEET_P2C_JOBIRQ_BASE +
++	    SWEET_P2C_JOBIRQ_STATUS);
++	rep->status = (done && (raw & SWEET_P2C_JOB_DONE_BIT(slot)) != 0 &&
++	    (raw & SWEET_P2C_JOB_FAIL_BIT(slot)) == 0) ?
++	    RUBYGPU_OK : RUBYGPU_E_TIMEOUT;
++	rep->hits = irq->fHits;
++	rep->spur = irq->fSpurious;
++	rep->raw = raw;
++	rep->jstat = jstat;
++	rep->js = js;
++	rep->girq = girq;
++	rep->mirq = mirq;
++	(void)status;
++	(void)asf;
++	if (rep->status != RUBYGPU_OK) {
++		sweet_pwr_wr(gpu, js_base + 0x60, 3);
++		IOSleep(10);
++		sweet_pwr_wr(gpu, SWEET_P2C_JOBIRQ_BASE + SWEET_P2C_JOBIRQ_CLEAR,
++		    0xffffffffu);
++		sweet_pwr_wr(gpu, SWEET_P2C_GPUIRQ_CLEAR, 0xffffffffu);
++		sweet_pwr_wr(gpu, SWEET_P2C_MMUIRQ_BASE + SWEET_P2C_MMUIRQ_CLEAR,
++		    0xffffffffu);
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return rep->status;
++}
++
++void
++ruby_gpu_reset_resources(uint32_t client)
++{
++	ruby_gpu_vm_slot *vm;
++	ruby_gpu_bo_slot *bo;
++	uint32_t i;
++
++	IOLockLock(ruby_gpu_uc_lock());
++	for (i = 0; i < RUBYGPU_UC_MAX_VM; i++) {
++		vm = &s_uc_vm[i];
++		if (!vm->used || vm->owner != client) {
++			continue;
++		}
++		if (s_uc_active_pgd == vm->root_phys) {
++			ruby_gpu_uc_as_unmap();
++		}
++		ruby_gpu_uc_vm_free_chunks(vm);
++		bzero(vm, sizeof(*vm));
++	}
++	for (i = 0; i < s_uc_bo_cap; i++) {
++		bo = ruby_gpu_uc_bo_at(i);
++		if (bo == NULL || !bo->used || bo->owner != client) {
++			continue;
++		}
++		if (bo->prepared) {
++			bo->md->complete(kIODirectionInOut);
++		}
++		bo->md->release();
++		if (bo->surface != NULL) {
++			bo->surface->release();
++		}
++		s_uc_bo_bytes -= bo->size;
++		s_uc_bo_count--;
++		IOFreeData(bo, sizeof(*bo));
++		s_uc_bo[i] = NULL;
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++}
++
++bool
++ruby_gpu_client_open(uint32_t *client_id)
++{
++	bool ok = false;
++	uint32_t id = 0;
++
++	if (client_id == NULL) {
++		return false;
++	}
++	IOLockLock(ruby_gpu_uc_lock());
++	ruby_gpu_uc_config();
++	if (!(s_uc_cfg_multi == 0 && s_uc_clients != 0) &&
++	    s_uc_clients < RUBYGPU_UC_MAX_CLIENTS) {
++		id = ++s_uc_client_seq;
++		if (id == 0) {
++			id = ++s_uc_client_seq;
++		}
++		s_uc_clients++;
++		*client_id = id;
++		ok = true;
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++	return ok;
++}
++
++void
++ruby_gpu_client_close(uint32_t client_id)
++{
++	(void)client_id;
++	IOLockLock(ruby_gpu_uc_lock());
++	if (s_uc_clients != 0) {
++		s_uc_clients--;
++	}
++	IOLockUnlock(ruby_gpu_uc_lock());
++}
++
++#define kAccelPluginNameKey      "MetalPluginName"
++#define kAccelPluginClassNameKey "MetalPluginClassName"
++#define kAccelPluginName         "RubyMetal"
++#define kAccelPluginClassName    "RubyMetalDevice"
++
++static bool s_accel_props_allowed;
++
++/*
++ * Empty IOAcceleratorES service: Metal/QuartzCore enumerate this class for a
++ * GPU. With no MetalPluginName property it is passed over; rubymetalu=1 lets a
++ * user process install/remove MetalPluginName and MetalPluginClassName here.
++ */
++class IOAcceleratorES : public IOService {
++	OSDeclareDefaultStructors(IOAcceleratorES);
++
++public:
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOService);
++
++IOReturn
++IOAcceleratorES::setProperties(OSObject *properties)
++{
++	OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
++	OSString *name;
++	OSString *cls;
++
++	if (!s_accel_props_allowed) {
++		IOLog("SWEET GPU: IOAcceleratorES setProperties refused (rubymetalu=0)\n");
++		return kIOReturnUnsupported;
++	}
++	if (dict == NULL) {
++		return kIOReturnBadArgument;
++	}
++	name = OSDynamicCast(OSString, dict->getObject(kAccelPluginNameKey));
++	cls = OSDynamicCast(OSString, dict->getObject(kAccelPluginClassNameKey));
++	if (name == NULL && cls == NULL) {
++		return kIOReturnBadArgument;
++	}
++	if (name != NULL && name->getLength() != 0 &&
++	    !name->isEqualTo(kAccelPluginName)) {
++		IOLog("SWEET GPU: IOAcceleratorES refusing MetalPluginName\n");
++		return kIOReturnBadArgument;
++	}
++	if (cls != NULL && cls->getLength() != 0 &&
++	    !cls->isEqualTo(kAccelPluginClassName)) {
++		IOLog("SWEET GPU: IOAcceleratorES refusing MetalPluginClassName\n");
++		return kIOReturnBadArgument;
++	}
++	if (name != NULL) {
++		if (name->getLength() == 0) {
++			removeProperty(kAccelPluginNameKey);
++			IOLog("SWEET GPU: IOAcceleratorES MetalPluginName removed\n");
++		} else {
++			setProperty(kAccelPluginNameKey, name);
++			IOLog("SWEET GPU: IOAcceleratorES MetalPluginName=%s\n",
++			    kAccelPluginName);
++		}
++	}
++	if (cls != NULL) {
++		if (cls->getLength() == 0) {
++			removeProperty(kAccelPluginClassNameKey);
++			IOLog("SWEET GPU: IOAcceleratorES MetalPluginClassName removed\n");
++		} else {
++			setProperty(kAccelPluginClassNameKey, cls);
++			IOLog("SWEET GPU: IOAcceleratorES MetalPluginClassName=%s\n",
++			    kAccelPluginClassName);
++		}
++	}
++	return kIOReturnSuccess;
++}
++
++OSDefineMetaClassAndStructors(RubyGPU, IOService);
++
++bool
++RubyGPU::start(IOService *provider)
++{
++	return IOService::start(provider);
++}
++
++IOReturn
++RubyGPU::newUserClient(task_t owningTask, void *securityID, UInt32 type,
++    OSDictionary *properties, IOUserClient **handler)
++{
++	RubyGPUUserClient *uc;
++	uint32_t client_id = 0;
++
++	if (handler == NULL) {
++		return kIOReturnBadArgument;
++	}
++	if (!ruby_gpu_client_open(&client_id)) {
++		return kIOReturnExclusiveAccess;
++	}
++	uc = new RubyGPUUserClient;
++	if (uc == NULL) {
++		ruby_gpu_client_close(client_id);
++		return kIOReturnNoMemory;
++	}
++	if (!uc->initWithTask(owningTask, securityID, type, properties)) {
++		uc->release();
++		ruby_gpu_client_close(client_id);
++		return kIOReturnError;
++	}
++	uc->setClientID(client_id);
++	if (!uc->attach(this) || !uc->start(this)) {
++		uc->detach(this);
++		uc->release();
++		ruby_gpu_client_close(client_id);
++		return kIOReturnError;
++	}
++	*handler = uc;
++	return kIOReturnSuccess;
++}
++
++void
++ruby_gpu_service_publish(void)
++{
++	int on = 0;
++	IOService *platform;
++	RubyGPU *svc;
++	bool ok;
++
++	if (s_uc_service != NULL || !sweet_pwr2_ready) {
++		return;
++	}
++	PE_parse_boot_argn("rubygpuuc", &on, sizeof(on));
++	if (on != 1) {
++		return;
++	}
++	(void)ruby_gpu_uc_lock();
++	platform = (IOService *)IOService::getPlatform();
++	svc = new RubyGPU;
++	if (platform == NULL || svc == NULL) {
++		OSSafeReleaseNULL(svc);
++		return;
++	}
++	ok = svc->init() && svc->attach(platform) && svc->start(platform);
++	if (!ok) {
++		IOLog("SWEET GPU: RubyGPU service failed\n");
++		if (svc->getProvider() != NULL) {
++			svc->detach(platform);
++		}
++		svc->release();
++		return;
++	}
++	svc->registerService();
++	s_uc_service = svc;
++	IOLog("SWEET GPU: RubyGPU service up intid=%u gate=rubygpuuc\n",
++	    SWEET_P2C_C2_JOB_INTID);
++
++	PE_parse_boot_argn("rubymetalu", &on, sizeof(on));
++	s_accel_props_allowed = (on != 0);
++	IOAcceleratorES *accel = OSTypeAlloc(IOAcceleratorES);
++	if (accel != NULL && accel->init()) {
++		accel->setName("sgx");
++		if (accel->attach(platform)) {
++			accel->registerService();
++			IOLog("SWEET GPU: empty IOAcceleratorES published "
++			    "(rubymetalu=%d)\n", on);
++		}
++	}
++	OSSafeReleaseNULL(accel);
++}
+\ No newline at end of file
+diff --git a/iokit/Kernel/arm/RubyGPU.h b/iokit/Kernel/arm/RubyGPU.h
+new file mode 100644
+index 0000000..9679938
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGPU.h
+@@ -0,0 +1,55 @@
++#ifndef _RUBYGPU_H
++#define _RUBYGPU_H
++
++#include <IOKit/IOTypes.h>
++#include <IOKit/IOService.h>
++
++#include "RubyGPUUserAPI.h"
++
++class IOUserClient;
++class IOMemoryDescriptor;
++class RubyGPUIRQ;
++
++void sweet_gpu_probe_start(void);
++void sweet_gpu_power_start(void);
++void sweet_gpu_commit_start(void);
++
++/* Shared C2 IRQ singleton (P2c path and user client). */
++RubyGPUIRQ *sweet_c2_irq_create(void);
++
++class RubyGPU : public IOService {
++	OSDeclareDefaultStructors(RubyGPU);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
++	    OSDictionary *properties,
++	    IOUserClient **handler) APPLE_KEXT_OVERRIDE;
++};
++
++void ruby_gpu_service_publish(void);
++
++bool ruby_gpu_powered(void);
++int ruby_gpu_param(uint32_t param, uint64_t *value);
++int ruby_gpu_bo_create(uint32_t client, uint64_t size, uint32_t flags,
++    uint32_t *handle, uint64_t *phys);
++int ruby_gpu_bo_create_from_surface(uint32_t client, uint32_t surface_id,
++    uint32_t flags, uint64_t size, uint32_t *handle, uint64_t *out_size,
++    uint64_t *phys);
++int ruby_gpu_bo_release(uint32_t client, uint32_t handle);
++IOMemoryDescriptor *ruby_gpu_bo_descriptor(uint32_t client, uint32_t handle);
++int ruby_gpu_bo_sync(uint32_t client, uint32_t handle, uint64_t offset,
++    uint64_t size, uint32_t dir);
++int ruby_gpu_vm_create(uint32_t client, uint64_t va_start, uint64_t va_size,
++    uint32_t *handle);
++int ruby_gpu_vm_destroy(uint32_t client, uint32_t handle);
++int ruby_gpu_vm_bind(uint32_t client, uint32_t vm, uint32_t bo, uint64_t va,
++    uint64_t bo_offset, uint64_t size);
++int ruby_gpu_vm_unbind(uint32_t client, uint32_t vm, uint64_t va, uint64_t size);
++int ruby_gpu_submit(uint32_t client, uint32_t vm, uint64_t job_va,
++    uint32_t flags, uint32_t timeout_ms, struct ruby_gpu_submit_rep *rep);
++bool ruby_gpu_client_open(uint32_t *client_id);
++void ruby_gpu_client_close(uint32_t client_id);
++void ruby_gpu_reset_resources(uint32_t client);
++
++#endif /* _RUBYGPU_H */
+\ No newline at end of file
+diff --git a/iokit/Kernel/arm/RubyGPUIRQ.cpp b/iokit/Kernel/arm/RubyGPUIRQ.cpp
+new file mode 100644
+index 0000000..1339d70
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGPUIRQ.cpp
+@@ -0,0 +1,199 @@
++#include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <kern/kern_types.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSSymbol.h>
++#include <kern/clock.h>
++#include <mach/mach_time.h>
++
++#include "../../../bsd/dev/ruby_gic.h"
++
++#include "RubyGPUIRQ.h"
++#include "RubyGPUInternal.h"
++
++
++OSDefineMetaClassAndStructors(RubyGPUIRQ, IOService);
++
++bool
++RubyGPUIRQ::init(OSDictionary *dictionary)
++{
++	fWorkLoop = NULL;
++	fIRQ = NULL;
++	fLock = IOLockAlloc();
++	fDone = false;
++	fStatus = fRaw = fJs = fAsf = fGirq = fMirq = 0;
++	fHits = fSpurious = 0;
++	fSlot = 0;
++	if (fLock == NULL) {
++		return false;
++	}
++	return IOService::init(dictionary);
++}
++
++bool
++RubyGPUIRQ::publishInterruptSource(void)
++{
++	OSArray *controllers;
++	OSArray *specifiers;
++	OSSymbol *name;
++	OSData *data;
++	struct ruby_gic_spec spec = {
++		.intid = SWEET_P2C_C2_JOB_INTID,
++		.flags = RUBY_GIC_LEVEL,
++	};
++	bool ok;
++
++	controllers = OSArray::withCapacity(1);
++	specifiers = OSArray::withCapacity(1);
++	name = (OSSymbol *)OSSymbol::withCStringNoCopy("RubyGIC");
++	data = OSData::withBytes(&spec, sizeof(spec));
++	ok = controllers != NULL && specifiers != NULL && name != NULL &&
++	    data != NULL &&
++	    controllers->setObject(name) && specifiers->setObject(data) &&
++	    setProperty("IOInterruptControllers", controllers) &&
++	    setProperty("IOInterruptSpecifiers", specifiers);
++	OSSafeReleaseNULL(controllers);
++	OSSafeReleaseNULL(specifiers);
++	OSSafeReleaseNULL(name);
++	OSSafeReleaseNULL(data);
++	return ok;
++}
++
++bool
++RubyGPUIRQ::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	fWorkLoop = getWorkLoop();
++	if (fWorkLoop == NULL) {
++		return false;
++	}
++	fWorkLoop->retain();
++	if (!publishInterruptSource()) {
++		return false;
++	}
++	fIRQ = IOInterruptEventSource::interruptEventSource(this,
++	    &RubyGPUIRQ::irqAction, this, 0);
++	if (fIRQ == NULL ||
++	    fWorkLoop->addEventSource(fIRQ) != kIOReturnSuccess) {
++		return false;
++	}
++	fIRQ->disable();
++	IOLog("SWEET GPU: C2 irq ready intid=%u (SPI455 JOB, level)\n",
++	    SWEET_P2C_C2_JOB_INTID);
++	return true;
++}
++
++void
++RubyGPUIRQ::free(void)
++{
++	if (fIRQ != NULL) {
++		fIRQ->disable();
++		if (fWorkLoop != NULL) {
++			fWorkLoop->removeEventSource(fIRQ);
++		}
++		OSSafeReleaseNULL(fIRQ);
++		fIRQ = NULL;
++	}
++	if (fWorkLoop != NULL) {
++		fWorkLoop->release();
++		fWorkLoop = NULL;
++	}
++	if (fLock != NULL) {
++		IOLockFree(fLock);
++		fLock = NULL;
++	}
++	IOService::free();
++}
++
++void
++RubyGPUIRQ::setSlot(uint32_t slot)
++{
++	if (slot < 3) {
++		fSlot = slot;
++	}
++}
++
++int
++RubyGPUIRQ::setEnabled(int on)
++{
++	if (fIRQ == NULL) {
++		return -1;
++	}
++	if (on) {
++		fIRQ->enable();
++	} else {
++		fIRQ->disable();
++	}
++	return 0;
++}
++
++int
++RubyGPUIRQ::waitDone(uint32_t ms)
++{
++	AbsoluteTime deadline;
++	int err = THREAD_TIMED_OUT;
++
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	IOLockLock(fLock);
++	while (!fDone) {
++		err = IOLockSleepDeadline(fLock, (void *)&fDone, deadline,
++		    THREAD_UNINT);
++		if (err != THREAD_AWAKENED) {
++			break;
++		}
++	}
++	IOLockUnlock(fLock);
++	return fDone ? 0 : 1;
++}
++
++void
++RubyGPUIRQ::irqAction(OSObject *owner, IOInterruptEventSource *sender,
++    int count)
++{
++	RubyGPUIRQ *self = (RubyGPUIRQ *)owner;
++	volatile uint32_t *gpu = sweet_gpu_regs;
++	uint32_t status, raw, js, asf, girq, mirq, slot, mask;
++
++	(void)sender;
++	(void)count;
++	self->fHits++;
++	if (gpu == NULL) {
++		return;
++	}
++	slot = self->fSlot;
++	mask = SWEET_P2C_JOB_SLOT_MASK(slot);
++	status = sweet_pwr_rd(gpu, SWEET_P2C_JOBIRQ_BASE +
++	    SWEET_P2C_JOBIRQ_STATUS);
++	if ((status & mask) == 0) {
++		self->fSpurious++;
++		return;
++	}
++	raw = sweet_pwr_rd(gpu, SWEET_P2C_JOBIRQ_BASE +
++	    SWEET_P2C_JOBIRQ_RAWSTAT);
++	js = sweet_pwr_rd(gpu, SWEET_P2C_JS_SLOT(slot) + 0x24);
++	asf = sweet_pwr_rd(gpu, SWEET_P2C_AS_BASE + 0x1c);
++	girq = sweet_pwr_rd(gpu, SWEET_P2C_GPUIRQ_RAWSTAT);
++	mirq = sweet_pwr_rd(gpu, SWEET_P2C_MMUIRQ_BASE +
++	    SWEET_P2C_MMUIRQ_RAWSTAT);
++	sweet_pwr_wr(gpu, SWEET_P2C_JOBIRQ_BASE + SWEET_P2C_JOBIRQ_CLEAR,
++	    status & mask);
++	IOLog("SWEET GPU: C2 irq slot=%u status=0x%08x raw=0x%08x "
++	    "js=0x%08x as=0x%08x girq=0x%08x mirq=0x%08x hits=%u\n",
++	    slot, status, raw, js, asf, girq, mirq, self->fHits);
++	IOLockLock(self->fLock);
++	self->fStatus = status;
++	self->fRaw = raw;
++	self->fJs = js;
++	self->fAsf = asf;
++	self->fGirq = girq;
++	self->fMirq = mirq;
++	self->fDone = true;
++	IOLockWakeup(self->fLock, (void *)&self->fDone, false);
++	IOLockUnlock(self->fLock);
++}
+diff --git a/iokit/Kernel/arm/RubyGPUIRQ.h b/iokit/Kernel/arm/RubyGPUIRQ.h
+new file mode 100644
+index 0000000..8c5d226
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGPUIRQ.h
+@@ -0,0 +1,50 @@
++#ifndef _RUBYGPUIRQ_H
++#define _RUBYGPUIRQ_H
++
++#include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOInterruptEventSource.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <libkern/c++/OSObject.h>
++
++/*
++ * C2 interrupt client: RubyGIC level source INTID487 (SPI455, Mali JOB).
++ * The "RubyGIC" interrupt-controller property is published on this service
++ * itself, so registerInterrupt(index 0) resolves to RubyGIC the same way as
++ * SweetKPD and RubyUSBIntService. The primary handler only masks the level
++ * line and signals the workloop; the action clears JOB_IRQ and wakes the
++ * waiter.
++ */
++class RubyGPUIRQ : public IOService {
++	OSDeclareDefaultStructors(RubyGPUIRQ);
++
++	IOWorkLoop             *fWorkLoop;
++	IOInterruptEventSource *fIRQ;
++	IOLock                 *fLock;
++
++	static void irqAction(OSObject *owner, IOInterruptEventSource *sender,
++	    int count);
++	bool publishInterruptSource(void);
++
++public:
++	volatile bool     fDone;
++	volatile uint32_t fStatus;
++	volatile uint32_t fSlot;
++	volatile uint32_t fRaw;
++	volatile uint32_t fJs;
++	volatile uint32_t fAsf;
++	volatile uint32_t fGirq;
++	volatile uint32_t fMirq;
++	volatile uint32_t fHits;
++	volatile uint32_t fSpurious;
++
++	bool init(OSDictionary *dictionary = NULL) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++	void setSlot(uint32_t slot);
++	int setEnabled(int on);
++	int waitDone(uint32_t ms);
++};
++
++#endif /* _RUBYGPUIRQ_H */
+diff --git a/iokit/Kernel/arm/RubyGPUInternal.h b/iokit/Kernel/arm/RubyGPUInternal.h
+new file mode 100644
+index 0000000..a25901c
+--- /dev/null
++++ b/iokit/Kernel/arm/RubyGPUInternal.h
+@@ -0,0 +1,41 @@
++#ifndef _RUBYGPU_INTERNAL_H
++#define _RUBYGPU_INTERNAL_H
++
++#include <IOKit/IOTypes.h>
++
++extern volatile uint32_t *sweet_gpu_regs;
++
++uint32_t sweet_pwr_rd(volatile uint32_t *base, uint32_t off);
++void sweet_pwr_wr(volatile uint32_t *base, uint32_t off, uint32_t val);
++
++#define SWEET_P2C_VA           0x10000000ULL
++#define SWEET_P2C_TARGET_OFF   0x100u
++#define SWEET_P2C_MEM_SIZE     0x5000u
++#define SWEET_P2C_PAGE_SIZE    0x1000u
++#define SWEET_P2C_DATA_OFF     0x4000u
++#define SWEET_P2C_AS_BASE      0x2400u
++#define SWEET_P2C_JS_BASE      0x1800u
++#define SWEET_P2C_JOBIRQ_BASE      0x1000u
++#define SWEET_P2C_JOBIRQ_RAWSTAT   0x0000u
++#define SWEET_P2C_JOBIRQ_CLEAR     0x0004u
++#define SWEET_P2C_JOBIRQ_MASK      0x0008u
++#define SWEET_P2C_JOBIRQ_STATUS    0x000cu
++#define SWEET_P2C_GPUIRQ_RAWSTAT   0x0020u
++#define SWEET_P2C_GPUIRQ_CLEAR     0x0024u
++#define SWEET_P2C_GPUIRQ_MASK      0x0028u
++#define SWEET_P2C_MMUIRQ_BASE      0x2000u
++#define SWEET_P2C_MMUIRQ_RAWSTAT   0x0000u
++#define SWEET_P2C_MMUIRQ_CLEAR     0x0004u
++#define SWEET_P2C_MMUIRQ_MASK      0x0008u
++#define SWEET_P2C_JOB_DONE_MASK    ((1u << 0) | (1u << 16))
++#define SWEET_P2C_JS_SLOT(n)       (SWEET_P2C_JS_BASE + ((n) * 0x80u))
++#define SWEET_P2C_JOB_DONE_BIT(n)  (1u << (n))
++#define SWEET_P2C_JOB_FAIL_BIT(n)  (1u << (16u + (n)))
++#define SWEET_P2C_JOB_SLOT_MASK(n) (SWEET_P2C_JOB_DONE_BIT(n) | \
++    SWEET_P2C_JOB_FAIL_BIT(n))
++#define SWEET_P2C_C2_JOB_INTID     487u  /* DTS SPI455 + 32 */
++#define SWEET_P2C_C2_WAIT_MS       1000u
++#define SWEET_P2C_CFG_STD      0x00083300u
++#define SWEET_P2C_CFG_ALT      (SWEET_P2C_CFG_STD | (1u << 10) | (1u << 11))
++
++#endif /* _RUBYGPU_INTERNAL_H */

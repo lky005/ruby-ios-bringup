@@ -309,6 +309,10 @@ cp "$ROOT/patches/0080-ruby-ufs.patch" "$ROOT/patches/0084-ruby-autoswipe.patch"
     "$ROOT/patches/0351-sweetfb-backlight-dsi.patch" \
     "$ROOT/patches/0352a-rubysh-blob-0337.patch" \
     "$ROOT/patches/0352b-gpu-p1-probe.patch" \
+    "$ROOT/patches/0360a-rubygpu-driver.patch" \
+    "$ROOT/patches/0360b-rubygpu-userclient.patch" \
+    "$ROOT/patches/0360c-sweet-surface-owner.patch" \
+    "$ROOT/patches/0360d-rubygpu-registration.patch" \
     "$DEST/xnu/patches/"
 cp "$ROOT/patches/historical/0081-ruby-swap-debug.patch" \
     "$ROOT/patches/historical/0082-ruby-wifi-stub.patch" \
