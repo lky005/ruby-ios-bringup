@@ -44,6 +44,7 @@
 | [`12-usb-host`](12-usb-host.md) | USB 上位机通道：测试条件、驱动绑定、安全调试 | `[实测]` | 2026-11-06 |
 | [`13-usb-ep2-golden`](13-usb-ep2-golden.md) | EP2 状态机 0180–0195、黄金 PHY、主机侧边界 | `[历史]` | 2026-11-07 |
 | [`14-usb-per-endpoint`](14-usb-per-endpoint.md) | 0333/0334 线：每端点 GPD 环、FIFO 分配、T2 批量、边界 | `[实测]` | 2026-11-18 |
+| [`15-gpu`](15-gpu.md) | GPU 内核面（0352/0360）、Mesa/PanVK 线、Metal 垫片研究、门禁 | `[实测]` / `[推断]` | 2026-11-28 |
 | [`appendix-bootargs`](appendix-bootargs.md) | 推荐 cmdline 预设、USB 启动参数参考、镜像打包参数 | `[实测]` | 2026-11-18 |
 | [`appendix-dualboot`](appendix-dualboot.md) | 可选布局；仅方法说明 | `[推断]` | — |
 | [`glossary`](glossary.md) | 代号、缩写与状态标签 | — | — |

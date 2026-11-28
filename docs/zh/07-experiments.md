@@ -29,6 +29,12 @@
 | 11-02 | P1/P2/P3 线 | 0146a-0155：探针/pwrap、按键/复位、电池、触摸接回；0155 共用 I2C5 锁 | 0155 真机 PASS：触摸、按键、电池 `external=1`；19/19；8/8 I2C5 |
 | 11-03/11-04 | IRQ demux / SPI3 | 0159-0168：EINT demux、deferred 服务、SPI3 触摸；IRQ/waitq 重度 UI panic -> 默认 polling | polling 稳定；IRQ 根因未闭环 |
 | 11-05/11-06 | 原生 IRQ 线 | 0175-0179：RubyGIC + KPD、EINT B1、parent、child oneshot、retry/soft reset | 0179 G1–G6；10 min + 约 5 min 压测；无 panic/STUCK/重激活；G7/G8 取消 |
+| 11-22 | GPU 探针 | 0352：`rubygpuprobe=1` 下的 Mali/SPM/PLL 只读 dump；`rubygpupwr=2` 门控 MFG2-5 上电 | 设备上解出 GPU_ID/AS/JS_PRESENT；默认不写电源 |
+| 11-23 | GPU 驱动 | 实验线：RubyGPU 服务 + userclient UAPI（Panfrost kmod 子集）；Mesa 27 iOS 交叉构建 | 驱动 submit `kr=0`；Mesa Gate A/B 绿（1212/1212） |
+| 11-24/11-25 | GPU 显示 | P3.4 经面板表面原生 1080×2400（SG BO）；P3.5 PanVK GL | 原生显示 PASS；GL 测试渲染；~26 fps 基线 |
+| 11-26 | Metal 插件 | M0：空 `IOAcceleratorES` + `MetalPluginName`，插件加载、P37Device 就绪 | 插件可被发现；QuartzCore 仍为 CPU 渲染 |
+| 11-27 | Metal 合成 | M1–M9b：limits/fourcc 门、真实 blit、红探针上屏、带 Y-flip 的表面回写 | 红探针上屏；真实合成 WIP（白内容、滑动黑块） |
+| 11-28 | 公开面 | 0360 合并：RubyGPU 驱动 + CPU B4a AMP 面；CI 门禁 | patchset `bd125daf`、exec-data `4fef9a18`；未上机 |
 
 ## 失败目录
 
@@ -92,6 +98,20 @@ VTP 1.8 V；只 enable 会让 AVDD 欠压、芯片沉默。先读旧 VOUT，断�
 解析 OUT 缓冲区，所以整组命令一次性发出。设备 STALL 只会挂起该 handle 的
 EP0 IN 端点：要重开 handle，并读在写位置之前。没有热插拔恢复：端点 halt 后
 只能物理断电重启。
+
+**D12 — 先探针，后上电。** 0352 探针只读且一次性；MFG2-5 上电序列由独立
+启动参数门控、默认关。先拿到寄存器事实，再谈电源/时钟写入。
+
+**D13 — 选 Panfrost kmod UAPI，不选 kbase。** userclient 采用 Panfrost
+`pan_kmod` 表面子集：Panfrost GL 与 PanVK 都吃这套；kbase UAPI 绑定 vendor
+版本并带 Linux/Android 语义。
+
+**D14 — v9 用户态取自 JimVulkan 派生树。** 所 pin 的 Mesa 上游 PanVK 没有
+v9 后端；只有 v9 用户态 + XNU kmod 后端能服务 G68，kbase 插头不取。
+
+**D15 — Metal 垫片独立成仓。** AIR→SPIR-V 翻译与插件研究独立于内核增量与
+Mesa 打包；分开可保持实验状态明确。
+
 ## 不要重复
 
 - 没有 `sent=1` 证据，不要怀疑内核通知。

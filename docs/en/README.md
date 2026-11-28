@@ -45,6 +45,7 @@ See [STATUS](../records/STATUS.md) · [VERIFICATION](../records/VERIFICATION.md)
 | [`12-usb-host`](12-usb-host.md) | USB host channel: test conditions, driver binding, safe debugging | `[measured]` | 2026-11-06 |
 | [`13-usb-ep2-golden`](13-usb-ep2-golden.md) | EP2 state machine 0180–0195, golden PHY, host-side limits | `[historical]` | 2026-11-07 |
 | [`14-usb-per-endpoint`](14-usb-per-endpoint.md) | 0333/0334 line: per-endpoint GPD rings, FIFO allocation, T2 batch, limits | `[measured]` | 2026-11-18 |
+| [`15-gpu`](15-gpu.md) | GPU kernel face (0352/0360), Mesa/PanVK line, Metal-shim research, gates | `[measured]` / `[inferred]` | 2026-11-28 |
 | [`appendix-bootargs`](appendix-bootargs.md) | recommended cmdline preset, USB boot-arg reference, image packaging parameters | `[measured]` | 2026-11-18 |
 | [`appendix-dualboot`](appendix-dualboot.md) | optional layout; method note only | `[inferred]` | — |
 | [`glossary`](glossary.md) | codenames, acronyms and status tags | — | — |

@@ -30,6 +30,12 @@ wrong turns.
 | 11-02 | P1/P2/P3 line | 0146a-0155: probe/pwrap, keys/reboot, battery, touch re-enable; 0155 shares the I2C5 lock | 0155 device PASS: touch, keys, battery `external=1`; 19/19; 8/8 I2C5 |
 | 11-03/11-04 | IRQ demux / SPI3 | 0159-0168: EINT demux, deferred service, SPI3 touch; IRQ/waitq heavy-UI panics -> polling default | polling stable; IRQ root cause open |
 | 11-05/11-06 | Native IRQ line | 0175-0179: RubyGIC + KPD, EINT B1, parent, child oneshot, retry/soft reset | 0179 G1–G6; 10 min + ~5 min stress; no panic/stuck/re-activation; G7/G8 cancelled |
+| 11-22 | GPU probe | 0352: read-only Mali/SPM/PLL dump behind `rubygpuprobe=1`; gated MFG2-5 power path behind `rubygpupwr=2` | GPU_ID/AS/JS_PRESENT decoded on device; no power writes by default |
+| 11-23 | GPU driver | Lab line: RubyGPU service + userclient UAPI (Panfrost kmod subset); Mesa 27 iOS cross build | driver submit `kr=0`; Mesa Gate A/B green (1212/1212) |
+| 11-24/11-25 | GPU display | P3.4 native 1080×2400 through the panel surface (SG BOs); P3.5 PanVK GL | native display PASS; GL test renders; ~26 fps baseline |
+| 11-26 | Metal plugin | M0: empty `IOAcceleratorES` + `MetalPluginName`, plugin loads, P37Device ready | plugin discovery works; QuartzCore still a CPU renderer |
+| 11-27 | Metal capture | M1–M9b: limits/fourcc gates, real blit, red probe on screen, surface write-back with Y-flip | red probe composited; real composition WIP (white content, sliding black bands) |
+| 11-28 | Public face | 0360 merged: RubyGPU driver + CPU B4a AMP face; CI-gated | patchset `bd125daf`, exec-data `4fef9a18`; not booted |
 
 ## Failure catalogue
 
@@ -96,6 +102,23 @@ line, so the whole command set goes out in a single write. A device stall
 halts the EP0 IN endpoint for that handle only; reopen the handle and read
 behind the write cursor. There is no hot-plug recovery: a halted endpoint
 needs a physical power cycle.
+
+**D12 — GPU probe first, power second.** The 0352 probe is read-only and
+one-shot; the MFG2-5 power-on sequence sits behind its own boot argument and
+stays off by default. Register facts come before any rail/clock write.
+
+**D13 — Panfrost kmod UAPI, not kbase.** The userclient speaks the Panfrost
+`pan_kmod` surface subset because both Panfrost GL and PanVK consume it; the
+kbase UAPI is vendor-versioned and carries Linux/Android semantics.
+
+**D14 — v9 userland from a JimVulkan-derived tree.** Upstream PanVK has no v9
+backend at the pinned Mesa; only the v9 userland plus the XNU kmod backend
+serve the G68, and the kbase plug-in is not taken.
+
+**D15 — The Metal shim is its own repository.** The AIR→SPIR-V translation and
+plugin research move independently of the kernel delta and of Mesa packaging;
+keeping them separate keeps the experimental status explicit.
+
 ## Do not repeat
 
 - Do not question kernel notification delivery without a `sent=1` trace.

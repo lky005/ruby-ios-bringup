@@ -2,11 +2,36 @@
 
 **中文** · [English](../en/appendix-bootargs.md)
 
-> 状态标注沿用[仓库 README](../../README.zh.md)。下表默认值取自 0334/0351
-> 源码（`ruby_usb_probe()` 等）；当前 0351 启动行 440 B，上限 607 B。
-> “历史预设”一节是 0332i/0334 时代的值，仅作记录。
+> 状态标注沿用[仓库 README](../../README.zh.md)。下表默认值取自
+> 0334/0351/0352/0360 源码（`ruby_usb_probe()` 等）；当前 0360 启动行
+> 561 B，上限 607 B。“历史预设”一节是 0332i/0334 时代的值，仅作记录。
 
-## 当前 0351 启动行（440 B，可直接复制）
+## 当前 0360 启动行（561 B，可直接复制）
+
+```text
+debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0 ufsroot=iosroot ufsrw=1 rootrw=1 sweethw=0 ufslun=2 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1 wdt_test=no_user_checkin sweetfb_noconsole=1 sweetfb_hz=60 ufslogsecs=1 rubyprobe=1 rubypwrap=1 rubkeys=1 rubybatt=1 rubyeint=1 rubymt6360=1 rubyeintirq=1 rubykpdirq=1 rubyeintb1=1 ruby_rxskip=1 rubyreboot=1 rubybacklight=1 rubyblhw=1 rubybattms=1000 rubygpupwr=2 rubygpucommit=3 rubygpuuc=1 rubygpumulti=1 rubygpubomax=512 rubygpuvmpages=1024
+```
+
+该字符串即 `config/0360-boot.cmdline`；不传时 GPU 门控保持安全默认（见
+下表）。0352 线为 `config/0352-boot.cmdline`（同样的 USB/显示/背光核心，
+`sweetfb_hz=30`，无 GPU 参数）。
+
+## GPU 参数（0352/0360）
+
+| 参数 | 默认 | 线 | 作用 |
+|---|---|---|---|
+| `rubygpuprobe` | 关 | 0352 | 一次性只读 dump：Mali / mfgcfg / SPM / bus-protect / PLL / MT6359P 窗口 |
+| `rubygpupwr` | 关 | 0352 | `1` = 最小 MFG2-5 上电，`2` = JM 式完整唤醒；单次 |
+| `rubygpucommit` | 关 | 0352 | 首像素提交环变体 `1/2/3`（需先通过 `rubygpupwr=2`）；单次 |
+| `rubygpuuc` | 关 | 0360 | 发布 RubyGPU userclient |
+| `rubygpumulti` | 关 | 0360 | 首像素环的多提交模式 |
+| `rubygpubomax` | 512 | 0360 | userclient BO 数量上限 |
+| `rubygpuvmpages` | 1024 | 0360 | VM 池页预算（16 KiB 页） |
+| `rubymetalu` | 关 | 0360 | 允许在 `IOAcceleratorES` 上设置 `MetalPluginName`/`MetalPluginClassName`（插件加载） |
+| `rubygpudiag` | 关 | 0360 | selector-8 诊断与驱动 dump（console ring 限流） |
+| `sweetfb_hz` | 60（0360）/ 10（0351） | 0360 | 刷屏节流；`10` 恢复旧节流，`>=60` 为每 tick |
+
+## 0351 启动行（440 B，存档）
 
 ```text
 debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0 ufsroot=iosroot ufsrw=1 rootrw=1 sweethw=0 ufslun=2 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1 wdt_test=no_user_checkin sweetfb_noconsole=1 sweetfb_hz=30 ufslogsecs=1 rubyprobe=1 rubypwrap=1 rubkeys=1 rubybatt=1 rubyeint=1 rubymt6360=1 rubyeintirq=1 rubykpdirq=1 rubyeintb1=1 ruby_rxskip=1 rubyreboot=1 rubybacklight=1 rubyblhw=1 rubybattms=1000

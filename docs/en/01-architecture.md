@@ -30,7 +30,8 @@ avoiding an `hdr_loaded` rejection.
 |---|---|---|
 | Bootloader | Xiaomi LK | none; only `boot_a` is written |
 | Payload | shim/loader | early `src/bringup`; upstream loader for 0084 |
-| Kernel | XNU 8796 | patches 0080/0085 (real touch), 0156-0179 (HAL/USB/battery/native IRQ); 0084 previous; 0081–0083 historical |
+| Kernel | XNU 8796 | patches 0080/0085 (real touch), 0156-0179 (HAL/USB/battery/native IRQ), 0350/0351 (battery poll, DSI backlight), 0352 (GPU probe), 0360a-f (RubyGPU driver, SweetSurface ownership, `IOAcceleratorES`) and 0361a-c (CPU B4a AMP face); 0084 previous; 0081–0083 historical |
+| GPU | Mali-G68 (MT6877 MFG) | 0352 read-only probe and gated power path; 0360 RubyGPU driver (device/power/MMU/BO/submit/context, INTID487, SG BOs, userclient UAPI, per-task surface ownership, 60 Hz SweetFB default); userland stack (Mesa PanVK, Metal shim) is lab-only, see [15-gpu](15-gpu.md) |
 | Root | HFS+ in `iosroot` | pulled v14 + seed; not in the repo |
 | Userland | iOS 16.7.16 | ICL 4-byte NOP |
 | Display | IOSurface/IOMFB | 0081 debug path |

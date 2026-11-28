@@ -1,7 +1,20 @@
 # Status
 
-As of **2026-11-22**. This is a snapshot of verified results, not a live device
+As of **2026-11-28**. This is a snapshot of verified results, not a live device
 status. No phone is attached to this repository or to its CI.
+
+## 2026-11-28 state (0360 line)
+
+| Item | Result | Evidence |
+|---|---|---|
+| Current line | 0360: RubyGPU kernel driver and the CPU B4a AMP face on the 0352 probe line | patchset `bd125daf...` (327 files); `config/0360.env` |
+| Kernel | full `3592b53ff94da50875927dadeda129ac7f1379d3b3ad83238f58af7ac8b305f0`, exec-data `4fef9a185faa1a0ae6821fce3888829ac10d2e25dd470492da1cc1e16dbc6ec8`; record `46139168754`; gate `46140206357` | `config/0360.env`; workflow `xnu-0360` |
+| 0352 line | patchset `40f7cefa...` (318 files); full `82c129a7...`, exec-data `90326b5e...`; record `46137228510`; gate `46137921273` | `config/0352.env`; workflow `xnu-0360` (dispatch with `config/0352.env`) |
+| Build equivalence | the CI build tree and the lab build tree match file-for-file (4,198 sources byte-identical; the only extra file is the uncompiled GPU probe); boot-image kernels are segment-rebased by the packer and are not byte-comparable | host comparison 2026-11-28; see VERIFICATION |
+| GPU kernel face | RubyGPU service/userclient/IRQ, SG-backed BOs with accounting caps, VM chunks, per-task surface ownership, `IOAcceleratorES`; every GPU gate defaults off | patches 0360a-f; strings audit on the CI kernel |
+| CPU B4a | AMP face merged (two clusters, Edge default placement, read-only clock probe); needs a 2-cluster ADT that is not shipped; the A78 cluster stays at 650 MHz (no DVFS) | patch 0361a-c; lab-line device PASS (P placement 99-100%) |
+| Boot state | **not booted** - the 0360 kernel has no boot record; the device currently runs Android | - |
+| Known limits | Metal composition WIP (white content, sliding black bands); 10-bit color approximated as BGRA8; no frame-rate guarantee; no ADT shipped | lab records 2026-11-27 |
 
 ## 2026-11-22 state (0351 line)
 
@@ -239,8 +252,11 @@ of `VERIFICATION.md`.
 
 ## Not working
 
-- Wi-Fi, Bluetooth, cellular, audio, camera, GPU, RTC; sleep/wake; USB host/OTG;
+- Wi-Fi, Bluetooth, cellular, audio, camera, RTC; sleep/wake; USB host/OTG;
   charger control/OTG; Type-C role.
+- GPU composition: the kernel face is merged and CI-verified, but SpringBoard
+  composition (white content, sliding black bands) and 10-bit color are not
+  working; the 0360 kernel was never booted.
 - Battery/charging is read-only; the UI polls every 30 s (P2.4: 100→98 on
   unplug).
 - P2b: no ESD timer (a silent stuck panel needs a reboot); `soft reset ok` is
@@ -256,6 +272,10 @@ of `VERIFICATION.md`.
 
 - **host-verified**: commands and tools run on the author's PC against local
   files; see `VERIFICATION.md`.
+- **CI-verified (2026-11-28, not booted)**: 0360 (patchset `bd125daf...`; exec
+  `4fef9a18...`) and 0352 (patchset `40f7cefa...`; exec `90326b5e...`) build
+  reproducibly under the hash gates, and the CI build tree matches the lab
+  build tree file-for-file. Neither line was booted from this repository.
 - **device-verified (2026-11-06)**: 0179 (patchset `10b1e2e8...`; exec
   `a4fb021e...`) booted on the author's unit: native EINT14 touch, G1–G6,
   first 10 min + ~5 min stress, 1–5-finger HID, no panic/stuck/re-activation;
